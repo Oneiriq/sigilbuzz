@@ -71,10 +71,12 @@ pub struct Gvar<'a> {
     glyph_count: u16,
     long_offsets: bool,
     data_array_off: u32,
-    /// Parsed per-glyph offsets (already doubled for short form). One
-    /// more than `glyph_count`, so adjacent pairs yield each glyph's
-    /// byte range.
-    glyph_offsets: Vec<u32>,
+    /// The per-glyph data offsets, read on demand: `glyph_count + 1`
+    /// big-endian entries, halved `u16`s in the short form and `u32`s
+    /// in the long form, so adjacent pairs give each glyph's byte
+    /// range. Parsing never copies them out, so it stays cheap for
+    /// fonts with tens of thousands of glyphs.
+    glyph_offsets: &'a [u8],
 }
 
 /// A single contour point delta emitted by [`Gvar::glyph_deltas`].
@@ -108,22 +110,10 @@ impl<'a> Gvar<'a> {
         let data_array_off = r.read_u32()?;
         let long_offsets = flags & 0x0001 != 0;
 
-        // Parse glyph offset array: glyphCount + 1 entries of at least
-        // 2 bytes each, so the remaining bytes bound the capacity.
-        let n_offsets = glyph_count as usize + 1;
-        let mut glyph_offsets = Vec::with_capacity(n_offsets.min(r.remaining() / 2));
-        if long_offsets {
-            for _ in 0..n_offsets {
-                glyph_offsets.push(r.read_u32()?);
-            }
-        } else {
-            for _ in 0..n_offsets {
-                // Short offsets are stored halved: the spec multiplies
-                // by two to recover the byte offset.
-                let half = u32::from(r.read_u16()?);
-                glyph_offsets.push(half * 2);
-            }
-        }
+        // The glyph offset array: glyphCount + 1 entries, checked to
+        // fit here and read when a glyph is looked up.
+        let entry_size = if long_offsets { 4 } else { 2 };
+        let glyph_offsets = r.read_bytes((glyph_count as usize + 1) * entry_size)?;
 
         Ok(Self {
             data,
@@ -181,7 +171,9 @@ impl<'a> Gvar<'a> {
         // point index. A `Vec<PointDelta>` gives deterministic
         // output and avoids HashMap ordering nondeterminism.
         let mut acc = DeltaAccumulator::default();
-        let walked = self.walk_tuples(glyph_id, coords, usize::from(num_points), |t| {
+        let mut work = MAX_TUPLE_WORK;
+        let num_points = usize::from(num_points);
+        let walked = self.walk_tuples(glyph_id, coords, num_points, &mut work, |t| {
             match t.points {
                 None => {
                     for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate() {
@@ -269,6 +261,21 @@ impl<'a> Gvar<'a> {
         points: &[(i32, i32)],
         end_points: &[u16],
     ) -> Result<Vec<(f32, f32)>> {
+        let mut work = MAX_TUPLE_WORK;
+        self.glyph_point_deltas_with(glyph_id, coords, points, end_points, &mut work)
+    }
+
+    /// [`Gvar::glyph_point_deltas`], charging the tuples it decodes to
+    /// `work`, which an outline walk shares across every glyph it
+    /// visits (see [`MAX_TUPLE_WORK`]).
+    pub(crate) fn glyph_point_deltas_with(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        points: &[(i32, i32)],
+        end_points: &[u16],
+        work: &mut usize,
+    ) -> Result<Vec<(f32, f32)>> {
         let count = points.len() + PHANTOM_COUNT;
         let mut total = alloc::vec![(0.0_f32, 0.0_f32); count];
         // Contour membership, from the end point numbers. Points past
@@ -284,7 +291,7 @@ impl<'a> Gvar<'a> {
         // points.
         let mut tuple: Vec<(f32, f32)> = Vec::new();
         let mut listed: Vec<bool> = Vec::new();
-        self.walk_tuples(glyph_id, coords, count, |t| match t.points {
+        self.walk_tuples(glyph_id, coords, count, work, |t| match t.points {
             None => {
                 for ((slot, &x), &y) in total.iter_mut().zip(t.xs).zip(t.ys) {
                     slot.0 += t.scalar * x as f32;
@@ -317,12 +324,15 @@ impl<'a> Gvar<'a> {
 
     /// Deltas of the four phantom points of a glyph with `num_points`
     /// points of its own (contour points, or components). Only listed
-    /// deltas apply: phantom points are on no contour.
+    /// deltas apply: phantom points are on no contour. The tuples it
+    /// decodes are charged to `work`, as in
+    /// [`Gvar::glyph_point_deltas_with`].
     pub(crate) fn phantom_deltas(
         &self,
         glyph_id: u16,
         coords: &[f32],
         num_points: usize,
+        work: &mut usize,
     ) -> Result<[(f32, f32); 4]> {
         let mut out = [(0.0_f32, 0.0_f32); PHANTOM_COUNT];
         let mut add = |i: usize, x: i32, y: i32, scalar: f32| {
@@ -331,17 +341,16 @@ impl<'a> Gvar<'a> {
                 slot.1 += scalar * y as f32;
             }
         };
-        self.walk_tuples(glyph_id, coords, num_points + PHANTOM_COUNT, |t| {
-            match t.points {
-                None => {
-                    for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate().skip(num_points) {
-                        add(i, x, y, t.scalar);
-                    }
+        let count = num_points + PHANTOM_COUNT;
+        self.walk_tuples(glyph_id, coords, count, work, |t| match t.points {
+            None => {
+                for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate().skip(num_points) {
+                    add(i, x, y, t.scalar);
                 }
-                Some(numbers) => {
-                    for ((&pt, &x), &y) in numbers.iter().zip(t.xs).zip(t.ys) {
-                        add(usize::from(pt), x, y, t.scalar);
-                    }
+            }
+            Some(numbers) => {
+                for ((&pt, &x), &y) in numbers.iter().zip(t.xs).zip(t.ys) {
+                    add(usize::from(pt), x, y, t.scalar);
                 }
             }
         })?;
@@ -352,15 +361,31 @@ impl<'a> Gvar<'a> {
         if glyph_id >= self.glyph_count {
             return None;
         }
-        let start = *self.glyph_offsets.get(glyph_id as usize)?;
-        let end = *self.glyph_offsets.get(glyph_id as usize + 1)?;
-        Some((start, end))
+        let i = usize::from(glyph_id);
+        Some((self.glyph_offset(i)?, self.glyph_offset(i + 1)?))
+    }
+
+    /// Entry `i` of the glyph offset array, as a byte offset into the
+    /// glyph variation data. Short offsets are stored halved: the spec
+    /// multiplies them by two.
+    fn glyph_offset(&self, i: usize) -> Option<u32> {
+        if self.long_offsets {
+            let b = self.glyph_offsets.get(i * 4..i * 4 + 4)?;
+            Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        } else {
+            let b = self.glyph_offsets.get(i * 2..i * 2 + 2)?;
+            Some(u32::from(u16::from_be_bytes([b[0], b[1]])) * 2)
+        }
     }
 
     /// Decodes every tuple of `glyph_id` whose region scalar at
     /// `coords` is not zero and hands it to `visit`, in table order.
     /// `num_points` is the glyph's point count including the phantom
     /// points: the all-points form packs that many deltas.
+    ///
+    /// Each tuple header read costs one unit of `work`, and each tuple
+    /// decoded costs `num_points` more, as HarfBuzz charges its glyph
+    /// budget per tuple. Running out fails the walk.
     ///
     /// Glyph ids past the end and glyphs with no data visit nothing.
     /// Errors carry offsets from the start of the table.
@@ -369,6 +394,7 @@ impl<'a> Gvar<'a> {
         glyph_id: u16,
         coords: &[f32],
         num_points: usize,
+        work: &mut usize,
         mut visit: F,
     ) -> Result<()>
     where
@@ -406,7 +432,7 @@ impl<'a> Gvar<'a> {
                 context: "gvar glyph data past end of table",
             });
         };
-        self.walk_glyph_data(body, coords, num_points, &mut visit)
+        self.walk_glyph_data(body, coords, num_points, work, &mut visit)
             .map_err(|e| rebase(e, gvd_start))
     }
 
@@ -417,6 +443,7 @@ impl<'a> Gvar<'a> {
         body: &[u8],
         coords: &[f32],
         num_points: usize,
+        work: &mut usize,
         visit: &mut dyn FnMut(&TupleDeltas<'_>),
     ) -> Result<()> {
         let mut r = Reader::new(body);
@@ -431,6 +458,7 @@ impl<'a> Gvar<'a> {
         let mut headers: Vec<TupleVariationHeader> =
             Vec::with_capacity((tuple_count as usize).min(r.remaining() / 4));
         for _ in 0..tuple_count {
+            charge(work, 1, r.position())?;
             headers.push(TupleVariationHeader::read(&mut r, self.axis_count)?);
         }
 
@@ -456,10 +484,11 @@ impl<'a> Gvar<'a> {
             None
         };
 
-        // Every visited tuple costs the caller work in proportion to
-        // the point count, so a glyph of many small tuples over many
-        // points is capped, as HarfBuzz charges its budget per tuple.
-        let mut work = 0usize;
+        // Scratch for each tuple's point numbers and deltas, reused so
+        // that decoding a tuple does not allocate.
+        let mut private: Vec<u16> = Vec::new();
+        let mut xs: Vec<i32> = Vec::new();
+        let mut ys: Vec<i32> = Vec::new();
         for header in &headers {
             let tuple_start = cursor;
             let tuple_data_len = header.variation_data_size as usize;
@@ -483,48 +512,44 @@ impl<'a> Gvar<'a> {
 
             // Compute the region scalar.
             let scalar = tuple_scalar(
-                &peak,
-                header.intermediate_start.as_deref(),
-                header.intermediate_end.as_deref(),
+                peak,
+                header.intermediate_start,
+                header.intermediate_end,
                 coords,
             );
             if scalar == 0.0 {
                 continue;
             }
 
-            work = work.saturating_add(num_points.max(1));
-            if work > MAX_TUPLE_WORK {
-                return Err(Error::Malformed {
-                    offset: 0,
-                    context: "gvar glyph variation data exceeds the work cap",
-                });
-            }
+            // Every decoded tuple costs the caller work in proportion
+            // to the point count, so a glyph of many small tuples over
+            // many points is capped, as HarfBuzz charges its budget per
+            // tuple.
+            charge(work, num_points.max(1), data_off + tuple_start)?;
 
             // Within the tuple's bytes: optional private point
             // numbers, then packed x deltas, then packed y deltas.
             let at = |e: Error| rebase(e, data_off + tuple_start);
             let mut tr = 0usize;
-            let private_points = if header.private_point_numbers {
-                let (pts, used) = read_packed_point_numbers(tuple_bytes).map_err(at)?;
-                tr = used;
-                Some(pts)
-            } else {
-                None
-            };
+            if header.private_point_numbers {
+                tr = read_packed_point_numbers_into(tuple_bytes, &mut private).map_err(at)?;
+            }
             // Neither private nor shared point numbers means all
             // points, as does an empty list.
-            let points: Option<&[u16]> = private_points
-                .as_deref()
-                .or(shared_points.as_deref())
-                .filter(|p| !p.is_empty());
+            let points: Option<&[u16]> = if header.private_point_numbers {
+                Some(private.as_slice())
+            } else {
+                shared_points.as_deref()
+            }
+            .filter(|p| !p.is_empty());
 
             // X and Y streams each carry exactly `n` deltas: one per
             // listed point, or one per point in the all-points form.
             let n = points.map_or(num_points, <[u16]>::len);
-            let (xs, consumed_x) = read_packed_deltas_n(&tuple_bytes[tr..], n)
+            let consumed_x = read_packed_deltas_into(&tuple_bytes[tr..], n, &mut xs)
                 .map_err(|e| rebase(e, data_off + tuple_start + tr))?;
             tr += consumed_x;
-            let (ys, _consumed_y) = read_packed_deltas_n(&tuple_bytes[tr..], n)
+            read_packed_deltas_into(&tuple_bytes[tr..], n, &mut ys)
                 .map_err(|e| rebase(e, data_off + tuple_start + tr))?;
             visit(&TupleDeltas {
                 scalar,
@@ -543,10 +568,23 @@ const GVAR_HEADER_SIZE: usize = 20;
 /// Phantom points gvar appends after a glyph's own points.
 const PHANTOM_COUNT: usize = 4;
 
-/// Cap on the points times tuples one glyph's variation data may make
-/// a caller walk. Real glyphs stay far below it: a few hundred points
-/// over at most a few hundred tuples.
-const MAX_TUPLE_WORK: usize = 1 << 24;
+/// Cap on the tuple work one walk may do: one unit per tuple header,
+/// plus the point count of every tuple it decodes. A call on one glyph
+/// gets the whole cap; an outline walk shares one cap across every
+/// glyph it visits, as HarfBuzz passes one budget (also `1 << 24`)
+/// down its `get_points` recursion. Real glyphs stay far below it: a
+/// few hundred points over at most a few hundred tuples.
+pub(crate) const MAX_TUPLE_WORK: usize = 1 << 24;
+
+/// Takes `cost` units from `work`, or fails with the byte offset of the
+/// tuple data that would overspend it.
+fn charge(work: &mut usize, cost: usize, offset: usize) -> Result<()> {
+    *work = work.checked_sub(cost).ok_or(Error::Malformed {
+        offset,
+        context: "gvar variation work exceeds the cap",
+    })?;
+    Ok(())
+}
 
 /// One tuple's decoded deltas, as [`Gvar::walk_tuples`] hands them out.
 struct TupleDeltas<'t> {
@@ -666,13 +704,16 @@ fn infer_delta(target: f32, prev: f32, next: f32, prev_delta: f32, next_delta: f
 // TupleVariationHeader
 // ----------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct TupleVariationHeader {
+/// One tuple variation header. The peak and intermediate rows borrow
+/// the table's bytes, `axis_count` big-endian F2DOT14 values each, so
+/// reading a header never allocates.
+#[derive(Debug, Clone, Copy)]
+struct TupleVariationHeader<'a> {
     variation_data_size: u16,
     tuple_index: u16,
-    embedded_peak: Option<Vec<f32>>,
-    intermediate_start: Option<Vec<f32>>,
-    intermediate_end: Option<Vec<f32>>,
+    embedded_peak: Option<&'a [u8]>,
+    intermediate_start: Option<&'a [u8]>,
+    intermediate_end: Option<&'a [u8]>,
     private_point_numbers: bool,
 }
 
@@ -681,22 +722,21 @@ const FLAG_INTERMEDIATE_REGION: u16 = 0x4000;
 const FLAG_PRIVATE_POINT_NUMBERS: u16 = 0x2000;
 const TUPLE_INDEX_MASK: u16 = 0x0FFF;
 
-impl TupleVariationHeader {
-    fn read(r: &mut Reader<'_>, axis_count: u16) -> Result<Self> {
+impl<'a> TupleVariationHeader<'a> {
+    fn read(r: &mut Reader<'a>, axis_count: u16) -> Result<Self> {
         let variation_data_size = r.read_u16()?;
         let tuple_index = r.read_u16()?;
-        // Each tuple is `axis_count` F2DOT14 values. Taking the bytes
-        // first means a truncated table fails before any allocation.
+        // Each tuple is `axis_count` F2DOT14 values.
         let row = usize::from(axis_count) * 2;
         let embedded_peak = if tuple_index & FLAG_EMBEDDED_PEAK != 0 {
-            Some(decode_f2dot14s(r.read_bytes(row)?))
+            Some(r.read_bytes(row)?)
         } else {
             None
         };
         let (intermediate_start, intermediate_end) = if tuple_index & FLAG_INTERMEDIATE_REGION != 0
         {
-            let s = decode_f2dot14s(r.read_bytes(row)?);
-            let e = decode_f2dot14s(r.read_bytes(row)?);
+            let s = r.read_bytes(row)?;
+            let e = r.read_bytes(row)?;
             (Some(s), Some(e))
         } else {
             (None, None)
@@ -712,15 +752,17 @@ impl TupleVariationHeader {
         })
     }
 
+    /// The tuple's peak row: its own, or the shared tuple it names.
+    /// `None` when the shared tuple does not exist.
     fn resolve_peak(
         &self,
-        gvar_data: &[u8],
+        gvar_data: &'a [u8],
         shared_tuples_off: usize,
         shared_tuple_count: u16,
         axis_count: u16,
-    ) -> Option<Vec<f32>> {
-        if let Some(ref peak) = self.embedded_peak {
-            return Some(peak.clone());
+    ) -> Option<&'a [u8]> {
+        if let Some(peak) = self.embedded_peak {
+            return Some(peak);
         }
         let idx = self.tuple_index & TUPLE_INDEX_MASK;
         if idx >= shared_tuple_count {
@@ -730,28 +772,27 @@ impl TupleVariationHeader {
         // Checked: `shared_tuples_off` is a u32 from the font, so the
         // sum can overflow a 32-bit usize.
         let base = shared_tuples_off.checked_add(idx as usize * row)?;
-        let bytes = gvar_data.get(base..base.checked_add(row)?)?;
-        Some(decode_f2dot14s(bytes))
+        gvar_data.get(base..base.checked_add(row)?)
     }
 }
 
-/// Decodes a run of big-endian F2DOT14 values. A trailing odd byte is
-/// ignored, which never happens for the even-length slices callers
-/// pass.
-fn decode_f2dot14s(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(2)
-        .map(|b| f32::from(i16::from_be_bytes([b[0], b[1]])) / 16384.0)
-        .collect()
+/// The F2DOT14 value at index `i` of a row of big-endian F2DOT14
+/// values, or `None` past the end.
+fn f2dot14_at(row: &[u8], i: usize) -> Option<f32> {
+    let b = row.get(i * 2..i * 2 + 2)?;
+    Some(f32::from(i16::from_be_bytes([b[0], b[1]])) / 16384.0)
 }
 
 // ----------------------------------------------------------------------------
 // Region scalar (mirrors OpenType spec's supportScalar).
 // ----------------------------------------------------------------------------
 
-fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords: &[f32]) -> f32 {
+/// The region scalar of a tuple at `coords`. `peak`, `start`, and `end`
+/// are rows of big-endian F2DOT14 values, one per axis.
+fn tuple_scalar(peak: &[u8], start: Option<&[u8]>, end: Option<&[u8]>, coords: &[f32]) -> f32 {
     let mut scalar: f32 = 1.0;
-    for (i, &p) in peak.iter().enumerate() {
+    for i in 0..peak.len() / 2 {
+        let p = f2dot14_at(peak, i).unwrap_or(0.0);
         let c = *coords.get(i).unwrap_or(&0.0);
         // Spec: a peak of zero on an axis means the axis does not
         // participate in this region; skip without touching the
@@ -764,7 +805,10 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
         }
         // Default region: [0, peak] or [peak, 0] depending on sign.
         let (s, e) = match (start, end) {
-            (Some(s), Some(e)) => (*s.get(i).unwrap_or(&0.0), *e.get(i).unwrap_or(&0.0)),
+            (Some(s), Some(e)) => (
+                f2dot14_at(s, i).unwrap_or(0.0),
+                f2dot14_at(e, i).unwrap_or(0.0),
+            ),
             _ => {
                 if p > 0.0 {
                     (0.0, p)
@@ -805,6 +849,15 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
 /// glyph"; signaled by an empty returned `Vec`. Callers must treat
 /// that as the all-points case rather than a zero-length point list.
 pub(crate) fn read_packed_point_numbers(data: &[u8]) -> Result<(Vec<u16>, usize)> {
+    let mut out = Vec::new();
+    let used = read_packed_point_numbers_into(data, &mut out)?;
+    Ok((out, used))
+}
+
+/// [`read_packed_point_numbers`] into `out`, which it clears first.
+/// Returns the number of bytes consumed.
+fn read_packed_point_numbers_into(data: &[u8], out: &mut Vec<u16>) -> Result<usize> {
+    out.clear();
     if data.is_empty() {
         return Err(Error::Truncated {
             offset: 0,
@@ -828,10 +881,10 @@ pub(crate) fn read_packed_point_numbers(data: &[u8]) -> Result<(Vec<u16>, usize)
     if count == 0 {
         // Shortcut: all points. Caller discovers the actual length
         // from the delta stream.
-        return Ok((Vec::new(), cursor));
+        return Ok(cursor);
     }
 
-    let mut out = Vec::with_capacity(count as usize);
+    out.reserve(count as usize);
     let mut last: u32 = 0;
     while out.len() < count as usize {
         if cursor >= data.len() {
@@ -872,7 +925,7 @@ pub(crate) fn read_packed_point_numbers(data: &[u8]) -> Result<(Vec<u16>, usize)
             out.push(last.min(u32::from(u16::MAX)) as u16);
         }
     }
-    Ok((out, cursor))
+    Ok(cursor)
 }
 
 // ----------------------------------------------------------------------------
@@ -887,8 +940,21 @@ const DELTA_COUNT_MASK: u8 = 0x3F;
 /// byte covers up to 64 values; deltas are i8, i16, or implicit
 /// zeros. Unused bytes inside an over-long run are consumed to keep
 /// the cursor consistent for the next decode call.
+#[cfg(test)]
 fn read_packed_deltas_n(data: &[u8], n: usize) -> Result<(Vec<i32>, usize)> {
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::new();
+    let used = read_packed_deltas_into(data, n, &mut out)?;
+    Ok((out, used))
+}
+
+/// Decodes exactly `n` packed delta values from `data` into `out`,
+/// which it clears first, and returns the number of bytes consumed.
+/// Each control byte covers up to 64 values; deltas are i8, i16, or
+/// implicit zeros. Unused bytes inside an over-long run are consumed
+/// to keep the cursor consistent for the next decode call.
+fn read_packed_deltas_into(data: &[u8], n: usize, out: &mut Vec<i32>) -> Result<usize> {
+    out.clear();
+    out.reserve(n);
     let mut cursor = 0usize;
     while out.len() < n {
         if cursor >= data.len() {
@@ -950,7 +1016,7 @@ fn read_packed_deltas_n(data: &[u8], n: usize) -> Result<(Vec<i32>, usize)> {
             }
         }
     }
-    Ok((out, cursor))
+    Ok(cursor)
 }
 
 /// Per-point delta sums in order of first appearance.
@@ -1018,6 +1084,20 @@ mod tests {
         assert_eq!(g.glyph_count(), 2);
         assert_eq!(g.axis_count(), 1);
         assert!(!g.long_offsets());
+        // Short offsets are halved: entries 0, 3, 5 give glyph 0 bytes 0
+        // to 6 and glyph 1 bytes 6 to 10.
+        out[22..24].copy_from_slice(&3u16.to_be_bytes());
+        out[24..26].copy_from_slice(&5u16.to_be_bytes());
+        let g = Gvar::parse(&out).unwrap();
+        assert_eq!(g.glyph_range(0), Some((0, 6)));
+        assert_eq!(g.glyph_range(1), Some((6, 10)));
+        assert_eq!(g.glyph_range(2), None);
+        // The offset array must fit, though parsing reads none of it.
+        out.pop();
+        assert!(matches!(
+            Gvar::parse(&out),
+            Err(Error::Truncated { offset: 20, .. })
+        ));
     }
 
     #[test]
@@ -1129,11 +1209,27 @@ mod tests {
 
     #[test]
     fn tuple_scalar_peaks_at_one_and_tapers() {
-        let peak = [1.0];
+        let peak = 0x4000u16.to_be_bytes(); // 1.0
         assert!((tuple_scalar(&peak, None, None, &[1.0]) - 1.0).abs() < 1e-6);
         assert!((tuple_scalar(&peak, None, None, &[0.5]) - 0.5).abs() < 1e-6);
         assert!(tuple_scalar(&peak, None, None, &[0.0]).abs() < 1e-6);
         assert!(tuple_scalar(&peak, None, None, &[-0.5]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tuple_scalar_reads_intermediate_rows() {
+        // Peak 0.5 inside the region from 0.25 to 1.0, on one axis.
+        let (peak, start, end) = (0x2000u16, 0x1000u16, 0x4000u16);
+        let row = |v: u16| v.to_be_bytes();
+        let scalar = |c: f32| tuple_scalar(&row(peak), Some(&row(start)), Some(&row(end)), &[c]);
+        assert!((scalar(0.5) - 1.0).abs() < 1e-6);
+        assert!((scalar(0.375) - 0.5).abs() < 1e-6);
+        assert!((scalar(0.75) - 0.5).abs() < 1e-6);
+        assert!(scalar(0.2).abs() < 1e-6);
+        assert!(scalar(1.0).abs() < 1e-6);
+        // Coords past the rows play no part.
+        let two_axes = tuple_scalar(&row(peak), Some(&row(start)), Some(&row(end)), &[0.5, 1.0]);
+        assert!((two_axes - 1.0).abs() < 1e-6);
     }
 
     fn build_single_glyph_gvar() -> Vec<u8> {

@@ -52,7 +52,7 @@ mod simple;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::gvar::Gvar;
+use crate::tables::gvar::{Gvar, MAX_TUPLE_WORK};
 use crate::tables::hmtx::Hmtx;
 use crate::tables::loca::Loca;
 use crate::tables::outline::OutlineSink;
@@ -154,6 +154,11 @@ const MAX_FLATTEN_POINTS: usize = 1 << 18;
 struct FlattenBudget {
     glyphs: u32,
     points: usize,
+    /// `gvar` tuple work left for the whole walk. Every glyph the walk
+    /// visits decodes its own tuples, and a composite can visit the
+    /// same glyph many times, so one cap ([`MAX_TUPLE_WORK`]) covers
+    /// them all, as HarfBuzz shares one budget across `get_points`.
+    work: usize,
 }
 
 impl FlattenBudget {
@@ -161,6 +166,7 @@ impl FlattenBudget {
         Self {
             glyphs: MAX_FLATTEN_GLYPHS,
             points: MAX_FLATTEN_POINTS,
+            work: MAX_TUPLE_WORK,
         }
     }
 
@@ -483,14 +489,19 @@ impl<'a> Glyf<'a> {
 
     /// Returns the four phantom points of `glyph_id` (left side
     /// bearing origin, advance origin, top origin, bottom origin) at
-    /// the normalized variation `coords`, in the glyph's own frame.
+    /// the normalized variation `coords`, in the glyph's own frame. The
+    /// parameters run in the order of [`Glyf::outline_at_coords`].
     ///
-    /// The default points come from `hmtx` and, when present, `vmtx`,
-    /// as for composite anchors. `gvar` then moves them by the glyph's
-    /// phantom deltas. A composite glyph takes the phantom points of
-    /// its last component flagged `USE_MY_METRICS`, at the same
-    /// coords, as HarfBuzz does. With no `gvar`, or coords that are
-    /// all zero, the points are the defaults.
+    /// The default points come from `metrics` (`hmtx` and, when
+    /// present, `vmtx`), as for composite anchors. `gvar` then moves
+    /// them by the glyph's phantom deltas. A composite glyph takes the
+    /// phantom points of its last component flagged `USE_MY_METRICS`,
+    /// at the same coords, as HarfBuzz does, at the default instance
+    /// too. With no `gvar`, or coords that are all zero, nothing moves.
+    ///
+    /// A `USE_MY_METRICS` component that leads back to a composite
+    /// being walked is skipped where HarfBuzz's cycle detector skips
+    /// it, and the glyph there keeps its own points.
     ///
     /// Without `HVAR`, HarfBuzz takes a varied glyph's advance from
     /// these points: the x distance from the first to the second,
@@ -499,7 +510,8 @@ impl<'a> Glyf<'a> {
     /// # Errors
     ///
     /// Returns an error when the glyph's `glyf`, `gvar`, or metrics
-    /// data is malformed, or composite glyphs nest too deep.
+    /// data is malformed, composite glyphs nest too deep, or the walk
+    /// runs over its work budget.
     ///
     /// # Examples
     ///
@@ -515,7 +527,7 @@ impl<'a> Glyf<'a> {
     /// let metrics = PhantomMetrics { hmtx: &hmtx, vmtx: None };
     /// let space = 9;
     /// // The space advances 248 units at the default weight, 265 at 900.
-    /// let pp = glyf.phantom_points_at_coords(&loca, space, &metrics, gvar.as_ref(), &[1.0])?;
+    /// let pp = glyf.phantom_points_at_coords(&loca, space, gvar.as_ref(), &[1.0], &metrics)?;
     /// assert_eq!((pp[1].0 - pp[0].0).round(), 265.0);
     /// # Ok::<(), sigilbuzz::Error>(())
     /// ```
@@ -523,9 +535,9 @@ impl<'a> Glyf<'a> {
         &self,
         loca: &Loca<'_>,
         glyph_id: u16,
-        metrics: &PhantomMetrics<'_>,
         gvar: Option<&Gvar<'_>>,
         coords: &[f32],
+        metrics: &PhantomMetrics<'_>,
     ) -> Result<[(f32, f32); 4]> {
         let cx = FlattenCtx {
             loca,
@@ -571,7 +583,9 @@ impl<'a> Glyf<'a> {
     }
 
     /// Phantom points of `glyph_id` with its gvar deltas applied when
-    /// `cx` carries variations: HarfBuzz's phantom-only `get_points`.
+    /// `cx` carries variations, and a composite's taken from its
+    /// `USE_MY_METRICS` component either way: HarfBuzz's phantom-only
+    /// `get_points`.
     /// `depth` and `budget` bound the walk through `USE_MY_METRICS`
     /// components as they bound [`Glyf::flatten`].
     fn varied_phantoms(
@@ -582,6 +596,31 @@ impl<'a> Glyf<'a> {
         depth: u8,
         budget: &mut FlattenBudget,
     ) -> Result<[(f32, f32); 4]> {
+        self.phantom_walk(cx, metrics, glyph_id, depth, budget, &mut Vec::new())
+    }
+
+    /// [`Glyf::varied_phantoms`] inside the composites of `path`, which
+    /// holds, for each composite on the way down, the component it is
+    /// visiting.
+    ///
+    /// A component that would close a cycle is skipped, as HarfBuzz's
+    /// decycler (`hb-decycler.hh`) skips it: the composite at `path`
+    /// index `i` compares each component with the one the composite at
+    /// index `i / 2` is visiting, a tortoise that moves at half the
+    /// speed of the walk. A cycle is caught within twice its length,
+    /// and the glyph where it closes keeps its own phantom points.
+    // The walk threads its tables, limits, and path through every
+    // level of the recursion.
+    #[allow(clippy::too_many_arguments)]
+    fn phantom_walk(
+        &self,
+        cx: &FlattenCtx<'_>,
+        metrics: &PhantomMetrics<'_>,
+        glyph_id: u16,
+        depth: u8,
+        budget: &mut FlattenBudget,
+        path: &mut Vec<u16>,
+    ) -> Result<[(f32, f32); 4]> {
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(Error::Malformed {
                 offset: 0,
@@ -590,9 +629,6 @@ impl<'a> Glyf<'a> {
         }
         budget.take_glyph()?;
         let mut pp = self.phantom_points(cx.loca, glyph_id, metrics)?;
-        let Some(var) = cx.var else {
-            return Ok(pp);
-        };
         // The glyph's own gvar points come first: contour points for a
         // simple glyph, components for a composite, none when empty.
         let mut components = Vec::new();
@@ -610,17 +646,36 @@ impl<'a> Glyf<'a> {
             }
             _ => 0,
         };
-        let deltas = var.gvar.phantom_deltas(glyph_id, var.coords, own_points)?;
-        for (p, d) in pp.iter_mut().zip(deltas) {
-            p.0 += d.0;
-            p.1 += d.1;
+        // gvar moves the points away from the default instance. The
+        // USE_MY_METRICS components below apply at every instance, as in
+        // HarfBuzz, so the points stay continuous as the coords reach
+        // zero.
+        if let Some(var) = cx.var {
+            let work = &mut budget.work;
+            let deltas = var
+                .gvar
+                .phantom_deltas(glyph_id, var.coords, own_points, work)?;
+            for (p, d) in pp.iter_mut().zip(deltas) {
+                p.0 += d.0;
+                p.1 += d.1;
+            }
         }
+        if components.is_empty() {
+            return Ok(pp);
+        }
+        let node = path.len();
+        path.push(glyph_id);
         for c in components
             .iter()
             .filter(|c| c.flags & COMP_USE_MY_METRICS != 0)
         {
-            pp = self.varied_phantoms(cx, metrics, c.glyph_id, depth + 1, budget)?;
+            path[node] = c.glyph_id;
+            if node > 0 && path[node / 2] == c.glyph_id {
+                continue;
+            }
+            pp = self.phantom_walk(cx, metrics, c.glyph_id, depth + 1, budget, path)?;
         }
+        path.truncate(node);
         Ok(pp)
     }
 

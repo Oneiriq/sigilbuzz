@@ -29,6 +29,12 @@
 //! `(0, 0)` of the output, where row 0 is a synthesized all-zero
 //! row, equivalent to "no variation for this gid".
 //!
+//! That one subtable holds at most 65,535 rows, its `itemCount` being
+//! a `u16`. The maps of a VVAR can pull more distinct rows than there
+//! are glyphs, so a crafted source can need more. Such an HVAR fails
+//! the subset, and such a VVAR is left out with a warning, rather than
+//! wrap the count and point glyphs at the wrong rows.
+//!
 //! HVAR keeps only its advance map, as it always has. VVAR keeps every
 //! map the source carries: the instancer folds the top side bearing
 //! deltas into `vmtx` and the vertical origin deltas into `VORG`.
@@ -39,7 +45,9 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
-use crate::variation_store::{pull_row, read_regions, rebuild_store, rebuilt_store_len, PulledRow};
+use crate::variation_store::{
+    pull_row, read_regions, rebuild_store, rebuilt_store_len, PulledRow, MAX_ROWS,
+};
 use crate::warnings::Warnings;
 use crate::{GlyphId, SubsetError};
 
@@ -68,6 +76,7 @@ struct MetricsVarLayout {
     store_past_end: &'static str,
     rows_overlap: &'static str,
     too_large: &'static str,
+    too_many_rows: &'static str,
 }
 
 /// HVAR: version, store, then the advance, LSB and RSB maps. Only the
@@ -80,6 +89,7 @@ const HVAR: MetricsVarLayout = MetricsVarLayout {
     store_past_end: "HVAR store offset past end",
     rows_overlap: "HVAR store rows overlap past the store size",
     too_large: "HVAR rebuilt store too large",
+    too_many_rows: "HVAR rebuilt store has too many rows",
 };
 
 /// VVAR: version, store, then the advance height, TSB, BSB and vertical
@@ -92,6 +102,7 @@ const VVAR: MetricsVarLayout = MetricsVarLayout {
     store_past_end: "VVAR store offset past end",
     rows_overlap: "VVAR store rows overlap past the store size",
     too_large: "VVAR rebuilt store too large",
+    too_many_rows: "VVAR rebuilt store has too many rows",
 };
 
 /// Subsets HVAR for `kept` (kept gids in new-gid order). Returns
@@ -253,7 +264,16 @@ fn subset_metrics_var(
                     match slot_by_row.get(&key) {
                         Some(&s) => s,
                         None => {
-                            let idx = pulled_rows.len() as u16;
+                            // The rebuilt subtable counts its rows in a
+                            // u16. Up to four maps pull rows into it, so
+                            // distinct rows can outnumber the glyphs.
+                            let idx = u16::try_from(pulled_rows.len())
+                                .ok()
+                                .filter(|&idx| usize::from(idx) < MAX_ROWS)
+                                .ok_or(Unreadable {
+                                    offset: store_off,
+                                    context: layout.too_many_rows,
+                                })?;
                             pulled_rows.push(PulledRow {
                                 region_indexes: key.0.clone(),
                                 deltas: key.1.clone(),
@@ -282,7 +302,7 @@ fn subset_metrics_var(
             context: layout.too_large,
         });
     }
-    let rebuilt = rebuild_store(&pulled_rows, axis_count, &regions);
+    let rebuilt = rebuild_store(&pulled_rows, axis_count, &regions).map_err(&store_err)?;
 
     // Assemble: the header, then the store right after it (so its
     // offset is known before the maps are written), then each map.
@@ -639,6 +659,128 @@ mod tests {
         let kept: Vec<u16> = (0..N).collect();
         let r = subset_hvar(&face, &kept);
         assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+    }
+
+    /// One subtable over regions 0 and 1 (or 1 and 0 when `swapped`)
+    /// with `count` distinct narrow rows: row i holds the low and high
+    /// bytes of i.
+    fn distinct_rows(count: u32, swapped: bool) -> TestSubtable {
+        TestSubtable {
+            region_indexes: if swapped {
+                alloc::vec![1, 0]
+            } else {
+                alloc::vec![0, 1]
+            },
+            rows: (0..count)
+                .map(|i| alloc::vec![(i & 0xFF) as u8 as i8, (i >> 8) as u8 as i8])
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn hvar_rows_past_one_subtable_are_an_error() {
+        use sigilbuzz::tables::hvar::Hvar as ParsedHvar;
+        // Glyph i maps to row i, and every row is distinct, so n glyphs
+        // pull n rows next to the synthesized zero row.
+        let store = test_store(1, 2, &[distinct_rows(65_535, false)], &[0]);
+        let font = font_with_hvar(&store, None);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+
+        // 65,535 rows in all: the most one subtable holds.
+        let kept: Vec<u16> = (0..65_534).collect();
+        let out = subset_hvar(&face, &kept).unwrap().expect("HVAR");
+        let hvar = ParsedHvar::parse(&out).unwrap();
+        // Row 65,533 holds 0xFD and 0xFF, -3 and -1.
+        assert_eq!(hvar.advance_delta(65_533, &[0.5]), -4.0);
+
+        // One more glyph used to wrap itemCount to 0.
+        let kept: Vec<u16> = (0..65_535).collect();
+        assert_eq!(
+            subset_hvar(&face, &kept),
+            Err(SubsetError::Unsupported(
+                "HVAR rebuilt store has too many rows"
+            ))
+        );
+    }
+
+    #[test]
+    fn hvar_rows_over_too_many_regions_are_an_error() {
+        // One row over 32,768 regions: wordDeltaCount cannot say that
+        // every column is wide.
+        let store = test_store(
+            1,
+            0,
+            &[TestSubtable {
+                region_indexes: (0..0x8000).collect(),
+                rows: alloc::vec![alloc::vec![1; 0x8000]],
+            }],
+            &[0],
+        );
+        let font = font_with_hvar(&store, None);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        assert_eq!(
+            subset_hvar(&face, &[0]),
+            Err(SubsetError::Unsupported(
+                "ItemVariationStore rows reference more than 32,767 regions"
+            ))
+        );
+    }
+
+    /// A format 0 DeltaSetIndexMap that maps glyph i to `(outer, i)`,
+    /// for `count` glyphs, in two-byte entries with 15 inner bits.
+    fn outer_index_map(outer: u16, count: u16) -> Vec<u8> {
+        let mut map = alloc::vec![0, 0x1E];
+        map.extend_from_slice(&count.to_be_bytes());
+        for inner in 0..count {
+            map.extend_from_slice(&((outer << 15) | inner).to_be_bytes());
+        }
+        map
+    }
+
+    #[test]
+    fn vvar_maps_pulling_too_many_rows_leave_it_out_with_a_warning() {
+        // The advance map reads one subtable and the TSB map the other,
+        // 32,768 distinct rows each: 65,537 rows with the zero row, for
+        // 32,768 glyphs. The rows' slots used to wrap past 65,535.
+        const N: u16 = 0x8000;
+        let store = test_store(
+            1,
+            2,
+            &[
+                distinct_rows(u32::from(N), false),
+                distinct_rows(u32::from(N), true),
+            ],
+            &[0, 1],
+        );
+        let advance = outer_index_map(0, N);
+        let tsb = outer_index_map(1, N);
+        let font = font_with_vvar(
+            &store,
+            [Some(advance.as_slice()), Some(tsb.as_slice()), None, None],
+        );
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let kept: Vec<u16> = (0..N).collect();
+        let sink = Warnings::default();
+        assert!(subset_vvar(&face, &kept, &sink).is_none());
+        let got: Vec<_> = sink
+            .into_sorted()
+            .iter()
+            .map(|w| (w.table, w.offset, w.context, w.dropped))
+            .collect();
+        assert_eq!(
+            got,
+            [(
+                tag::VVAR,
+                24,
+                "VVAR rebuilt store has too many rows",
+                "the whole table"
+            )]
+        );
+
+        // Half the glyphs pull 32,769 rows, which fit.
+        let sink = Warnings::default();
+        assert!(subset_vvar(&face, &kept[..usize::from(N / 2)], &sink).is_some());
+        assert!(sink.into_sorted().is_empty());
     }
 
     /// A format 0 DeltaSetIndexMap with one-byte entries that hold the

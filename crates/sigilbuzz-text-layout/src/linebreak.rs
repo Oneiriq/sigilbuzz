@@ -54,24 +54,49 @@ pub enum BreakOpportunity {
 /// // KeepAll breaks only at the space (and at the end).
 /// assert_eq!(breaks(WordBreak::KeepAll), [10, 16]);
 /// ```
+///
+/// CSS adds values to `word-break` over time (CSS Text 4 has
+/// `auto-phrase`), so the enum is `#[non_exhaustive]`: a `match` on it
+/// outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum WordBreak {
     /// The default rules of UAX #14 (CSS `word-break: normal`).
     /// Ideographs and Hangul syllables break between characters, and
     /// words in alphabetic scripts break at spaces and punctuation.
     #[default]
     Normal,
-    /// CSS `word-break: keep-all`. No implicit break between two
-    /// typographic letter units: letters and numbers (General_Category
-    /// L* and N*) and characters of class NU, AL, AI, or ID. Korean
-    /// then breaks between words (at spaces) instead of between
-    /// syllables. Everything else, including punctuation and spaces,
-    /// breaks as under [`WordBreak::Normal`].
+    /// CSS `word-break: keep-all`, with the letter units Blink uses:
+    /// there is no implicit break between two letters or numbers
+    /// (General_Category L* or N*) unless one of them is of class SA.
+    /// Korean then breaks between words (at spaces) instead of between
+    /// syllables, and runs of ideographs and kana stay together.
+    /// Everything else, including punctuation, spaces, symbols, and
+    /// emoji, breaks as under [`WordBreak::Normal`].
+    ///
+    /// So a Korean word is not always kept whole. A particle after a
+    /// closing bracket, a closing quotation mark, or `%` can still wrap
+    /// onto the next line by itself: `(한국어)를` and `50%를` may break
+    /// before `를`. UAX #14 allows a break between such punctuation and
+    /// a Hangul syllable, and keep-all removes only the breaks between
+    /// two letters. Blink breaks there too.
+    ///
+    /// The Southeast Asian scripts of class SA keep their own breaks,
+    /// so a Thai word followed by Chinese can still break between the
+    /// two. CSS Text also counts the other characters of class NU, AL,
+    /// AI, and ID as letter units, which would keep an emoji of class
+    /// ID with the Hangul around it but not one of class EB. Blink
+    /// counts neither, and neither does this crate: an emoji between
+    /// two syllables allows a break on either side.
     KeepAll,
-    /// CSS `word-break: break-all`. Letters and digits of class AL,
-    /// HL, NU, AI, and SA are treated as ideographs (ID), so words in
-    /// any script may break between characters. Punctuation still
-    /// follows the default rules.
+    /// CSS `word-break: break-all`. The characters of class AL, HL, NU,
+    /// AI, SA (but not its combining marks), CJ, SG, and XX are treated
+    /// as ideographs (ID), as ICU4X does, so words in any script may
+    /// break between characters, and Japanese may break before small
+    /// kana. Besides letters and digits, that covers the ordinary
+    /// symbols of class AL, such as `#`, `&`, `*`, `@`, and `_`, and
+    /// unassigned and private use code points. Punctuation of the other
+    /// classes still follows the default rules.
     BreakAll,
 }
 
@@ -157,9 +182,12 @@ fn resolve(c: char, word_break: WordBreak) -> Base {
     use LineBreakClass as L;
     let (class, flags) = lookup(c);
     let class = match class {
-        L::AL | L::HL | L::NU | L::AI if word_break == WordBreak::BreakAll => L::ID,
         L::SA if flags & SA_MARK != 0 => L::CM,
-        L::SA if word_break == WordBreak::BreakAll => L::ID,
+        L::AL | L::HL | L::NU | L::AI | L::SA | L::CJ | L::SG | L::XX
+            if word_break == WordBreak::BreakAll =>
+        {
+            L::ID
+        }
         L::AI | L::SG | L::XX | L::SA => L::AL,
         L::CJ => L::NS,
         other => other,
@@ -630,10 +658,12 @@ pub fn line_break_opportunities(text: &str) -> LineBreakIter<'_> {
 /// breaking.
 ///
 /// [`WordBreak::Normal`] gives the same breaks as
-/// [`line_break_opportunities`]. [`WordBreak::KeepAll`] keeps Korean
-/// words (and CJK runs) whole and breaks them at spaces and
-/// punctuation. [`WordBreak::BreakAll`] lets any word break between
-/// letters.
+/// [`line_break_opportunities`]. [`WordBreak::KeepAll`] removes the
+/// breaks between letters, so Korean breaks at spaces instead of
+/// between syllables, and runs of ideographs and kana stay together.
+/// Punctuation keeps its default breaks, so a particle after a closing
+/// bracket, a closing quotation mark, or `%` can still start a line.
+/// [`WordBreak::BreakAll`] lets any word break between letters.
 ///
 /// ```
 /// use sigilbuzz_text_layout::{line_break_opportunities_with, WordBreak};
@@ -912,6 +942,47 @@ mod tests {
     }
 
     #[test]
+    fn keep_all_lets_a_particle_wrap_after_punctuation() {
+        // Keep-all removes only the breaks between two letters. After a
+        // closing bracket, a closing quotation mark, or '%', UAX #14
+        // allows a break before a Hangul syllable (LB31; LB19a since
+        // both sides of the quotation mark are East Asian), so the
+        // particle can start a line. Blink breaks at the same places.
+        let keep_all = |text| segments(text, WordBreak::KeepAll);
+        // "(한국어)를"
+        assert_eq!(
+            keep_all("(\u{D55C}\u{AD6D}\u{C5B4})\u{B97C}"),
+            ["(\u{D55C}\u{AD6D}\u{C5B4})", "\u{B97C}"]
+        );
+        // "「세로쓰기」도"
+        assert_eq!(
+            keep_all("\u{300C}\u{C138}\u{B85C}\u{C4F0}\u{AE30}\u{300D}\u{B3C4}"),
+            [
+                "\u{300C}\u{C138}\u{B85C}\u{C4F0}\u{AE30}\u{300D}",
+                "\u{B3C4}"
+            ]
+        );
+        // "50%를 넘었다" ("exceeded 50%")
+        assert_eq!(
+            keep_all("50%\u{B97C} \u{B118}\u{C5C8}\u{B2E4}"),
+            ["50%", "\u{B97C} ", "\u{B118}\u{C5C8}\u{B2E4}"]
+        );
+        // "안녕" in U+201C and U+201D, then "이라고 했다." ("said
+        // 'hello'"). With a period before U+201D, as in
+        // korean_keep_all_with_quotes_and_periods, LB19a keeps the
+        // particle with the quotation mark instead: the period is not
+        // East Asian.
+        assert_eq!(
+            keep_all("\u{201C}\u{C548}\u{B155}\u{201D}\u{C774}\u{B77C}\u{ACE0} \u{D588}\u{B2E4}."),
+            [
+                "\u{201C}\u{C548}\u{B155}\u{201D}",
+                "\u{C774}\u{B77C}\u{ACE0} ",
+                "\u{D588}\u{B2E4}."
+            ]
+        );
+    }
+
+    #[test]
     fn korean_mixed_with_latin() {
         // "Rust로 작성된 (예시) 코드" ("example code written in Rust").
         let text = "Rust\u{B85C} \u{C791}\u{C131}\u{B41C} (\u{C608}\u{C2DC}) \u{CF54}\u{B4DC}";
@@ -973,6 +1044,31 @@ mod tests {
     }
 
     #[test]
+    fn keep_all_leaves_southeast_asian_scripts_alone() {
+        // "ภาษาไทย中文": "Thai language" in Thai, then "Chinese" in
+        // Chinese. Blink leaves class SA out of keep-all, so the break
+        // between the Thai run and the ideographs stays, and only the
+        // ideographs keep together.
+        let text = "\u{0E20}\u{0E32}\u{0E29}\u{0E32}\u{0E44}\u{0E17}\u{0E22}\u{4E2D}\u{6587}";
+        assert_eq!(offsets(text, WordBreak::Normal), [21, 24, 27]);
+        assert_eq!(offsets(text, WordBreak::KeepAll), [21, 27]);
+    }
+
+    #[test]
+    fn keep_all_breaks_around_emoji() {
+        // An emoji between two Hangul syllables. U+1F600 is class ID and
+        // U+1F44D class EB. Neither is a letter, so as in Blink both
+        // allow a break on either side.
+        for text in ["\u{D55C}\u{1F600}\u{AD6D}", "\u{D55C}\u{1F44D}\u{AD6D}"] {
+            assert_eq!(offsets(text, WordBreak::KeepAll), [3, 7, 10], "{text:?}");
+            assert_eq!(offsets(text, WordBreak::Normal), [3, 7, 10], "{text:?}");
+        }
+        // A skin tone modifier stays with its base (LB30b).
+        let toned = "\u{D55C}\u{1F44D}\u{1F3FB}\u{AD6D}";
+        assert_eq!(offsets(toned, WordBreak::KeepAll), [3, 11, 14]);
+    }
+
+    #[test]
     fn keep_all_leaves_other_scripts_alone() {
         assert_eq!(
             offsets("the quick brown", WordBreak::KeepAll),
@@ -995,6 +1091,46 @@ mod tests {
         assert_eq!(
             offsets(STUDY, WordBreak::BreakAll),
             offsets(STUDY, WordBreak::Normal)
+        );
+    }
+
+    #[test]
+    fn break_all_breaks_before_small_kana() {
+        // "ちょっと": the small kana U+3087 and U+3063 are class CJ.
+        // The default rules resolve CJ to NS, so no line starts with
+        // them. Break-all resolves CJ to ID, as ICU4X does, and CSS
+        // counts small kana as letters there.
+        let text = "\u{3061}\u{3087}\u{3063}\u{3068}";
+        assert_eq!(
+            segments(text, WordBreak::Normal),
+            ["\u{3061}\u{3087}\u{3063}", "\u{3068}"]
+        );
+        assert_eq!(
+            segments(text, WordBreak::BreakAll),
+            ["\u{3061}", "\u{3087}", "\u{3063}", "\u{3068}"]
+        );
+        assert_eq!(segments(text, WordBreak::KeepAll), [text]);
+    }
+
+    #[test]
+    fn break_all_breaks_around_symbols_and_unknown_characters() {
+        // '@' and '_' are class AL, so break-all breaks around them
+        // like letters.
+        assert_eq!(
+            segments("a@b_c", WordBreak::BreakAll),
+            ["a", "@", "b", "_", "c"]
+        );
+        // U+E000 (private use) and U+0378 (unassigned) are class XX.
+        // LB1 resolves XX to AL, and break-all to ID.
+        for text in ["a\u{E000}b", "a\u{0378}b"] {
+            assert_eq!(segments(text, WordBreak::Normal), [text]);
+            assert_eq!(segments(text, WordBreak::BreakAll).len(), 3, "{text:?}");
+        }
+        // Other punctuation keeps the default rules: no break before
+        // '!' (LB13) or after '(' (LB14).
+        assert_eq!(
+            segments("ab! (cd)", WordBreak::BreakAll),
+            ["a", "b! ", "(c", "d)"]
         );
     }
 

@@ -45,20 +45,19 @@ fuzz_target!(|data: &[u8]| {
             last.cluster = u32::MAX;
         }
     }
-    let options = WrapOptions {
-        max_width: match mode % 4 {
+    let options = WrapOptions::default()
+        .with_max_width(match mode % 4 {
             0 => 0.0,
             1 => f32::NAN,
             2 => -10.0,
             _ => f32::from(mode) * 10.0,
-        },
-        break_at_word_boundaries: mode & 1 == 0,
-        word_break: match (mode >> 4) % 3 {
+        })
+        .with_break_at_word_boundaries(mode & 1 == 0)
+        .with_word_break(match (mode >> 4) % 3 {
             0 => WordBreak::Normal,
             1 => WordBreak::KeepAll,
             _ => WordBreak::BreakAll,
-        },
-    };
+        });
     let _ = wrap_lines(&glyphs, &text, options);
 
     if let Some(patterns) = Patterns::for_language(Language::EnglishUs) {

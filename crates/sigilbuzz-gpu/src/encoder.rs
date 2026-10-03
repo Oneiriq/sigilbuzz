@@ -183,7 +183,10 @@ fn ops_are_finite(ops: &[PathOp]) -> bool {
 /// A subpath without `Close` is closed implicitly at the next `MoveTo`
 /// and at the end of `ops`, the way a fill treats it. The band coverage
 /// test counts crossings, so an open contour would leave its rows with
-/// a nonzero winding all the way to the edge of the glyph box.
+/// a nonzero winding all the way to the edge of the glyph box. A line,
+/// quadratic, or cubic that follows `Close` without a `MoveTo` starts a
+/// new subpath at the point the last one closed to, and that subpath is
+/// closed the same way.
 ///
 /// Flattening stops early once the list holds more than
 /// [`MAX_SEGMENTS`] segments. The caller rejects such a list.
@@ -208,13 +211,7 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
                 have_subpath = true;
             }
             PathOp::LineTo { x, y } => {
-                if !have_subpath {
-                    // Outline that opens with a LineTo is malformed
-                    // upstream; treat the line origin as the implicit
-                    // start.
-                    start = current;
-                    have_subpath = true;
-                }
+                begin_implicit_subpath(&mut have_subpath, &mut start, current);
                 let end = Vec2::new(x, y);
                 let mid = Vec2::new((current.x + end.x) * 0.5, (current.y + end.y) * 0.5);
                 out.push(QuadSegment {
@@ -225,6 +222,7 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
                 current = end;
             }
             PathOp::QuadTo { cx, cy, x, y } => {
+                begin_implicit_subpath(&mut have_subpath, &mut start, current);
                 let end = Vec2::new(x, y);
                 out.push(QuadSegment {
                     p0: current,
@@ -241,6 +239,7 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
                 x,
                 y,
             } => {
+                begin_implicit_subpath(&mut have_subpath, &mut start, current);
                 tmp_quads.clear();
                 let p3 = Vec2::new(x, y);
                 cubic_to_quads(
@@ -275,6 +274,17 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
     }
 
     out
+}
+
+/// Starts a subpath at `current` when a drawing op arrives with none
+/// open: at the start of `ops`, or right after a `Close`. Without it a
+/// segment drawn after `Close` would never be closed back, and the band
+/// coverage test would see an open contour.
+fn begin_implicit_subpath(have_subpath: &mut bool, start: &mut Vec2, current: Vec2) {
+    if !*have_subpath {
+        *start = current;
+        *have_subpath = true;
+    }
 }
 
 /// Appends the straight segment from `current` back to the subpath
@@ -765,6 +775,48 @@ mod tests {
             encode_outline_ops(&two_contours(false), &opts),
             encode_outline_ops(&two_contours(true), &opts)
         );
+    }
+
+    #[test]
+    fn drawing_after_close_starts_a_subpath_that_gets_closed() {
+        // `[M, L, L, Z, X]`: the triangle closes back to (0, 0), and the
+        // trailing quadratic or cubic X starts a new subpath there. It
+        // must be closed back to (0, 0) at the end of the ops, as a
+        // trailing LineTo already was.
+        let curve_end = (0.0, 200.0);
+        let quad_op = PathOp::QuadTo {
+            cx: 100.0,
+            cy: 150.0,
+            x: curve_end.0,
+            y: curve_end.1,
+        };
+        let cubic_op = PathOp::CubicTo {
+            c1x: 100.0,
+            c1y: 50.0,
+            c2x: 100.0,
+            c2y: 150.0,
+            x: curve_end.0,
+            y: curve_end.1,
+        };
+        let line_op = PathOp::LineTo {
+            x: curve_end.0,
+            y: curve_end.1,
+        };
+        for tail in [line_op, quad_op, cubic_op] {
+            let mut ops = triangle().to_vec();
+            ops.push(tail);
+            let segs = flatten_to_quads(&ops, SlugOptions::DEFAULT_CUBIC_TOLERANCE);
+            assert_eq!(
+                segs.last(),
+                Some(&quad(curve_end, (0.0, 100.0), (0.0, 0.0))),
+                "{tail:?} after Close was left open"
+            );
+            // Every subpath closes, so the chain ends where it started.
+            assert_eq!(segs[0].p0, Vec2::new(0.0, 0.0));
+            for w in segs.windows(2) {
+                assert_eq!(w[0].p2, w[1].p0, "{tail:?}");
+            }
+        }
     }
 
     #[test]

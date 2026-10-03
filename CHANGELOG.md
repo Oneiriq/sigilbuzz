@@ -5,6 +5,197 @@ GitHub issues and pull requests. sigilbuzz is pre-1.0, so a minor release may ch
 the API. See [docs/STABILITY.md](docs/STABILITY.md) for what is covered by the
 stability commitment.
 
+## 0.23.0 (2026-10-03)
+
+The crates in this release: `sigilbuzz` 0.23.0, `sigilbuzz-capi` 0.4.0,
+`sigilbuzz-cli` 0.2.0, `sigilbuzz-gpu` 0.2.0, `sigilbuzz-hyphen` 0.2.0,
+`sigilbuzz-paint` 0.3.0, `sigilbuzz-pdf` 0.3.0, `sigilbuzz-render` 0.10.0,
+`sigilbuzz-subset` 0.13.0, `sigilbuzz-svg` 0.3.0, `sigilbuzz-text-layout` 0.2.0, and
+`sigilbuzz-woff` 0.3.2. Companion crates that take `sigilbuzz` types in their API move
+with the core crate's minor version.
+
+Added:
+
+- GSUB and GPOS FeatureVariations (#278). `Gsub::feature_variations` and
+  `Gpos::feature_variations` parse the table of a version 1.1 header into
+  `tables::layout::FeatureVariations`. Its condition formats 1 to 5 (axis range, value,
+  and, or, negate) evaluate as in HarfBuzz 14.5.0, and `find_index` picks the first
+  record that holds at a font's normalized coordinates. `shape` applies that record to
+  every GSUB and GPOS feature, the default instance included, so a variable font's
+  substituted lookups take effect, for example Noto Sans KR's `palt` at heavy weights.
+  A table whose FeatureVariations fail to parse, or whose version 1.1 header is too
+  short to hold the offset, is left out of shaping, as HarfBuzz drops it. A table may
+  make 8 condition checks per byte, and at least 16,384, and value conditions cache
+  their deltas while they are evaluated. `Condition` is `#[non_exhaustive]`. On 971
+  cases across Rubik, Noto Sans KR (CFF2 and TrueType), and 22 crafted fonts, glyph ids,
+  clusters, and offsets match HarfBuzz 14.5.0 in all 971 (699 before).
+- `rvrn`, which `shape` now runs in GSUB stage 0 for every shaper, merged with an
+  unscheduled required feature, and in GPOS, as HarfBuzz does (#278). A caller can turn
+  it off with a zero-valued feature, and a value above 1 picks that alternate of an
+  AlternateSubst lookup. Rubik's heavier currency signs from `wght` 500 on now appear.
+- `Gvar::glyph_point_deltas`, every point's delta at a set of coordinates with the
+  unlisted points inferred, `Glyf::outline_at_coords`, which applies them and moves
+  composite components, and `Glyf::phantom_points_at_coords` (#279).
+- `sigilbuzz-text-layout` 0.2.0: `WordBreak` and `line_break_opportunities_with`, the
+  CSS `word-break` tailorings of line breaking (#275). `WordBreak::KeepAll` breaks Korean
+  at spaces and punctuation instead of between syllables. It takes its letter units from
+  Blink, letters and numbers outside class SA, so a particle after a closing bracket, a
+  closing quotation mark or `%` can still wrap, and symbols and emoji allow a break on
+  either side. `WordBreak::BreakAll` lets words in any script break between letters and
+  resolves CJ, XX and SG to ID as ICU4X does, so Japanese can break before small kana.
+  `WordBreak` is `#[non_exhaustive]`. `wrap_lines` takes the option through the new
+  `WrapOptions::word_break`, and `WrapOptions::with_max_width`, `with_word_break` and
+  `with_break_at_word_boundaries` build options without a struct literal.
+- `sigilbuzz-text-layout`: `line_break_class`, the `Line_Break` property of a character,
+  and `WordBreakIter`, the iterator `word_breaks` returns, are now exported (#275).
+- `sigilbuzz-render` 0.10.0: `Placement` and a `_placed` version of every rasterize
+  entry point (the six `Rasterizer` methods and `rasterize_bitmap_glyph_placed`) (#280).
+  Each returns the image with its top-left offset from the pen position on the baseline,
+  in whole pixels with y down, including the margin, the COLRv1 clip box, CBDT and EBDT
+  bearings, the sbix origin offset, and the SVG viewBox. The existing methods are
+  unchanged.
+- `sigilbuzz-cli` 0.2.0: `sigilbuzz subset --text <string>`, `--text-file <path>` and
+  `--skip-missing` (#277). The first two keep the distinct characters of a string or a
+  UTF-8 file, without line breaks or a leading BOM. `--skip-missing` skips characters
+  the font lacks and reports how many, instead of failing.
+
+Changed:
+
+- `Cff::parse` and `Cff2::parse` are lazy and no longer scale with the glyph count
+  (#276). They read the header, the Top DICT, and INDEX headers; charstrings,
+  subroutines, and a glyph's Font DICT, Private DICT, and Local Subrs are located when
+  the glyph is drawn. `Face::glyph_outline_at_coords` on Noto Sans KR VF drops from
+  about 100 us to about 3 us per call, and `Rasterizer::rasterize_glyph` at 48 px from
+  about 150 us to about 55 us. CFF2 `blend` reuses the region scalars for the current
+  `vsindex` within a glyph. Malformed data inside one charstring, subroutine, or Font
+  DICT now fails only the glyphs that use it, where it used to fail the whole table.
+  FDSelect lookups binary-search ranges that ascend, so drawing every glyph of a font
+  with 65,535 one-glyph ranges no longer takes quadratic time; ranges that do not ascend
+  resolve exactly as before.
+- `Gvar::parse` no longer copies the glyph offset array, so parsing `gvar` takes constant
+  time. `Face::glyph_outline_at_coords` and `glyph_bounds_at_coords` paid for the copy on
+  every call.
+- `sigilbuzz-render` renders COLRv1 glyphs about 1.3 to 1.8 times faster (Nabla, 48 to
+  300 px, native and wasm32), with identical output (#280). The outline scanline only
+  visits edges that reach each row, and each COLRv1 clip limits its masks and fills to
+  the rectangle its coverage can touch.
+- `sigilbuzz-text-layout`: line breaking implements all of UAX 14 revision 55 (Unicode
+  17.0.0) from generated Unicode tables, and passes all 19,338 cases of
+  `LineBreakTest.txt` (14,608 before) (#275). It now has the space rules (LB14 to LB17),
+  quotation marks with East_Asian_Width (LB15a to LB19a), the full number rule (LB25),
+  Korean syllable blocks of conjoining jamo (LB26, LB27), Brahmic orthographic syllables
+  (LB28a), regional indicator pairs (LB30a), and LB31's default break. Breaks move for
+  most text that is not plain words and spaces.
+- `sigilbuzz-text-layout`: `word_breaks` implements the word boundary rules of UAX 29
+  revision 47 and passes all 1,944 cases of `WordBreakTest.txt` (790 before) (#275).
+  Korean words, letters with digits (`abc123`), words with apostrophes and periods
+  (`can't`, `e.g`), numbers (`3,456.78`), and emoji sequences each stay one segment.
+- `sigilbuzz-text-layout`: `LineBreakClass` has every UAX 14 class and is
+  `#[non_exhaustive]` (#275). A `match` on it outside the crate needs a wildcard arm.
+- `sigilbuzz-text-layout`: `WrapOptions` has a new public field, `word_break` (#275).
+  Struct literals need it or `..WrapOptions::default()`.
+- `sigilbuzz-hyphen` 0.2.0 depends on `sigilbuzz-text-layout` 0.2 (#275).
+
+Fixed:
+
+- Variable TrueType outlines (#279). Points a `gvar` tuple does not list now take
+  deltas inferred from the listed points around them on the same contour, and composite
+  glyphs move each component by its own delta (through the component's scale when
+  `SCALED_COMPONENT_OFFSET` asks for it), as HarfBuzz does. Before, those points and
+  components stayed at the default instance, so heavy weights tore: 4,823 of the 11,172
+  Hangul syllables of Noto Sans KR were more than 2 units off at wght 900, and every
+  composite glyph of Rubik, Hahmlet, Fraunces, Recursive, and Roboto Flex was off away
+  from the default. All of them now match ttf-parser and skrifa within 0.05 units.
+  `Face::glyph_outline_at_coords` and everything that draws through it (the render,
+  paint, SVG, and GPU crates) get the fix. One `gvar` work budget covers the whole
+  composite tree, as in HarfBuzz, and decoding a tuple no longer allocates.
+- `Face::glyph_bounds_at_coords` returns the box of the varied outline, rounded the way
+  HarfBuzz rounds glyph extents, which it now matches for every glyph of the fonts above
+  (#279). It used to shift the static box by the largest listed deltas. A box with no
+  width or no height is all zero, as in HarfBuzz. Fallback mark positioning reads it.
+- A variable `glyf` font without `HVAR` (or `VVAR`) takes its advances from the phantom
+  points in `gvar`, as HarfBuzz does (#279). It used to keep the default widths at every
+  instance. `gvar` is read only for a direction whose variation table is missing, each
+  glyph's phantom points are walked once per call, and a glyph whose phantom points
+  cannot be computed keeps its `hmtx` or `vmtx` advance. A `USE_MY_METRICS` component
+  that leads back to its composite is skipped where HarfBuzz skips it.
+- CFF2 outlines left the last contour of every glyph open, because CFF2 charstrings have
+  no `endchar` and the interpreter only closed a contour at the next moveto or at
+  `endchar` (#276). Fills drew streaks wherever that contour ended away from its start
+  point: 1,440 of the 11,172 Hangul syllables of Noto Sans KR VF, at every weight. The
+  outline now ends with `Close`, and a CFF1 charstring that ends without `endchar`
+  closes too.
+- `sigilbuzz-render` closes an open contour when it fills an outline, a COLR layer, or an
+  SVG path, and `sigilbuzz-gpu` 0.2.0 closes one when it encodes an outline for the Slug
+  algorithm, so a contour without `Close` from any source no longer streaks (#276,
+  #280). The public `flatten` and `flatten_grouped` still return contours as drawn.
+- `sigilbuzz-gpu`: a quadratic or cubic drawn after `Close` with no `MoveTo` was left
+  open in the Slug encoding, so it filled to the edge of the glyph box. A line in the
+  same place was already closed.
+- CFF accented glyphs built with `seac` now draw. Type 2 writes a seac as `endchar` with
+  four operands, `adx ady bchar achar`, plus a width in front when it is the first
+  stack-clearing operator. Four operands were rejected as a deprecated operator and five
+  drew nothing. `Cff::outline` now draws the base glyph and then the accent at
+  `(adx, ady)`, finding both through the Standard Encoding and the font's charset, as
+  HarfBuzz and FreeType do. A seac in a CID-keyed font or a font with an Expert charset
+  is unsupported.
+- CFF2 glyphs whose Private DICT sets `vsindex` blended with the first
+  ItemVariationData subtable instead of the one it names.
+- CFF2 FDSelect format 4 kept only the low byte of each Font DICT index, so glyphs in
+  Font DICT 256 and above used another Font DICT's Private DICT and Local Subrs.
+- CFF INDEX errors for an entry past the end, or for offsets that are zero or descend,
+  report the position of that entry's offset instead of the start of the data.
+- GPOS `kern` and `mark` count as present when the selected language system lists them,
+  whatever lookups they have, as in HarfBuzz's feature map. A FeatureVariations record
+  that empties `kern` no longer brings back the legacy `kern` table, and an emptied
+  `mark` no longer lets the Hebrew shaper compose presentation forms. A `mark` listed
+  only in GSUB now counts.
+- `cargo clippy -p sigilbuzz --no-default-features --all-targets` builds again.
+- `sigilbuzz-subset` 0.13.0: subsets keep `vhea`, `vmtx` and `VORG`, so vertical text
+  lays out like the source font (#277). They used to be dropped, which left a subset of
+  Noto Sans KR advancing 1448 units per glyph with its origin at 1160, instead of 1000
+  and 880. `vmtx` is rebuilt for the kept glyphs with `vhea.numberOfLongVerMetrics`
+  patched to match. `VORG` keeps its default and the kept glyphs' entries, renumbered.
+  `VVAR` is rebuilt with every map the source has, and `retain_variations: false` now
+  drops it on every path.
+- `sigilbuzz-subset`: subsets keep `BASE` and `STAT`, which were dropped without being
+  listed (#277). The reference glyph of a format 2 `BaseCoord` is renumbered, or the
+  coordinate becomes format 1 when its glyph is not kept. The docs now list every table
+  the subset still drops.
+- `sigilbuzz-subset`: a malformed `vhea`, `vmtx`, `VORG`, `VVAR` or `BASE` is left out
+  with a `SubsetWarning` instead of failing the subset (#277).
+- `sigilbuzz-subset`: `instance` folds the `VVAR` vertical origin deltas into `VORG`, as
+  HarfBuzz applies them (#277). A Noto Sans KR instance at wght 700 used to keep 248
+  vertical origins at their default-weight values, up to 40 units off.
+- `sigilbuzz-subset`: the `hhea` and `vhea` metric counts are patched at byte 34, where
+  the parsers read them, not in the last two bytes of a padded table (#277).
+- `sigilbuzz-subset`: an HVAR or VVAR subset whose store needed more than 65,535 rows
+  wrapped the row count and pointed glyphs at the wrong rows. VVAR pulls up to four maps
+  into one store, so a crafted VVAR of about 200 KB got there. Such an HVAR now fails
+  the subset, and such a VVAR is left out with a warning. A rebuilt store over more than
+  32,767 regions, which set the LONG_WORDS flag by mistake, is refused too, in subsets
+  and in partial instances.
+- `sigilbuzz-subset`: a full instance failed on a malformed `vhea`, `vmtx` or `VVAR`. It
+  now leaves them out and reports them in `InstancedOutput::warnings`, as a subset does.
+- `sigilbuzz-subset`: `retain_layout: false` dropped GSUB, GPOS and GDEF but kept
+  `BASE`, and `retain_variations: false` kept `MVAR` when every glyph of a CFF or CFF2
+  font was kept. `BASE` now goes with the layout tables and `MVAR` with the variation
+  tables.
+- `sigilbuzz-subset`: a `VVAR` left out with its `vmtx`, and a `STAT` that cannot be
+  read, are reported in `SubsetOutput::warnings`. Such a `STAT` used to vanish, and
+  strict mode rejected it as a table without a subset implementation.
+- `sigilbuzz-subset`: the README said every table of a CFF or CFF2 font follows the
+  `glyf` rules. When every glyph is kept, the font passes through instead, `DSIG`,
+  `COLR` and `MVAR` included; the README and crate docs now say so.
+- `sigilbuzz-cli`: `subset` prints each warning the subset returns as a `warning:` line
+  on stderr. A truncated `vmtx` used to lose `vhea`, `vmtx` and `VVAR` without a word.
+- `sigilbuzz-cli`: `subset --text` and `--text-file` skip TAB, LF, CR, U+2028 and
+  U+2029. A tab in a text file, or a newline in `--text`, failed unless
+  `--skip-missing` was given.
+- `sigilbuzz-text-layout`: `.` and `,` were non-starters, a Hangul syllable broke before
+  a trailing jamo while a run of decomposed syllables never broke, and a pair of classes
+  the breaker did not know never allowed a break (#275).
+
 ## 0.22.0 (2026-10-02)
 
 Added:

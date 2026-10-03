@@ -18,6 +18,7 @@ mod marks;
 
 pub(super) use marks::{recategorize_combining_class, MarkPositioner};
 
+use super::position::FontAdvances;
 use crate::buffer::{char_class, Glyph};
 use crate::error::Result;
 use crate::face::Face;
@@ -83,9 +84,10 @@ pub(super) const fn space_kind(g: &Glyph) -> u8 {
 /// `_hb_ot_shape_fallback_spaces`: gives each space character drawn
 /// with the space glyph the width of its kind. Runs on the default
 /// advances, before GPOS; a space glyph that ligated keeps its advance.
+/// `advances` are the shaping call's.
 pub(super) fn adjust_spaces(
     face: &Face<'_>,
-    coords: &[f32],
+    advances: &FontAdvances<'_, '_>,
     glyphs: &mut [Glyph],
     horizontal: bool,
 ) -> Result<()> {
@@ -94,7 +96,7 @@ pub(super) fn adjust_spaces(
     }
     let upem = i32::from(face.head()?.units_per_em);
     let cmap = face.cmap()?;
-    let advance = |gid: u16| advance(face, coords, gid, horizontal);
+    let advance = |gid: u16| advance(face, advances, gid, horizontal);
     // The digit and punctuation widths, looked up once.
     let figure = ('0'..='9').find_map(|c| cmap.glyph_id(c));
     let punctuation = cmap.glyph_id('.').or_else(|| cmap.glyph_id(','));
@@ -142,17 +144,21 @@ pub(super) fn adjust_spaces(
 /// computes it: `hmtx` (plus `HVAR`) horizontally, `vmtx` (plus `VVAR`)
 /// or the ascender-to-descender height vertically, with the varied
 /// phantom points of a `glyf` font standing in for a missing `HVAR` or
-/// `VVAR` (see `position::FontAdvances`). Always positive.
-fn advance(face: &Face<'_>, coords: &[f32], gid: u16, horizontal: bool) -> Result<i32> {
-    let advances = super::position::FontAdvances::new(face, coords)?;
+/// `VVAR` (see [`FontAdvances`]). Always positive.
+fn advance(
+    face: &Face<'_>,
+    advances: &FontAdvances<'_, '_>,
+    gid: u16,
+    horizontal: bool,
+) -> Result<i32> {
     if horizontal {
-        return advances.h_advance(u32::from(gid));
+        return Ok(advances.h_advance(u32::from(gid)));
     }
-    let Some(vmtx) = face.vmtx()? else {
-        let hhea = face.hhea()?;
-        return Ok(i32::from(hhea.ascent) - i32::from(hhea.descent));
-    };
-    advances.v_advance(&vmtx, u32::from(gid))
+    if let Some(advance) = advances.v_advance(u32::from(gid)) {
+        return Ok(advance);
+    }
+    let hhea = face.hhea()?;
+    Ok(i32::from(hhea.ascent) - i32::from(hhea.descent))
 }
 
 #[cfg(test)]

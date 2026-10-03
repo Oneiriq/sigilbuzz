@@ -13,8 +13,9 @@
 //!
 //! - [`line_break_opportunities`]: the UAX 14 break iterator over a
 //!   `&str`, and [`line_break_opportunities_with`] for the CSS
-//!   `word-break` tailorings in [`WordBreak`] (`keep-all` keeps Korean
-//!   words whole, `break-all` breaks inside any word).
+//!   `word-break` tailorings in [`WordBreak`] (`keep-all` breaks Korean
+//!   between words instead of syllables, `break-all` breaks inside any
+//!   word).
 //! - [`wrap_lines`]: walks a slice of shaped [`sigilbuzz::Glyph`]s
 //!   and a width budget to produce [`LineRange`]s.
 //! - [`word_breaks`]: the UAX 29 word boundary iterator, for cursor
@@ -33,7 +34,9 @@
 //! (LB30a). Southeast Asian scripts (class SA: Thai, Lao, Khmer,
 //! Myanmar, and others) need a dictionary to find word boundaries,
 //! which this crate does not have. They resolve to AL as LB1 directs,
-//! so a run of them breaks only at spaces and punctuation.
+//! so a run of them breaks only at spaces and punctuation. For the
+//! same reason [`word_breaks`] finds a boundary after every character
+//! of them, apart from combining marks.
 //!
 //! [uax14]: https://www.unicode.org/reports/tr14/
 //! [uax29]: https://www.unicode.org/reports/tr29/

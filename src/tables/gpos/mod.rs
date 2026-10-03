@@ -19,6 +19,9 @@ use crate::tables::layout::{
 };
 use crate::tables::parse::Reader;
 
+/// Where a version 1.1 header holds `featureVariationsOffset`.
+const FEATURE_VARIATIONS_OFFSET_FIELD: usize = 10;
+
 pub mod anchor;
 pub mod chain_context;
 pub mod context;
@@ -72,8 +75,9 @@ pub struct Gpos<'a> {
     script_list: ScriptList<'a>,
     feature_list: FeatureList<'a>,
     lookup_list: LookupList<'a>,
-    /// `featureVariationsOffset` (version 1.1 and later), 0 for none.
-    feature_variations_offset: u32,
+    /// `featureVariationsOffset` (version 1.1 and later), 0 for none,
+    /// `None` for a version 1.1 header that ends before the field.
+    feature_variations_offset: Option<u32>,
     /// The FeatureVariations and the record of them the shaper selected
     /// for the font's coordinates, whose substitutions every feature
     /// lookup sees.
@@ -85,7 +89,16 @@ pub struct Gpos<'a> {
 }
 
 impl<'a> Gpos<'a> {
-    /// Parses a `GPOS` table.
+    /// Parses a `GPOS` table. A version 1.1 header too short for its
+    /// `featureVariationsOffset` still parses, and
+    /// [`Self::feature_variations`] reports the missing field.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Truncated`] when the header ends before the LookupList
+    /// offset, [`Error::Malformed`] for a major version other than 1 or
+    /// a list offset past the end, and the errors of the ScriptList,
+    /// FeatureList, and LookupList parsers.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
@@ -99,13 +112,13 @@ impl<'a> Gpos<'a> {
         let script_list_off = r.read_u16()? as usize;
         let feature_list_off = r.read_u16()? as usize;
         let lookup_list_off = r.read_u16()? as usize;
+        // HarfBuzz rejects a version 1.1 table without the whole field,
+        // and the shaper then leaves the table out (see
+        // `feature_variations`), so a short header is not an error here.
         let feature_variations_offset = if minor >= 1 {
-            r.read_u32().map_err(|_| Error::Truncated {
-                offset: r.position(),
-                context: "GPOS 1.1 header shorter than featureVariationsOffset",
-            })?
+            r.read_u32().ok()
         } else {
-            0
+            Some(0)
         };
 
         let script_list =
@@ -138,17 +151,19 @@ impl<'a> Gpos<'a> {
     /// The table's `FeatureVariations`, read when asked for. `Ok(None)`
     /// for a version 1.0 table or a null offset. Byte offsets in errors
     /// count from the start of the FeatureVariations table, except for
-    /// an offset past the end of the GPOS, which reports the offset
-    /// field.
+    /// an offset field that is cut short or points past the end of the
+    /// GPOS, which reports the field.
     ///
-    /// The shaper treats a font whose FeatureVariations fail to parse as
+    /// The shaper treats a font for which this returns an error as
     /// having no GPOS at all, as HarfBuzz 14.5.0 does (see
     /// [`crate::tables::layout::feature_variations`]).
     ///
     /// # Errors
     ///
-    /// [`Error::Malformed`] for an offset past the end of the table and
-    /// the errors of [`FeatureVariations::parse`].
+    /// [`Error::Truncated`] at byte 10 for a version 1.1 header that
+    /// ends before its `featureVariationsOffset`, [`Error::Malformed`]
+    /// for an offset past the end of the table, and the errors of
+    /// [`FeatureVariations::parse`].
     ///
     /// # Examples
     ///
@@ -163,9 +178,13 @@ impl<'a> Gpos<'a> {
     /// # Ok::<(), sigilbuzz::Error>(())
     /// ```
     pub fn feature_variations(&self) -> Result<Option<FeatureVariations<'a>>> {
+        let offset = self.feature_variations_offset.ok_or(Error::Truncated {
+            offset: FEATURE_VARIATIONS_OFFSET_FIELD,
+            context: "GPOS 1.1 header shorter than featureVariationsOffset",
+        })?;
         crate::tables::layout::feature_variations::locate(
             self.data,
-            self.feature_variations_offset,
+            offset,
             "GPOS featureVariations offset past end",
         )
     }
@@ -327,17 +346,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_1_1_header_without_its_offset() {
-        let bytes = build_v11(&EMPTY_FV);
-        for len in 10..14 {
+    fn a_1_1_header_without_its_offset_parses_and_reports_it() {
+        // The three lists share the empty one at byte 10, where the
+        // offset field would start.
+        let bytes = [0, 1, 0, 1, 0, 10, 0, 10, 0, 10, 0, 0, 0];
+        for len in 12..=13 {
+            let table = Gpos::parse(&bytes[..len]).unwrap();
+            assert_eq!(table.script_list().len(), 0);
+            assert_eq!(table.feature_list().len(), 0);
+            assert_eq!(table.lookup_list().len(), 0);
             assert_eq!(
-                Gpos::parse(&bytes[..len]).unwrap_err(),
+                table.feature_variations().unwrap_err(),
                 Error::Truncated {
                     offset: 10,
                     context: "GPOS 1.1 header shorter than featureVariationsOffset",
                 }
             );
         }
+        // A 1.0 header has no such field.
+        let mut bytes = bytes;
+        bytes[3] = 0;
+        let table = Gpos::parse(&bytes[..12]).unwrap();
+        assert!(table.feature_variations().unwrap().is_none());
+        // The header still needs its three list offsets.
+        assert!(matches!(
+            Gpos::parse(&bytes[..9]),
+            Err(Error::Truncated { .. })
+        ));
     }
 
     #[test]

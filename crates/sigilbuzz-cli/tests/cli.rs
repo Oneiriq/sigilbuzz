@@ -582,6 +582,30 @@ fn subset_text_keeps_the_same_glyphs_as_unicodes() {
 }
 
 #[test]
+fn subset_text_skips_tabs_and_line_and_paragraph_breaks() {
+    // Open Sans has no glyph for a tab or a break, so these used to
+    // fail without --skip-missing: TAB from either flag, and a newline
+    // embedded in --text.
+    let (by_unicodes, stderr, ok) = subset_open_sans(
+        "subset_ctl_uni.ttf",
+        &["--unicodes".as_ref(), "H,i".as_ref()],
+    );
+    assert!(ok, "{stderr}");
+    let text = "H\ti\r\nH\u{2028}i\u{2029}";
+    let (by_text, stderr, ok) =
+        subset_open_sans("subset_ctl_text.ttf", &["--text".as_ref(), text.as_ref()]);
+    assert!(ok, "{stderr}");
+    assert_eq!(by_text, by_unicodes);
+    let file = write_tempfile("subset_ctl.txt", text.as_bytes());
+    let (by_file, stderr, ok) = subset_open_sans(
+        "subset_ctl_file.ttf",
+        &["--text-file".as_ref(), file.as_os_str()],
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(by_file, by_unicodes);
+}
+
+#[test]
 fn subset_text_combines_with_unicodes_and_gids() {
     let (split, stderr, ok) = subset_open_sans(
         "subset_split.ttf",
@@ -699,6 +723,58 @@ fn subset_keeps_vertical_metrics_for_vertical_text() {
     let want = ttb(&font);
     assert_eq!(want, vec![vec![-1000, -500, -880]; 3]);
     assert_eq!(ttb(&out), want);
+}
+
+/// `font` with the length of `table` in its table directory cut to
+/// `len` bytes.
+fn with_table_cut(font: &[u8], table: [u8; 4], len: u32) -> Vec<u8> {
+    let num_tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    let record = (0..num_tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| font[at..at + 4] == table)
+        .expect("the font has the table");
+    let mut out = font.to_vec();
+    out[record + 12..record + 16].copy_from_slice(&len.to_be_bytes());
+    out
+}
+
+#[test]
+fn subset_reports_what_it_left_out() {
+    // A vmtx cut short: the subset leaves out vhea, vmtx and the VVAR
+    // that varies them, says so, and still succeeds.
+    const NOTO_KR: &[u8] =
+        include_bytes!("../../../tests/fixtures/noto_sans_kr_vf_vertical_subset.otf");
+    let font = write_tempfile("noto_kr_cut.otf", &with_table_cut(NOTO_KR, *b"vmtx", 10));
+    let out = write_tempfile("noto_kr_cut_sub.otf", b"");
+    let (_, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+        "--text".as_ref(),
+        "\u{300C}".as_ref(),
+    ]);
+    assert!(ok, "warnings do not fail the command: {stderr}");
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("warning: "))
+        .collect();
+    assert_eq!(warnings.len(), 2, "{stderr}");
+    assert!(
+        warnings[0].starts_with("warning: 'VVAR' byte 0: ")
+            && warnings[0].ends_with("; left out the whole table"),
+        "{stderr}"
+    );
+    assert!(
+        warnings[1].starts_with("warning: 'vmtx' byte 10: ")
+            && warnings[1].ends_with("; left out the vhea and vmtx tables"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("wrote "), "{stderr}");
+
+    // A well-formed font warns about nothing.
+    let (_, stderr, ok) = subset_open_sans("subset_quiet.ttf", &["--text".as_ref(), "Hi".as_ref()]);
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
 }
 
 /// The integer after `key` in a flat JSON object.

@@ -11,7 +11,9 @@
 //! - When GPOS has no `kern` feature for the run (`vkrn` for vertical
 //!   runs), `kerx` kerns if the font has it, else the legacy `kern`
 //!   table does, for the shapers HarfBuzz lets fall back to it (see
-//!   [`Shaper::fallback_position`]).
+//!   [`Shaper::fallback_position`]). GPOS has the feature when the
+//!   language system it picks lists it, even with no lookups, and the
+//!   caller did not turn kerning off.
 //! - A `kern` or `kerx` table the plan applies marks the whole run
 //!   unsafe to concatenate, whether or not kerning is requested.
 //!
@@ -24,7 +26,9 @@
 //! shaper asks for it the marks then get fallback positions (see
 //! [`fallback_mark_positioning`]).
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use super::attach::{self, Attach};
 use super::fallback::{self, MarkPositioner};
@@ -38,7 +42,7 @@ use crate::face::Face;
 use crate::tables::gdef::Gdef;
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::layout::{GlyphClasses, MatchGlyph};
-use crate::tables::{tag, Glyf, Gpos, Gvar, Hmtx, Hvar, Loca, Vmtx, Vvar};
+use crate::tables::{tag, Gpos, Hmtx, Hvar, Vmtx, Vvar};
 use crate::unicode::Script;
 
 /// Everything the positioning pass reads besides the glyphs.
@@ -66,6 +70,8 @@ pub(super) struct Inputs<'a> {
     pub(super) fallback_marks: bool,
     /// The shaping call's glyph flag settings.
     pub(super) flags: FlagCx,
+    /// The font's advances at the call's coords.
+    pub(super) advances: &'a FontAdvances<'a, 'a>,
 }
 
 /// True when the font's GPOS positions a run of `shaper`: HarfBuzz
@@ -124,7 +130,7 @@ pub(super) fn position(
 
     // Space characters drawn with the space glyph get their own
     // widths first, with the default advances (`hb_ot_position_default`).
-    fallback::adjust_spaces(face, input.var.coords, glyphs, horizontal)?;
+    fallback::adjust_spaces(face, input.advances, glyphs, horizontal)?;
 
     // Kerning is requested by `kern` (on by default) for horizontal
     // runs and by `vkrn` (off by default) for vertical ones.
@@ -142,11 +148,16 @@ pub(super) fn position(
     let has_gpos = gpos_applies(input.gpos, input.shaper);
     let mut apply_kerx = has_kerx && !(input.has_gsub && has_gpos);
     let apply_gpos = has_gpos && !apply_kerx;
+    // HarfBuzz asks whether its feature map gives the kerning feature a
+    // GPOS index: the run requests kerning and the language system GPOS
+    // picks lists the feature. A FeatureVariations record that leaves
+    // the feature no lookups does not bring the legacy tables back.
     let has_gpos_kern = apply_gpos
+        && requested_kerning
         && input.gpos.is_some_and(|gpos| {
             segments
                 .iter()
-                .any(|s| !lookups_for(gpos, kern_tag, s.script_priority).is_empty())
+                .any(|s| lists_feature(gpos, kern_tag, s.script_priority))
         });
     let mut apply_kern = false;
     if !apply_kerx && !has_gpos_kern {
@@ -245,6 +256,7 @@ pub(super) fn position(
             ligature_direction,
             adjust_offsets,
             level: input.flags.level,
+            advances: input.advances,
         };
         positioner.position_marks(glyphs)?;
     }
@@ -267,17 +279,16 @@ pub(super) fn position(
 /// fallback.
 pub(super) fn subtract_vertical_origins(
     face: &Face<'_>,
-    coords: &[f32],
+    advances: &FontAdvances<'_, '_>,
     glyphs: &mut [Glyph],
 ) -> Result<()> {
-    let advances = FontAdvances::new(face, coords)?;
     let vorg = face.vorg()?;
     let vmtx = face.vmtx()?;
     let hhea = face.hhea()?;
     let (ascender, descender) = (i32::from(hhea.ascent), i32::from(hhea.descent));
     for g in glyphs {
         let id = g.glyph_id as u16;
-        let h_advance = advances.h_advance(g.glyph_id)?;
+        let h_advance = advances.h_advance(g.glyph_id);
         let y_origin = match vorg {
             Some(ref vorg) => i32::from(vorg.vert_origin_y(id)),
             None => match glyph_top_and_height(face, id)? {
@@ -318,11 +329,17 @@ pub(super) fn round_half_away(delta: f32) -> i32 {
     }
 }
 
-/// True when GPOS has lookups for feature `tag` under the script tags
-/// of `script_priority` (HarfBuzz's `has_gpos_mark` asks this of
-/// `mark`).
-pub(super) fn has_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
-    !lookups_for(gpos, tag, script_priority).is_empty()
+/// True when the language system GPOS picks for the script tags of
+/// `script_priority` lists feature `tag`, with or without lookups (see
+/// [`crate::ot::layout_select::lists_feature`]).
+fn lists_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
+    crate::ot::layout_select::lists_feature(
+        gpos.script_list(),
+        &gpos.features(),
+        gpos.language_tags(),
+        tag,
+        script_priority,
+    )
 }
 
 /// Lookup indices feature `tag` selects for one segment's script.
@@ -376,109 +393,152 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
 /// is the `hmtx` (or `vmtx`) one. Otherwise:
 ///
 /// - with `HVAR` (or `VVAR`), the advance moves by the rounded delta;
-/// - without it but with `gvar`, the advance is the distance between
-///   the glyph's phantom points moved by their `gvar` deltas (see
-///   [`Glyf::phantom_points_at_coords`]): the first two in x
-///   horizontally, the last two in y vertically, rounded and at least
-///   zero.
+/// - without it, in a `glyf` font with `gvar`, the advance is the
+///   distance between the glyph's phantom points moved by their `gvar`
+///   deltas (see [`crate::tables::Glyf::phantom_points_at_coords`]): the
+///   first two in x horizontally, the last two in y vertically, rounded
+///   and at least zero.
+///
+/// Each direction decides on its own: a font with `HVAR` but no `VVAR`,
+/// the usual horizontal variable font, reads `gvar` for vertical
+/// advances only. `gvar` is read when a glyph's advance first needs it,
+/// and each glyph's phantom-point advance is kept for the rest of the
+/// call, as HarfBuzz caches advances, so a glyph's outline is walked at
+/// most once per direction however often it occurs.
+///
+/// When the phantom points cannot be computed (a `gvar` that does not
+/// parse, a malformed glyph, a walk over its work budget), the glyph
+/// keeps its `hmtx` (or `vmtx`) advance: the font's own default, and
+/// what sigilbuzz used before it read phantom points. HarfBuzz
+/// substitutes half an em (or an em) there.
+///
+/// Horizontal advances never need `vmtx`, which only places the
+/// vertical phantom points: a horizontal run passes none, so a malformed
+/// `vmtx` cannot fail it.
+///
+/// The pipeline builds one per shaping call and hands it to the
+/// vertical origins, the fallback spaces, and the `stch` stretch.
 pub(super) struct FontAdvances<'a, 'c> {
-    hmtx: Hmtx<'a>,
-    vmtx: Option<Vmtx<'a>>,
+    face: &'c Face<'a>,
     coords: &'c [f32],
+    hmtx: Hmtx<'a>,
+    /// The vertical metrics of a vertical run.
+    vmtx: Option<Vmtx<'a>>,
     /// `None` at the default instance.
     hvar: Option<Hvar<'a>>,
+    /// `None` at the default instance and for a horizontal run.
     vvar: Option<Vvar<'a>>,
-    /// The tables of the phantom-point fallback, away from the default
-    /// instance in a `glyf` font with `gvar`.
-    phantoms: Option<PhantomTables<'a>>,
-}
-
-/// The tables the varied phantom points of a `glyf` glyph need.
-struct PhantomTables<'a> {
-    glyf: Glyf<'a>,
-    loca: Loca<'a>,
-    gvar: Gvar<'a>,
+    /// Some coord is not zero.
+    varied: bool,
+    /// Phantom-point advances computed so far, by glyph: `None` for a
+    /// glyph whose phantom points could not be computed.
+    h_phantom: RefCell<BTreeMap<u16, Option<i32>>>,
+    v_phantom: RefCell<BTreeMap<u16, Option<i32>>>,
 }
 
 impl<'a, 'c> FontAdvances<'a, 'c> {
-    /// Reads the tables the advances of `face` at `coords` come from.
-    pub(super) fn new(face: &Face<'a>, coords: &'c [f32]) -> Result<Self> {
-        let mut advances = Self {
-            hmtx: face.hmtx()?,
-            vmtx: face.vmtx()?,
-            coords,
-            hvar: None,
-            vvar: None,
-            phantoms: None,
+    /// Reads the metrics tables the advances of `face` at `coords` come
+    /// from. `vmtx` is the font's `vmtx` for a vertical run, and `None`
+    /// for a horizontal one, which then never reads `VVAR` either.
+    pub(super) fn new(
+        face: &'c Face<'a>,
+        coords: &'c [f32],
+        vmtx: Option<Vmtx<'a>>,
+    ) -> Result<Self> {
+        let varied = coords.iter().any(|&c| c != 0.0);
+        let hvar = if varied { face.hvar()? } else { None };
+        let vvar = if varied && vmtx.is_some() {
+            face.vvar()?
+        } else {
+            None
         };
-        if coords.iter().all(|&c| c == 0.0) {
-            return Ok(advances);
-        }
-        advances.hvar = face.hvar()?;
-        advances.vvar = face.vvar()?;
-        if advances.hvar.is_none() || advances.vvar.is_none() {
-            if let (Some(gvar), true) = (face.gvar()?, face.record(tag::GLYF).is_some()) {
-                advances.phantoms = Some(PhantomTables {
-                    glyf: face.glyf()?,
-                    loca: face.loca()?,
-                    gvar,
-                });
-            }
-        }
-        Ok(advances)
+        Ok(Self {
+            face,
+            coords,
+            hmtx: face.hmtx()?,
+            vmtx,
+            hvar,
+            vvar,
+            varied,
+            h_phantom: RefCell::default(),
+            v_phantom: RefCell::default(),
+        })
     }
 
     /// The horizontal advance of glyph `id`, in font units.
-    ///
-    /// # Errors
-    ///
-    /// On the phantom-point fallback, returns the error of a glyph
-    /// whose `glyf` or `gvar` data is malformed.
-    pub(super) fn h_advance(&self, id: u32) -> Result<i32> {
+    pub(super) fn h_advance(&self, id: u32) -> i32 {
         let id = id as u16;
         let base = i32::from(self.hmtx.advance(id).unwrap_or(0));
+        if !self.varied {
+            return base;
+        }
         if let Some(hvar) = &self.hvar {
-            return Ok(base.saturating_add(round_half_away(hvar.advance_delta(id, self.coords))));
+            return base.saturating_add(round_half_away(hvar.advance_delta(id, self.coords)));
         }
-        match self.varied_phantoms(id)? {
-            Some(pp) => Ok(round_half_away(pp[1].0 - pp[0].0).max(0)),
-            None => Ok(base),
-        }
+        self.phantom_advance(&self.h_phantom, id, false)
+            .unwrap_or(base)
     }
 
-    /// The vertical advance of glyph `id` from `vmtx`, in font units,
-    /// positive downward.
-    ///
-    /// # Errors
-    ///
-    /// As [`FontAdvances::h_advance`].
-    pub(super) fn v_advance(&self, vmtx: &Vmtx<'_>, id: u32) -> Result<i32> {
+    /// The vertical advance of glyph `id`, in font units, positive
+    /// downward, or `None` when the run has no `vmtx`.
+    pub(super) fn v_advance(&self, id: u32) -> Option<i32> {
+        let vmtx = self.vmtx.as_ref()?;
         let id = id as u16;
         let base = i32::from(vmtx.advance(id).unwrap_or(0));
+        if !self.varied {
+            return Some(base);
+        }
         if let Some(vvar) = &self.vvar {
-            return Ok(
-                base.saturating_add(round_half_away(vvar.advance_height_delta(id, self.coords)))
-            );
+            let delta = vvar.advance_height_delta(id, self.coords);
+            return Some(base.saturating_add(round_half_away(delta)));
         }
-        match self.varied_phantoms(id)? {
-            Some(pp) => Ok(round_half_away(pp[2].1 - pp[3].1).max(0)),
-            None => Ok(base),
-        }
+        Some(
+            self.phantom_advance(&self.v_phantom, id, true)
+                .unwrap_or(base),
+        )
     }
 
-    /// The phantom points of glyph `id` at the coords, or `None` when
-    /// the advances do not come from them.
-    fn varied_phantoms(&self, id: u16) -> Result<Option<[(f32, f32); 4]>> {
-        let Some(t) = &self.phantoms else {
-            return Ok(None);
-        };
+    /// The advance of glyph `id` from its varied phantom points, from
+    /// `cache` when the glyph was seen before.
+    fn phantom_advance(
+        &self,
+        cache: &RefCell<BTreeMap<u16, Option<i32>>>,
+        id: u16,
+        vertical: bool,
+    ) -> Option<i32> {
+        // The cells are only borrowed inside this method, which does
+        // not call itself, so the borrows always succeed.
+        if let Some(&advance) = cache.try_borrow().ok()?.get(&id) {
+            return advance;
+        }
+        let advance = self.walk_phantoms(id, vertical);
+        if let Ok(mut cache) = cache.try_borrow_mut() {
+            cache.insert(id, advance);
+        }
+        advance
+    }
+
+    /// Walks glyph `id` for its varied phantom points. `None` when the
+    /// font has no `glyf` or `gvar`, or the points cannot be computed;
+    /// the caller then keeps the glyph's static advance.
+    fn walk_phantoms(&self, id: u16, vertical: bool) -> Option<i32> {
+        let face = self.face;
+        face.record(tag::GLYF)?;
+        let gvar = face.gvar().ok()??;
+        let (glyf, loca) = (face.glyf().ok()?, face.loca().ok()?);
         let metrics = PhantomMetrics {
             hmtx: &self.hmtx,
-            vmtx: self.vmtx.as_ref(),
+            vmtx: if vertical { self.vmtx.as_ref() } else { None },
         };
-        t.glyf
-            .phantom_points_at_coords(&t.loca, id, &metrics, Some(&t.gvar), self.coords)
-            .map(Some)
+        let pp = glyf
+            .phantom_points_at_coords(&loca, id, Some(&gvar), self.coords, &metrics)
+            .ok()?;
+        let advance = if vertical {
+            pp[2].1 - pp[3].1
+        } else {
+            pp[1].0 - pp[0].0
+        };
+        Some(round_half_away(advance).max(0))
     }
 }
 

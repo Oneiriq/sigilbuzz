@@ -198,7 +198,7 @@ fn phantom_points_give_harfbuzz_advances_without_hvar() {
             continue;
         };
         let pp = glyf
-            .phantom_points_at_coords(&loca, gid, &metrics, gvar.as_ref(), &coords(&face, wght))
+            .phantom_points_at_coords(&loca, gid, gvar.as_ref(), &coords(&face, wght), &metrics)
             .unwrap();
         let advance = (pp[1].0 - pp[0].0).round().max(0.0) as i32;
         assert_eq!(advance, expected, "glyph {gid} at wght {wght}");

@@ -8,8 +8,8 @@ technical reasons, and the rules I follow when adding or changing public items.
 Every crate in the workspace is below 1.0, so a minor release may break the API. The
 crates are released together. Each release bumps the crates that changed, and one git
 tag covers the whole set. Companion crates keep their own version numbers, so pin
-versions that came out of the same release. For 0.22.0 that means `sigilbuzz = "0.22"`
-with, for example, `sigilbuzz-render = "0.9"` and `sigilbuzz-paint = "0.2"`.
+versions that came out of the same release. For 0.23.0 that means `sigilbuzz = "0.23"`
+with, for example, `sigilbuzz-render = "0.10"` and `sigilbuzz-paint = "0.3"`.
 [RELEASING.md](RELEASING.md) has the release checklist.
 
 The target is 1.0 in 2026, with a stable shaping API and a documented path for
@@ -151,9 +151,13 @@ signatures only change in a major version.
 - `word_breaks`
 - Added in 0.2.0:
   - `line_break_opportunities_with` and `WordBreak` (`Normal`, `KeepAll`, `BreakAll`):
-    the CSS `word-break` tailorings of the line breaking rules
-  - `WrapOptions::word_break`, which `wrap_lines` passes on. A struct literal of
-    `WrapOptions` needs the field, or `..WrapOptions::default()`
+    the CSS `word-break` tailorings of the line breaking rules. `WordBreak` is
+    `#[non_exhaustive]`, so a later CSS value such as `auto-phrase` is an additive
+    change, and a `match` on it outside the crate needs a wildcard arm
+  - `WrapOptions::word_break`, which `wrap_lines` passes on, and the builder methods
+    `WrapOptions::with_max_width`, `with_word_break` and `with_break_at_word_boundaries`.
+    Build options with the builders, or a struct literal with `..WrapOptions::default()`,
+    so a later field does not break your code
   - `line_break_class`: the `Line_Break` property of a character
   - `WordBreakIter`: the iterator `word_breaks` returns, now nameable
   - `LineBreakClass` has every UAX 14 class and is `#[non_exhaustive]` from 0.2.0: a

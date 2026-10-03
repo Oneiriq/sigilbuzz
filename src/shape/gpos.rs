@@ -1,13 +1,15 @@
 //! GPOS lookup application.
 //!
 //! HarfBuzz runs every GPOS feature of a shaping plan in one stage:
-//! it collects the lookups of all enabled features (`abvm`, `blwm`,
-//! `mark`, `mkmk`, plus `curs`, `dist` and `kern` for horizontal runs,
-//! plus whatever the caller enables, plus the language system's
-//! required feature whatever its tag), and applies them once each in
-//! lookup-list order ([`stage_lookups`], [`apply_stage`]). A lookup
-//! shared by two features runs once, and the font's lookup order,
-//! not the feature order, decides what runs first.
+//! it collects the lookups of all enabled features (`rvrn`, `abvm`,
+//! `blwm`, `mark`, `mkmk`, plus `curs`, `dist` and `kern` for
+//! horizontal runs, plus whatever the caller enables, plus the language
+//! system's required feature whatever its tag), and applies them once
+//! each in lookup-list order ([`stage_lookups`], [`apply_stage`]). A
+//! lookup shared by two features runs once, and the font's lookup
+//! order, not the feature order, decides what runs first. `rvrn` is
+//! there because HarfBuzz enables it for both tables; only GSUB gives
+//! it a stage of its own.
 //!
 //! Each lookup walks the run the way HarfBuzz's `apply_forward` does:
 //! at every position the lookup's flags do not skip, the subtables are
@@ -47,7 +49,7 @@ use crate::tables::layout::{
 use crate::tables::Gpos;
 
 /// GPOS features HarfBuzz enables for every run.
-const COMMON_FEATURES: [[u8; 4]; 4] = [*b"abvm", *b"blwm", *b"mark", *b"mkmk"];
+const COMMON_FEATURES: [[u8; 4]; 5] = [*b"rvrn", *b"abvm", *b"blwm", *b"mark", *b"mkmk"];
 /// GPOS features HarfBuzz enables for horizontal runs only.
 const HORIZONTAL_FEATURES: [[u8; 4]; 3] = [*b"curs", *b"dist", *b"kern"];
 

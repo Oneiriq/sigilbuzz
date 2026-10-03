@@ -4,7 +4,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::testing::{build_gvar, Tuple};
+use super::testing::{build_gvar, build_gvar_shared, Tuple};
 use super::*;
 
 fn assert_deltas(got: &[(f32, f32)], want: &[(f32, f32)]) {
@@ -88,6 +88,50 @@ fn unlisted_points_take_inferred_deltas() {
             (0.0, 0.0),
         ],
     );
+}
+
+#[test]
+fn shared_point_numbers_work_like_private_ones() {
+    // The tuple of [`three_contours`], its points listed once for the
+    // glyph, then a second tuple with points of its own. The shared
+    // list stands for the first tuple's points only.
+    let tuple = |points: Option<Vec<u16>>, deltas: Vec<(i16, i16)>| Tuple {
+        peak: vec![1.0],
+        points,
+        deltas,
+    };
+    let first = vec![(10, 20), (30, -20), (5, -7), (3, 3), (40, 0), (1000, 1000)];
+    let shared = build_gvar_shared(
+        1,
+        &[(
+            vec![0, 2, 6, 10, 12, 99],
+            vec![
+                tuple(None, first.clone()),
+                tuple(Some(vec![8]), vec![(1, 2)]),
+            ],
+        )],
+    );
+    let private = build_gvar(
+        1,
+        &[vec![
+            tuple(Some(vec![0, 2, 6, 10, 12, 99]), first),
+            tuple(Some(vec![8]), vec![(1, 2)]),
+        ]],
+    );
+    assert_ne!(shared, private);
+    let deltas = |bytes: &[u8]| {
+        let gvar = Gvar::parse(bytes).unwrap();
+        gvar.glyph_point_deltas(0, &[1.0], POINTS, END_POINTS)
+            .unwrap()
+    };
+    let got = deltas(&shared);
+    assert_deltas(&got, &deltas(&private));
+    // The second tuple moves contour C, points 8 and 9, rigidly.
+    assert_deltas(&got[8..10], &[(1.0, 2.0), (1.0, 2.0)]);
+
+    // An empty shared list means every point.
+    let all = build_gvar_shared(1, &[(vec![], vec![tuple(None, vec![(1, 1); 15])])]);
+    assert_deltas(&deltas(&all), &[(1.0, 1.0); 15]);
 }
 
 #[test]
@@ -245,8 +289,13 @@ fn phantom_deltas_match_the_dense_tail() {
     let dense = gvar
         .glyph_point_deltas(0, &[1.0], POINTS, END_POINTS)
         .unwrap();
-    let phantoms = gvar.phantom_deltas(0, &[1.0], POINTS.len()).unwrap();
+    let mut work = MAX_TUPLE_WORK;
+    let phantoms = gvar
+        .phantom_deltas(0, &[1.0], POINTS.len(), &mut work)
+        .unwrap();
     assert_deltas(&phantoms, &dense[POINTS.len()..]);
+    // One tuple header, then one tuple over every point.
+    assert_eq!(work, MAX_TUPLE_WORK - 1 - (POINTS.len() + 4));
 }
 
 /// The table [`three_contours`] builds, with its one tuple's data size
@@ -320,7 +369,8 @@ fn every_truncation_fails_cleanly() {
 #[test]
 fn many_tuples_over_many_points_hit_the_work_cap() {
     // Each tuple moves point 0 of a 65,532-point glyph (65,536 with
-    // the phantom points): 256 such tuples fit the cap, 257 do not.
+    // the phantom points). With one unit per tuple header, 255 such
+    // tuples fit the cap and 256 do not.
     let tuples = |n: usize| -> Vec<u8> {
         let tuple = || Tuple {
             peak: vec![1.0],
@@ -329,13 +379,31 @@ fn many_tuples_over_many_points_hit_the_work_cap() {
         };
         build_gvar(1, &[(0..n).map(|_| tuple()).collect()])
     };
-    let fits = tuples(256);
+    let fits = tuples(255);
     let gvar = Gvar::parse(&fits).unwrap();
-    assert!(gvar.phantom_deltas(0, &[1.0], 65_532).is_ok());
-    let over = tuples(257);
+    let mut work = MAX_TUPLE_WORK;
+    assert!(gvar.phantom_deltas(0, &[1.0], 65_532, &mut work).is_ok());
+    assert_eq!(work, MAX_TUPLE_WORK - 255 * (1 + 65_536));
+    let over = tuples(256);
     let gvar = Gvar::parse(&over).unwrap();
-    assert!(matches!(
-        gvar.phantom_deltas(0, &[1.0], 65_532),
-        Err(Error::Malformed { offset: 28, .. })
-    ));
+    // The last tuple's data overspends: past the glyph data at 28, its
+    // 4-byte header, 256 tuple headers of 6 bytes, and 255 tuples of 10
+    // (4 bytes of point numbers, 3 of x deltas, 3 of y deltas).
+    let mut work = MAX_TUPLE_WORK;
+    assert_eq!(
+        gvar.phantom_deltas(0, &[1.0], 65_532, &mut work),
+        Err(Error::Malformed {
+            offset: 28 + 4 + 6 * 256 + 10 * 255,
+            context: "gvar variation work exceeds the cap",
+        })
+    );
+    // A budget already spent fails on the first tuple header.
+    let mut spent = 0;
+    assert_eq!(
+        gvar.phantom_deltas(0, &[1.0], 65_532, &mut spent),
+        Err(Error::Malformed {
+            offset: 28 + 4,
+            context: "gvar variation work exceeds the cap",
+        })
+    );
 }

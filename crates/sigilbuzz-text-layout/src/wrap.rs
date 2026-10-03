@@ -28,16 +28,16 @@ use crate::linebreak::{line_break_opportunities_with, BreakOpportunity, WordBrea
 ///
 /// The default has no width limit, keeps words whole, and uses the
 /// default UAX 14 rules ([`WordBreak::Normal`]). Override single fields
-/// with struct update syntax:
+/// with the `with_*` methods, which keep compiling when a later version
+/// adds a field. A struct literal does not, unless it ends with
+/// `..WrapOptions::default()`.
 ///
 /// ```
 /// use sigilbuzz_text_layout::{WordBreak, WrapOptions};
 ///
-/// let options = WrapOptions {
-///     max_width: 320.0,
-///     word_break: WordBreak::KeepAll,
-///     ..WrapOptions::default()
-/// };
+/// let options = WrapOptions::default()
+///     .with_max_width(320.0)
+///     .with_word_break(WordBreak::KeepAll);
 /// assert!(options.break_at_word_boundaries);
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +66,58 @@ impl Default for WrapOptions {
             break_at_word_boundaries: true,
             word_break: WordBreak::Normal,
         }
+    }
+}
+
+impl WrapOptions {
+    /// Returns these options with [`max_width`](Self::max_width) set
+    /// to `max_width`.
+    ///
+    /// ```
+    /// use sigilbuzz_text_layout::WrapOptions;
+    ///
+    /// let options = WrapOptions::default().with_max_width(320.0);
+    /// assert_eq!(options.max_width, 320.0);
+    /// ```
+    #[must_use]
+    pub fn with_max_width(mut self, max_width: f32) -> Self {
+        self.max_width = max_width;
+        self
+    }
+
+    /// Returns these options with
+    /// [`break_at_word_boundaries`](Self::break_at_word_boundaries) set
+    /// to `break_at_word_boundaries`.
+    ///
+    /// ```
+    /// use sigilbuzz_text_layout::WrapOptions;
+    ///
+    /// // Split words wider than the line between glyph clusters.
+    /// let options = WrapOptions::default()
+    ///     .with_max_width(320.0)
+    ///     .with_break_at_word_boundaries(false);
+    /// assert!(!options.break_at_word_boundaries);
+    /// ```
+    #[must_use]
+    pub fn with_break_at_word_boundaries(mut self, break_at_word_boundaries: bool) -> Self {
+        self.break_at_word_boundaries = break_at_word_boundaries;
+        self
+    }
+
+    /// Returns these options with [`word_break`](Self::word_break) set
+    /// to `word_break`.
+    ///
+    /// ```
+    /// use sigilbuzz_text_layout::{WordBreak, WrapOptions};
+    ///
+    /// // Wrap Korean between words instead of between syllables.
+    /// let options = WrapOptions::default().with_word_break(WordBreak::KeepAll);
+    /// assert_eq!(options.word_break, WordBreak::KeepAll);
+    /// ```
+    #[must_use]
+    pub fn with_word_break(mut self, word_break: WordBreak) -> Self {
+        self.word_break = word_break;
+        self
     }
 }
 
@@ -101,7 +153,7 @@ pub struct LineRange {
 ///
 /// ```
 /// use sigilbuzz::Glyph;
-/// use sigilbuzz_text_layout::{wrap_lines, WordBreak, WrapOptions};
+/// use sigilbuzz_text_layout::{wrap_lines, WrapOptions};
 ///
 /// // One glyph per letter, each 10 units wide.
 /// let text = "abcdef";
@@ -123,19 +175,11 @@ pub struct LineRange {
 ///     .collect();
 ///
 /// // The word stays whole by default.
-/// let whole = WrapOptions {
-///     max_width: 20.0,
-///     break_at_word_boundaries: true,
-///     word_break: WordBreak::Normal,
-/// };
+/// let whole = WrapOptions::default().with_max_width(20.0);
 /// assert_eq!(wrap_lines(&glyphs, text, whole).len(), 1);
 ///
 /// // Without word-boundary breaking it splits between clusters.
-/// let split = WrapOptions {
-///     max_width: 20.0,
-///     break_at_word_boundaries: false,
-///     word_break: WordBreak::Normal,
-/// };
+/// let split = whole.with_break_at_word_boundaries(false);
 /// assert_eq!(wrap_lines(&glyphs, text, split).len(), 3);
 /// ```
 #[must_use]
@@ -350,6 +394,21 @@ mod tests {
             });
         }
         glyphs
+    }
+
+    #[test]
+    fn builders_set_one_field_each() {
+        let options = WrapOptions::default()
+            .with_max_width(42.0)
+            .with_break_at_word_boundaries(false)
+            .with_word_break(WordBreak::BreakAll);
+        assert!((options.max_width - 42.0).abs() < f32::EPSILON);
+        assert!(!options.break_at_word_boundaries);
+        assert_eq!(options.word_break, WordBreak::BreakAll);
+        // Each method leaves the other fields alone.
+        let width_only = WrapOptions::default().with_max_width(42.0);
+        assert!(width_only.break_at_word_boundaries);
+        assert_eq!(width_only.word_break, WordBreak::Normal);
     }
 
     #[test]

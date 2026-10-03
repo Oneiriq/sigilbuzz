@@ -3,8 +3,9 @@
 //! composite components, and phantom points.
 
 use super::*;
-use crate::tables::gvar::testing::{build_gvar, Tuple};
+use crate::tables::gvar::testing::{build_gvar, build_gvar_shared, Tuple};
 use crate::tables::Gvar;
+use crate::tables::Vmtx;
 
 /// The square every test glyph 1 is: (0, 0) to (100, 100).
 fn square() -> Vec<u8> {
@@ -252,9 +253,9 @@ fn malformed_composite_deltas_fail_the_outline() {
 
 /// Glyph 0 is a composite of the square, with `flags` on the
 /// component; its own tuple moves its advance point by -100. Returns
-/// its phantom points at peak 1.0. hmtx: glyph 0 advances 600, glyph 1
+/// its phantom points at `coord`. hmtx: glyph 0 advances 600, glyph 1
 /// 500, both with a zero left side bearing.
-fn composite_phantoms(flags: u16) -> Result<[(f32, f32); 4]> {
+fn composite_phantoms(flags: u16, coord: f32) -> Result<[(f32, f32); 4]> {
     let parent = build_composite(&[Comp {
         flags: COMP_ARGS_ARE_XY_VALUES | flags,
         glyph: 1,
@@ -277,45 +278,423 @@ fn composite_phantoms(flags: u16) -> Result<[(f32, f32); 4]> {
         hmtx: &hmtx,
         vmtx: None,
     };
-    glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[1.0])
+    glyf.phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
 }
 
 #[test]
 fn phantom_points_move_by_their_deltas() {
     // The composite's own advance point: 600 - 100.
-    let pp = composite_phantoms(0).unwrap();
+    let pp = composite_phantoms(0, 1.0).unwrap();
     assert_points(&pp, &[(0.0, 0.0), (500.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
     // USE_MY_METRICS: the square's, 500 + 30.
-    let pp = composite_phantoms(COMP_USE_MY_METRICS).unwrap();
+    let pp = composite_phantoms(COMP_USE_MY_METRICS, 1.0).unwrap();
     assert_points(&pp, &[(0.0, 0.0), (530.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
 }
 
 #[test]
-fn phantom_points_stop_at_a_self_referencing_composite() {
+fn use_my_metrics_holds_at_the_default_instance() {
+    // The square's advance point, 500 + 30 * coord, all the way down to
+    // the default instance, where it is not the composite's own 600.
+    for (coord, advance) in [(1.0, 530.0), (0.5, 515.0), (0.01, 500.3), (0.0, 500.0)] {
+        let pp = composite_phantoms(COMP_USE_MY_METRICS, coord).unwrap();
+        assert_points(&pp, &[(0.0, 0.0), (advance, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+    }
+    // Without the flag the composite keeps its own, 600 - 100 * coord.
+    for (coord, advance) in [(0.5, 550.0), (0.0, 600.0)] {
+        let pp = composite_phantoms(0, coord).unwrap();
+        assert_points(&pp[..2], &[(0.0, 0.0), (advance, 0.0)]);
+    }
+}
+
+/// Composites whose `USE_MY_METRICS` components lead back to them:
+/// `uses[g]` is the glyph composite `g` names. hmtx gives glyph `g` an
+/// advance of 600 - 100 * g, and a tuple at peak 1.0 moves each glyph's
+/// advance point by 10 * (g + 1). Returns glyph 0's phantom points at
+/// `coord`.
+fn cyclic_phantoms(uses: &[u16], coord: f32) -> Result<[(f32, f32); 4]> {
+    let glyphs: Vec<Vec<u8>> = uses
+        .iter()
+        .map(|&glyph| {
+            build_composite(&[Comp {
+                flags: COMP_ARGS_ARE_XY_VALUES | COMP_USE_MY_METRICS,
+                glyph,
+                args: (0, 0),
+                scale: None,
+            }])
+        })
+        .collect();
+    let n = uses.len() as u16;
+    let (glyf_bytes, loca_bytes) = build_tables(&glyphs);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, n).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    // One component, so the advance point is point 2.
+    let tuples: Vec<Vec<Tuple>> = (0..n)
+        .map(|g| {
+            vec![Tuple {
+                peak: vec![1.0],
+                points: Some(vec![2]),
+                deltas: vec![(10 * (g as i16 + 1), 0)],
+            }]
+        })
+        .collect();
+    let gvar_bytes = build_gvar(1, &tuples);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    let metrics: Vec<(u16, i16)> = (0..n).map(|g| (600 - 100 * g, 0)).collect();
+    let hmtx_bytes = build_hmtx(&metrics);
+    let hmtx = Hmtx::parse(&hmtx_bytes, n, n).unwrap();
+    let metrics = PhantomMetrics {
+        hmtx: &hmtx,
+        vmtx: None,
+    };
+    glyf.phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
+}
+
+#[test]
+fn phantom_points_skip_a_self_referencing_composite() {
+    // HarfBuzz's decycler stops at the first repeat: glyph 0 inside
+    // glyph 0 keeps its own points, 600 moved by 10.
+    let pp = cyclic_phantoms(&[0], 1.0).unwrap();
+    assert_points(&pp[..2], &[(0.0, 0.0), (610.0, 0.0)]);
+    // At the default instance nothing moves.
+    let pp = cyclic_phantoms(&[0], 0.0).unwrap();
+    assert_points(&pp[..2], &[(0.0, 0.0), (600.0, 0.0)]);
+}
+
+#[test]
+fn phantom_points_skip_a_longer_cycle_where_harfbuzz_does() {
+    // The decycler's tortoise moves at half speed, so it sees a longer
+    // cycle a few levels late, and the glyph where it does keeps its own
+    // points. The advances match HarfBuzz 14.5.0 on the same glyphs.
+    for (uses, advance) in [
+        // 0, 1, 0, 1: glyph 1 at depth 3, 500 moved by 20.
+        (&[1, 0][..], 520.0),
+        // 0, 1, 2, 0, 1, 2: glyph 2 at depth 5, 400 moved by 30.
+        (&[1, 2, 0][..], 430.0),
+        // Glyph 3 at depth 7, 300 moved by 40.
+        (&[1, 2, 3, 0][..], 340.0),
+    ] {
+        let pp = cyclic_phantoms(uses, 1.0).unwrap();
+        assert_points(&pp[..2], &[(0.0, 0.0), (advance, 0.0)]);
+    }
+}
+
+/// A composite tree over the square: glyph 0 is the square and glyph
+/// `k` names glyph `k - 1` `fanout` times, with `flags` on every
+/// component, up to the root, glyph `levels`. Every glyph has `tuples`
+/// tuples at peak 1.0 over all of its points, with zero deltas.
+fn composite_tree(levels: u16, fanout: u16, tuples: usize, flags: u16) -> [Vec<u8>; 3] {
+    let mut glyphs = vec![square()];
+    let mut variations = Vec::new();
+    for level in 1..=levels {
+        let comps: Vec<Comp> = (0..fanout)
+            .map(|_| Comp {
+                flags: COMP_ARGS_ARE_XY_VALUES | flags,
+                glyph: level - 1,
+                args: (0, 0),
+                scale: None,
+            })
+            .collect();
+        glyphs.push(build_composite(&comps));
+    }
+    for glyph in 0..=levels {
+        let count = if glyph == 0 {
+            8
+        } else {
+            usize::from(fanout) + 4
+        };
+        let tuple = || Tuple {
+            peak: vec![1.0],
+            points: None,
+            deltas: vec![(0, 0); count],
+        };
+        variations.push((0..tuples).map(|_| tuple()).collect());
+    }
+    let (glyf, loca) = build_tables(&glyphs);
+    [glyf, loca, build_gvar(1, &variations)]
+}
+
+#[test]
+fn an_outline_walk_charges_every_visit_to_one_budget() {
+    // Two levels of three components over the square, two tuples per
+    // glyph. A tuple costs one unit for its header and one per point
+    // (its own points plus the four phantom points): the root and the
+    // three middle composites 2 + 2 * 7 each, the nine squares 2 + 2 * 8.
+    let [glyf_bytes, loca_bytes, gvar_bytes] = composite_tree(2, 3, 2, 0);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    let cx = FlattenCtx {
+        loca: &loca,
+        metrics: None,
+        var: Variation::new(Some(&gvar), &[1.0]),
+    };
+    let mut budget = FlattenBudget::new();
+    let mut flat = FlatGlyph::default();
+    glyf.flatten(
+        &cx,
+        2,
+        None,
+        &Transform::identity(),
+        &mut flat,
+        0,
+        &mut budget,
+    )
+    .unwrap();
+    assert_eq!(flat.points.len(), 9 * 4);
+    assert_eq!(MAX_TUPLE_WORK - budget.work, 4 * 16 + 9 * 18);
+}
+
+#[test]
+fn a_composite_tree_shares_its_gvar_budget() {
+    // 225 squares and 16 composites, 64 tuples each: 64 + 64 * 8 units
+    // per square and 64 + 64 * 19 per composite, about 150,000 in all.
+    // Each glyph's own tuples fit a budget of 100,000; the tree's do
+    // not, whether drawn or walked for its USE_MY_METRICS phantoms.
+    let [glyf_bytes, loca_bytes, gvar_bytes] = composite_tree(2, 15, 64, COMP_USE_MY_METRICS);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    for (glyph, points) in [(0, 4), (1, 15), (2, 15)] {
+        let mut work = 100_000;
+        assert!(gvar
+            .phantom_deltas(glyph, &[1.0], points, &mut work)
+            .is_ok());
+    }
+    let hmtx_bytes = build_hmtx(&[(600, 0), (600, 0), (600, 0)]);
+    let hmtx = Hmtx::parse(&hmtx_bytes, 3, 3).unwrap();
+    let metrics = PhantomMetrics {
+        hmtx: &hmtx,
+        vmtx: None,
+    };
+    let cx = FlattenCtx {
+        loca: &loca,
+        metrics: Some(&metrics),
+        var: Variation::new(Some(&gvar), &[1.0]),
+    };
+    let small = || FlattenBudget {
+        work: 100_000,
+        ..FlattenBudget::new()
+    };
+    let assert_cap = |r: Result<()>| {
+        assert!(
+            matches!(
+                r,
+                Err(Error::Malformed {
+                    context: "gvar variation work exceeds the cap",
+                    ..
+                })
+            ),
+            "{r:?}"
+        );
+    };
+    let identity = Transform::identity();
+    let mut flat = FlatGlyph::default();
+    let drawn = glyf.flatten(&cx, 2, None, &identity, &mut flat, 0, &mut small());
+    assert_cap(drawn.map(drop));
+    let phantoms = glyf.varied_phantoms(&cx, &metrics, 2, 0, &mut small());
+    assert_cap(phantoms.map(drop));
+    // The full cap covers the tree.
+    let mut flat = FlatGlyph::default();
+    let mut budget = FlattenBudget::new();
+    assert!(glyf
+        .flatten(&cx, 2, None, &identity, &mut flat, 0, &mut budget)
+        .is_ok());
+}
+
+// The expected points and advances below match HarfBuzz 14.5.0 on the
+// same glyphs, built with fontTools, at wght 900 (coord 1.0) and 650
+// (coord 0.5) of a 400 to 900 axis.
+
+/// Glyph 0 names glyph 1 at (100, 50) moved by (6, 4) and scaled by
+/// half, with `flags`; glyph 1 names the square, glyph 2, at (200, 300)
+/// moved by (10, -20). Draws glyph 0 at `coord`.
+fn nested(flags: u16, coord: f32) -> Vec<(f32, f32)> {
     let parent = build_composite(&[Comp {
-        flags: COMP_ARGS_ARE_XY_VALUES | COMP_USE_MY_METRICS,
-        glyph: 0,
-        args: (0, 0),
+        flags: COMP_ARGS_ARE_XY_VALUES | flags,
+        glyph: 1,
+        args: (100, 50),
+        scale: Some(0.5),
+    }]);
+    let middle = build_composite(&[Comp {
+        flags: COMP_ARGS_ARE_XY_VALUES,
+        glyph: 2,
+        args: (200, 300),
         scale: None,
     }]);
-    let (glyf_bytes, loca_bytes) = build_tables(&[parent]);
+    let (glyf_bytes, loca_bytes) = build_tables(&[parent, middle, square()]);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    let gvar_bytes = build_gvar(
+        1,
+        &[
+            vec![Tuple {
+                peak: vec![1.0],
+                points: Some(vec![0]),
+                deltas: vec![(6, 4)],
+            }],
+            vec![Tuple {
+                peak: vec![1.0],
+                points: None,
+                deltas: vec![(10, -20), (0, 0), (0, 0), (0, 0), (0, 0)],
+            }],
+            vec![square_tuple()],
+        ],
+    );
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    let mut o = Outline::new();
+    glyf.outline_at_coords(&loca, 0, Some(&gvar), &[coord], None, &mut o)
+        .unwrap();
+    points(&o)
+}
+
+/// The corners of the box from `(x0, y0)` to `(x1, y1)`, in the
+/// square's point order.
+fn corners(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<(f32, f32)> {
+    vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+}
+
+#[test]
+fn nested_composites_compose_their_scales_and_deltas() {
+    // The square grows to 120 by 110 and moves by (210, 280) in glyph
+    // 1, which glyph 0 halves and moves by (106, 54).
+    assert_points(&nested(0, 1.0), &corners(211.0, 194.0, 271.0, 249.0));
+    assert_points(&nested(0, 0.5), &corners(205.5, 197.0, 260.5, 249.5));
+    // A scaled offset is halved with the points: (53, 27).
+    let scaled = COMP_SCALED_COMPONENT_OFFSET;
+    assert_points(&nested(scaled, 1.0), &corners(158.0, 167.0, 218.0, 222.0));
+    assert_points(&nested(scaled, 0.5), &corners(154.0, 171.0, 209.0, 223.5));
+}
+
+#[test]
+fn shared_and_private_point_numbers_mix() {
+    // The square's tuple lists its points once for the glyph; a second
+    // tuple lists point 1 alone, which moves the contour by (5, 0) and
+    // leaves the phantom points, which are on no contour.
+    let shifted = Tuple {
+        peak: vec![1.0],
+        points: Some(vec![1]),
+        deltas: vec![(5, 0)],
+    };
+    let shared = Tuple {
+        points: None,
+        ..square_tuple()
+    };
+    let gvar_bytes = build_gvar_shared(1, &[(vec![0, 2, 5], vec![shared, shifted])]);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    let (glyf_bytes, loca_bytes) = build_tables(&[square()]);
     let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
     let glyf = Glyf::new(&glyf_bytes);
-    let gvar_bytes = build_gvar(1, &[vec![]]);
-    let gvar = Gvar::parse(&gvar_bytes).unwrap();
-    let hmtx_bytes = build_hmtx(&[(600, 0)]);
+    let hmtx_bytes = build_hmtx(&[(500, 0)]);
     let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
     let metrics = PhantomMetrics {
         hmtx: &hmtx,
         vmtx: None,
     };
-    assert!(matches!(
-        glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[1.0]),
-        Err(Error::Malformed { .. })
-    ));
-    // At the default instance nothing recurses.
-    let pp = glyf
-        .phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[0.0])
-        .unwrap();
-    assert_points(&pp[..2], &[(0.0, 0.0), (600.0, 0.0)]);
+    for (coord, outline, advance) in [
+        (1.0, corners(5.0, 0.0, 125.0, 110.0), 530.0),
+        (0.5, corners(2.5, 0.0, 112.5, 105.0), 515.0),
+    ] {
+        let mut o = Outline::new();
+        glyf.outline_at_coords(&loca, 0, Some(&gvar), &[coord], None, &mut o)
+            .unwrap();
+        assert_points(&points(&o), &outline);
+        let pp = glyf
+            .phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
+            .unwrap();
+        assert_points(&pp[..2], &[(0.0, 0.0), (advance, 0.0)]);
+    }
+}
+
+#[test]
+fn an_anchor_on_a_phantom_point_moves_with_it() {
+    // The first square sits at its offset moved by (5, 5). The second
+    // puts its phantom point 2 (index 5, the advance origin) on the
+    // first square's point 1. The square advances 500, moved by 30 at
+    // peak 1.0, so it lands 530 to the left of that corner.
+    let parent = build_composite(&[
+        Comp {
+            flags: COMP_ARGS_ARE_XY_VALUES,
+            glyph: 1,
+            args: (0, 0),
+            scale: None,
+        },
+        Comp {
+            flags: 0,
+            glyph: 1,
+            args: (1, 5),
+            scale: None,
+        },
+    ]);
+    let (glyf_bytes, loca_bytes) = build_tables(&[parent, square()]);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 2).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    let tuple = Tuple {
+        peak: vec![1.0],
+        points: Some(vec![0, 1]),
+        deltas: vec![(5, 5), (77, 77)],
+    };
+    let gvar_bytes = build_gvar(1, &[vec![tuple], vec![square_tuple()]]);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    let hmtx_bytes = build_hmtx(&[(600, 0), (500, 0)]);
+    let hmtx = Hmtx::parse(&hmtx_bytes, 2, 2).unwrap();
+    let metrics = PhantomMetrics {
+        hmtx: &hmtx,
+        vmtx: None,
+    };
+    let draw = |coord: f32| {
+        let mut o = Outline::new();
+        glyf.outline_at_coords(&loca, 0, Some(&gvar), &[coord], Some(&metrics), &mut o)
+            .unwrap();
+        points(&o)
+    };
+    let mut want = corners(5.0, 5.0, 125.0, 115.0);
+    want.extend(corners(-405.0, 5.0, -285.0, 115.0));
+    assert_points(&draw(1.0), &want);
+    let mut want = corners(2.5, 2.5, 112.5, 107.5);
+    want.extend(corners(-402.5, 2.5, -292.5, 107.5));
+    assert_points(&draw(0.5), &want);
+    // At the default instance the phantom point is the hmtx one.
+    let mut want = corners(0.0, 0.0, 100.0, 100.0);
+    want.extend(corners(-400.0, 0.0, -300.0, 100.0));
+    assert_points(&draw(0.0), &want);
+}
+
+#[test]
+fn vertical_phantom_points_take_their_deltas() {
+    // vmtx: advance height 1200, top side bearing 80, over the square's
+    // header yMax of 1000: phantom point 3 at 1080 and point 4 at -120.
+    // The tuple moves them by 40 and -25, so the vertical advance grows
+    // to 1265, and half way to 1232.5, rounded away from zero to 1233.
+    let (glyf_bytes, loca_bytes) = build_tables(&[square()]);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    let tuple = Tuple {
+        peak: vec![1.0],
+        points: Some(vec![0, 2, 5, 6, 7]),
+        deltas: vec![(0, 0), (20, 10), (30, 0), (0, 40), (0, -25)],
+    };
+    let gvar_bytes = build_gvar(1, &[vec![tuple]]);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    let hmtx_bytes = build_hmtx(&[(500, 0)]);
+    let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+    // vmtx has hmtx's layout: one (advance, side bearing) pair.
+    let vmtx_bytes = build_hmtx(&[(1200, 80)]);
+    let vmtx = Vmtx::parse(&vmtx_bytes, 1, 1).unwrap();
+    let metrics = PhantomMetrics {
+        hmtx: &hmtx,
+        vmtx: Some(&vmtx),
+    };
+    for (coord, top, bottom, advance) in [
+        (1.0, 1120.0, -145.0, 1265),
+        (0.5, 1100.0, -132.5, 1233),
+        (0.0, 1080.0, -120.0, 1200),
+    ] {
+        let pp = glyf
+            .phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
+            .unwrap();
+        assert_points(&pp[2..], &[(0.0, top), (0.0, bottom)]);
+        // Rounded half away from zero, as the shaper rounds it.
+        let height = pp[2].1 - pp[3].1;
+        assert_eq!((height + 0.5) as i32, advance, "{height}");
+    }
 }

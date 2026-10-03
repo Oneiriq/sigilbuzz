@@ -107,8 +107,10 @@ pub(crate) fn bake_ivs_partial(
 ///
 /// A parse error, measured from the start of `ivs_bytes`, when the
 /// store is malformed, not format 1, has an axis count that differs
-/// from `pins`, or has subtables that overlap so heavily that
-/// projecting them would read far more bytes than the store holds.
+/// from `pins`, has subtables that overlap so heavily that projecting
+/// them would read far more bytes than the store holds, or has a
+/// subtable that keeps more than 32,767 regions, more than its
+/// all-wide rewrite can count.
 /// [`SubsetError::Unsupported`] when the projected store
 /// outgrows its Offset32s. Offsets and sizes are checked, so a crafted
 /// Offset32 cannot wrap a 32-bit `usize`.
@@ -249,6 +251,15 @@ pub(crate) fn project_ivs(
             new_outer_for_old.push(None);
             continue;
         }
+        // Every kept column is written wide, so wordDeltaCount equals
+        // the kept region count, and its top bit is the LONG_WORDS flag.
+        let surviving_count = u16::try_from(surviving_slots.len())
+            .ok()
+            .filter(|&count| count <= 0x7FFF)
+            .ok_or(sigilbuzz::Error::Malformed {
+                offset: sub_off + 4,
+                context: "ItemVariationData keeps more than 32,767 regions",
+            })?;
 
         // Read every delta row's source slots. Each slot's source
         // encoding depends on (slot < word_delta_count, long_words).
@@ -323,7 +334,6 @@ pub(crate) fn project_ivs(
         // Emit the subtable body.
         let mut sub_bytes: Vec<u8> = Vec::new();
         sub_bytes.extend_from_slice(&(item_count as u16).to_be_bytes());
-        let surviving_count = surviving_slots.len() as u16;
         let wdc_word: u16 = if all_fit_i16 {
             // wordDeltaCount = surviving_count (all wide as i16),
             // long_words bit clear.

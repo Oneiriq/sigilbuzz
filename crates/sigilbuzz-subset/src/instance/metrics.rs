@@ -10,6 +10,7 @@ use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use super::glyf::clamp_i16;
+use crate::hmtx::emit_long_metrics;
 use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
 use crate::warnings::Warnings;
 use crate::SubsetError;
@@ -49,30 +50,10 @@ pub(super) fn bake_hmtx(
     }
 
     // Compress trailing identical advances into the LSB-only tail.
-    let mut long_count = advances.len();
-    if long_count > 1 {
-        let last = advances[long_count - 1];
-        while long_count > 1 && advances[long_count - 1] == last {
-            long_count -= 1;
-        }
-        long_count += 1;
-    }
-    if long_count == 0 {
-        long_count = 1;
-    }
-
-    let mut out = Vec::with_capacity(advances.len() * 4);
-    for (advance, lsb) in advances.iter().zip(lsbs.iter()).take(long_count) {
-        out.extend_from_slice(&advance.to_be_bytes());
-        out.extend_from_slice(&lsb.to_be_bytes());
-    }
-    for lsb in lsbs.iter().skip(long_count) {
-        out.extend_from_slice(&lsb.to_be_bytes());
-    }
-
+    let (bytes, number_of_h_metrics) = emit_long_metrics(&advances, &lsbs);
     Ok(HmtxBake {
-        bytes: out,
-        number_of_h_metrics: long_count as u16,
+        bytes,
+        number_of_h_metrics,
     })
 }
 
@@ -80,40 +61,71 @@ pub(super) fn bake_hmtx(
 // vmtx bake (VVAR-aware)
 // ---------------------------------------------------------------------------
 
+/// What a warning about a vertical metrics table left out.
+const VERTICAL_DROPPED: &str = "the vhea and vmtx tables";
+
 pub(super) struct VmtxBake {
-    /// New `vmtx` bytes, or `None` when the source has no `vmtx`.
+    /// New `vmtx` bytes, or `None` when the source has no `vmtx` or
+    /// it is left out (see `left_out`).
     pub(super) vmtx_bytes: Option<Vec<u8>>,
     /// Recomputed `numberOfLongVerMetrics` for the rebuilt table. The
     /// caller must patch `vhea` with this value when it differs from
     /// the source's count. Holds zero when no vmtx was emitted.
     pub(super) number_of_long_ver_metrics: u16,
+    /// Source tables the bake could not read, which the instance
+    /// leaves out: `vhea` and `vmtx` together, and a `VVAR` whose
+    /// deltas could not be folded in. Each is reported in the warnings.
+    pub(super) left_out: Vec<[u8; 4]>,
 }
 
+impl VmtxBake {
+    /// No `vmtx` to emit, leaving out `left_out`.
+    fn without_vmtx(left_out: Vec<[u8; 4]>) -> Self {
+        Self {
+            vmtx_bytes: None,
+            number_of_long_ver_metrics: 0,
+            left_out,
+        }
+    }
+}
+
+/// Rebuilds `vmtx` with the `VVAR` advance height and top side bearing
+/// deltas at `coords` folded in.
+///
+/// A malformed `vhea` or `vmtx` is left out with its partner, and a
+/// malformed `VVAR` is left out and its deltas not applied, as the
+/// subsetter does; each is reported in `warnings` and named in
+/// [`VmtxBake::left_out`]. A `vmtx` without a `vhea` cannot be sliced,
+/// so it is not rebuilt and rides through as it is.
 pub(super) fn bake_vmtx(
     face: &Face<'_>,
     coords: &[f32],
     num_glyphs: u16,
-) -> Result<VmtxBake, SubsetError> {
-    let vmtx = face.vmtx().map_err(SubsetError::from)?;
-    let Some(vmtx) = vmtx else {
-        return Ok(VmtxBake {
-            vmtx_bytes: None,
-            number_of_long_ver_metrics: 0,
-        });
+    warnings: &Warnings,
+) -> VmtxBake {
+    // Parse `vhea` on its own first, so a problem there is reported
+    // against `vhea` rather than the `vmtx` that depends on it. The
+    // long count it holds is recomputed below from the post-VVAR
+    // advances.
+    if let Err(e) = face.vhea() {
+        warnings.parse_error(tag::VHEA, 0, &e, VERTICAL_DROPPED);
+        return VmtxBake::without_vmtx(alloc::vec![tag::VHEA, tag::VMTX]);
+    }
+    let vmtx = match face.vmtx() {
+        Ok(Some(vmtx)) => vmtx,
+        Ok(None) => return VmtxBake::without_vmtx(Vec::new()),
+        Err(e) => {
+            warnings.parse_error(tag::VMTX, 0, &e, VERTICAL_DROPPED);
+            return VmtxBake::without_vmtx(alloc::vec![tag::VHEA, tag::VMTX]);
+        }
     };
-    // vhea must be present whenever vmtx is. The parser uses
-    // `numberOfLongVerMetrics` to slice the table. Confirm presence
-    // here so a malformed source (vmtx without vhea) errors cleanly
-    // before we try to re-emit. The actual long count is recomputed
-    // below from the post-VVAR advance vector.
-    let _ = face
-        .vhea()
-        .map_err(SubsetError::from)?
-        .ok_or(SubsetError::Unsupported(
-            "instance: vmtx present without vhea",
-        ))?;
 
-    let vvar = face.vvar().map_err(SubsetError::from)?;
+    let mut left_out = Vec::new();
+    let vvar = face.vvar().unwrap_or_else(|e| {
+        warnings.parse_error(tag::VVAR, 0, &e, "the whole table");
+        left_out.push(tag::VVAR);
+        None
+    });
 
     // Compute the new (advance, tsb) per gid. Every glyph that ends
     // up in the long range carries its own advance; trailing glyphs
@@ -140,41 +152,16 @@ pub(super) fn bake_vmtx(
         tsbs.push(clamp_i16(new_tsb));
     }
 
-    let (out, long_count) = emit_vmtx_bytes(&advances, &tsbs);
+    // The long count is recomputed, so trailing glyphs that now share
+    // an advance fold into the tsb-only tail, and a VVAR delta that
+    // sets a trailing glyph's advance apart extends the long range.
+    let (out, long_count) = emit_long_metrics(&advances, &tsbs);
 
-    Ok(VmtxBake {
+    VmtxBake {
         vmtx_bytes: Some(out),
         number_of_long_ver_metrics: long_count,
-    })
-}
-
-/// Emits a vmtx body from per-gid `advances` + `tsbs`, recomputing the
-/// `numberOfLongVerMetrics` count so trailing glyphs that now share an
-/// advance compress into the tsb-only tail. Mirrors `bake_hmtx`'s long-
-/// count compression so VVAR-induced advance deltas at trailing gids
-/// extend the long range below.
-pub(super) fn emit_vmtx_bytes(advances: &[u16], tsbs: &[i16]) -> (Vec<u8>, u16) {
-    debug_assert_eq!(advances.len(), tsbs.len());
-    let mut long_count = advances.len();
-    if long_count > 1 {
-        let last = advances[long_count - 1];
-        while long_count > 1 && advances[long_count - 1] == last {
-            long_count -= 1;
-        }
-        long_count += 1;
+        left_out,
     }
-    if long_count == 0 {
-        long_count = 1;
-    }
-    let mut out = Vec::with_capacity(advances.len() * 4);
-    for (advance, tsb) in advances.iter().zip(tsbs.iter()).take(long_count) {
-        out.extend_from_slice(&advance.to_be_bytes());
-        out.extend_from_slice(&tsb.to_be_bytes());
-    }
-    for tsb in tsbs.iter().skip(long_count) {
-        out.extend_from_slice(&tsb.to_be_bytes());
-    }
-    (out, long_count as u16)
 }
 
 // ---------------------------------------------------------------------------

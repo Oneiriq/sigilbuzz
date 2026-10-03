@@ -15,6 +15,8 @@
 //! FeatureVariations condition format 1, agrees on the user-space
 //! cases, and the tests check that too.
 
+use std::time::{Duration, Instant};
+
 use rustybuzz::ttf_parser::Tag;
 use rustybuzz::{Face as RbFace, UnicodeBuffer, Variation};
 use sigilbuzz::{shape, Blob, Buffer, Face, Feature, Font};
@@ -589,4 +591,271 @@ fn a_gsub_whose_feature_variations_do_not_parse_is_left_out() {
     let face = Face::parse(&blob, 0).unwrap();
     let gsub = face.gsub().unwrap().expect("GSUB");
     assert!(gsub.feature_variations().is_err());
+}
+
+/// A copy of `font` with the tables of `overrides` in place of its own
+/// or added to it.
+fn with_tables(font: &[u8], overrides: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let face = Face::parse_bytes(font, 0).unwrap();
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = face
+        .records()
+        .iter()
+        .filter(|r| overrides.iter().all(|(tag, _)| *tag != r.tag))
+        .map(|r| (r.tag, face.table_bytes(r.tag).unwrap().to_vec()))
+        .collect();
+    tables.extend(overrides.iter().cloned());
+    tables.sort_by_key(|(tag, _)| *tag);
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + 16 * tables.len();
+    for (tag, body) in &tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        offset += body.len().next_multiple_of(4);
+    }
+    for (_, body) in &tables {
+        out.extend_from_slice(body);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    out
+}
+
+/// A 12-byte GSUB 1.1 whose ScriptList, FeatureList, and LookupList
+/// share the empty list at byte 10, where `featureVariationsOffset`
+/// would start, with no room for that field.
+const SHORT_1_1_HEADER: [u8; 12] = [0, 1, 0, 1, 0, 10, 0, 10, 0, 10, 0, 0];
+
+#[test]
+fn a_gsub_whose_1_1_header_is_cut_short_is_left_out() {
+    // HarfBuzz 14.5.0 rejects the table and shapes without it, as
+    // sigilbuzz did before it read FeatureVariations.
+    let font = with_tables(RUBIK, &[(*b"GSUB", SHORT_1_1_HEADER.to_vec())]);
+    let numr = [Feature {
+        tag: *b"numr",
+        value: 1,
+    }];
+    assert_eq!(
+        font_rows(&font, None, Some(900.0), "5\u{20AC}", &numr),
+        [(861, 0, 690, 0, 0), (1022, 1, 820, 0, 0)]
+    );
+}
+
+/// A one-record FeatureVariations whose ConditionSet names an "and" of
+/// two entries that both name the next "and", `levels` deep, over one
+/// value condition that holds whatever the delta of varIndex 0:
+/// `2^levels` paths to it, and `2^(levels + 1)` checks counting the
+/// ConditionSet. The record substitutes nothing.
+fn shared_ands(levels: usize) -> Vec<u8> {
+    let mut out = vec![0, 1, 0, 0, 0, 0, 0, 1];
+    out.extend_from_slice(&16u32.to_be_bytes()); // ConditionSet
+    out.extend_from_slice(&0u32.to_be_bytes()); // no substitution
+    out.extend_from_slice(&1u16.to_be_bytes()); // conditionCount
+    out.extend_from_slice(&6u32.to_be_bytes()); // the first "and"
+    for _ in 0..levels {
+        // Format 3, two entries, both naming the condition 9 bytes on.
+        out.extend_from_slice(&[0, 3, 2, 0, 0, 9, 0, 0, 9]);
+    }
+    // Format 2: defaultValue 32767, varIndex 0.
+    out.extend_from_slice(&[0, 2, 0x7F, 0xFF, 0, 0, 0, 0]);
+    out
+}
+
+/// Rubik with `variations` in place of its GSUB FeatureVariations, at
+/// the end of the GSUB.
+fn rubik_with_feature_variations(variations: &[u8]) -> Vec<u8> {
+    let face = Face::parse_bytes(RUBIK, 0).unwrap();
+    let mut gsub = face.table_bytes(*b"GSUB").unwrap().to_vec();
+    let offset = gsub.len() as u32;
+    gsub[10..14].copy_from_slice(&offset.to_be_bytes());
+    gsub.extend_from_slice(variations);
+    with_tables(RUBIK, &[(*b"GSUB", gsub)])
+}
+
+#[test]
+fn shared_conditions_cost_no_more_than_the_table_size_allows() {
+    // 13 levels make 2^14 checks, which any table may need. Every one
+    // of the 2^13 paths ends in a value condition that holds, so every
+    // shaping call evaluates them all.
+    let heavy = rubik_with_feature_variations(&shared_ands(13));
+    let face = Face::parse_bytes(&heavy, 0).unwrap();
+    let gsub = face.gsub().unwrap().unwrap();
+    let variations = gsub.feature_variations().unwrap().unwrap();
+    assert_eq!(variations.find_index(&[1.0], None), Some(0));
+    // 17 levels make 2^18 checks. A 183-byte table may not need more
+    // than 16384, so the GSUB is left out. HarfBuzz 14.5.0 leaves it
+    // out too: its sanitizer runs out of operations on this 6 KB GSUB.
+    // Both outputs below are HarfBuzz's.
+    let runaway = rubik_with_feature_variations(&shared_ands(17));
+    let face = Face::parse_bytes(&runaway, 0).unwrap();
+    let gsub = face.gsub().unwrap().unwrap();
+    assert!(matches!(
+        gsub.feature_variations(),
+        Err(sigilbuzz::Error::Malformed {
+            context: "FeatureVariations need more checks than sigilbuzz makes",
+            ..
+        })
+    ));
+    let numr = [Feature {
+        tag: *b"numr",
+        value: 1,
+    }];
+    let text = "5\u{20AC}";
+    // The record substitutes nothing, so `rvrn` swaps nothing in.
+    assert_eq!(
+        font_rows(&heavy, None, Some(900.0), text, &numr),
+        [(893, 0, 365, 0, 0), (1022, 1, 820, 0, 0)]
+    );
+    assert_eq!(
+        font_rows(&runaway, None, Some(900.0), text, &numr),
+        [(861, 0, 690, 0, 0), (1022, 1, 820, 0, 0)]
+    );
+    // Every shaping call parses and evaluates the conditions again.
+    // In a debug build the heavy font takes about 30 times as long as
+    // Rubik itself, the most a table of its size can cost. Without the
+    // size limit and the cached deltas, it took 180 times as long, and
+    // the runaway font over 2000 times.
+    let time = |font: &[u8]| {
+        let start = Instant::now();
+        for _ in 0..ROUNDS {
+            font_rows(font, None, Some(900.0), text, &numr);
+        }
+        start.elapsed()
+    };
+    let plain = time(RUBIK);
+    let budget = plain * 60 + Duration::from_secs(1);
+    for (label, font) in [("heavy", &heavy), ("runaway", &runaway)] {
+        let took = time(font);
+        assert!(
+            took < budget,
+            "{label}: {took:?} for {ROUNDS} calls, budget {budget:?}"
+        );
+    }
+}
+
+/// Shaping calls each timing makes.
+const ROUNDS: u32 = 20;
+
+const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
+
+/// A ScriptList with `DFLT` and `latn`, whose default language systems
+/// both list feature 0 alone.
+fn one_feature_script_list() -> Vec<u8> {
+    let mut out = vec![0, 2];
+    out.extend_from_slice(b"DFLT\0\x0E");
+    out.extend_from_slice(b"latn\0\x0E");
+    // The Script both records name: a default language system right
+    // after it, and no others.
+    out.extend_from_slice(&[0, 4, 0, 0]);
+    // No lookupOrder, no required feature, feature 0.
+    out.extend_from_slice(&[0, 0, 0xFF, 0xFF, 0, 1, 0, 0]);
+    out
+}
+
+/// A FeatureList of one `rvrn` feature with `lookups`.
+fn rvrn_feature_list(lookups: &[u16]) -> Vec<u8> {
+    let mut out = vec![0, 1];
+    out.extend_from_slice(b"rvrn\0\x08");
+    out.extend_from_slice(&[0, 0]); // featureParamsOffset
+    out.extend_from_slice(&(lookups.len() as u16).to_be_bytes());
+    for l in lookups {
+        out.extend_from_slice(&l.to_be_bytes());
+    }
+    out
+}
+
+/// A LookupList of one lookup of `lookup_type` with the one subtable
+/// `subtable`.
+fn one_lookup_list(lookup_type: u16, subtable: &[u8]) -> Vec<u8> {
+    let mut out = vec![0, 1, 0, 4];
+    out.extend_from_slice(&lookup_type.to_be_bytes());
+    // No lookupFlag, one subtable, right after the lookup.
+    out.extend_from_slice(&[0, 0, 0, 1, 0, 8]);
+    out.extend_from_slice(subtable);
+    out
+}
+
+/// A GSUB or GPOS of the three lists, version 1.1 with `variations`
+/// when there are some.
+fn layout_table(
+    scripts: &[u8],
+    features: &[u8],
+    lookups: &[u8],
+    variations: Option<&[u8]>,
+) -> Vec<u8> {
+    let header = if variations.is_some() { 14 } else { 10 };
+    let feature_list = header + scripts.len();
+    let lookup_list = feature_list + features.len();
+    let mut out = vec![0, 1, 0, u8::from(variations.is_some())];
+    for offset in [header, feature_list, lookup_list] {
+        out.extend_from_slice(&(offset as u16).to_be_bytes());
+    }
+    if variations.is_some() {
+        let offset = lookup_list + lookups.len();
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+    }
+    out.extend_from_slice(scripts);
+    out.extend_from_slice(features);
+    out.extend_from_slice(lookups);
+    out.extend_from_slice(variations.unwrap_or(&[]));
+    out
+}
+
+/// Open Sans with a GSUB whose `rvrn` has no lookups until its one
+/// FeatureVariations record, which holds everywhere, gives it an
+/// AlternateSubst lookup from `a` (glyph 68) to `b`, `c`, and `d` (69
+/// to 71), and a GPOS whose `rvrn` adds 100 units to the advance of
+/// all four.
+fn open_sans_with_rvrn() -> Vec<u8> {
+    // Format 1: Coverage at 16, one AlternateSet, at 8.
+    let alternates = [
+        0, 1, 0, 16, 0, 1, 0, 8, 0, 3, 0, 69, 0, 70, 0, 71, 0, 1, 0, 1, 0, 68,
+    ];
+    let variations = [
+        0, 1, 0, 0, 0, 0, 0, 1, // header
+        0, 0, 0, 0, 0, 0, 0, 16, // null ConditionSet, substitution
+        0, 1, 0, 0, 0, 1, // FeatureTableSubstitution
+        0, 0, 0, 0, 0, 12, // feature 0
+        0, 0, 0, 1, 0, 0, // the alternate Feature: lookup 0
+    ];
+    let gsub = layout_table(
+        &one_feature_script_list(),
+        &rvrn_feature_list(&[]),
+        &one_lookup_list(3, &alternates),
+        Some(&variations),
+    );
+    // Format 1: Coverage at 8, an XAdvance of 100 for every glyph.
+    let advance = [
+        0, 1, 0, 8, 0, 4, 0, 100, 0, 1, 0, 4, 0, 68, 0, 69, 0, 70, 0, 71,
+    ];
+    let gpos = layout_table(
+        &one_feature_script_list(),
+        &rvrn_feature_list(&[0]),
+        &one_lookup_list(1, &advance),
+        None,
+    );
+    with_tables(OPEN_SANS, &[(*b"GSUB", gsub), (*b"GPOS", gpos)])
+}
+
+#[test]
+fn the_rvrn_value_picks_the_alternate_and_rvrn_positions_too() {
+    // HarfBuzz 14.5.0: the value of `rvrn` picks the alternate, 1 for
+    // the first, and one past the last substitutes nothing. GPOS
+    // `rvrn` adds its 100 units unless `rvrn` is off.
+    let font = open_sans_with_rvrn();
+    let rows = |features: &[Feature]| font_rows(&font, None, None, "a", features);
+    let rvrn = |value| Feature {
+        tag: *b"rvrn",
+        value,
+    };
+    assert_eq!(rows(&[]), [(69, 0, 1355, 0, 0)]);
+    assert_eq!(rows(&[rvrn(1)]), [(69, 0, 1355, 0, 0)]);
+    assert_eq!(rows(&[rvrn(2)]), [(70, 0, 1075, 0, 0)]);
+    assert_eq!(rows(&[rvrn(3)]), [(71, 0, 1355, 0, 0)]);
+    assert_eq!(rows(&[rvrn(4)]), [(68, 0, 1239, 0, 0)]);
+    assert_eq!(rows(&[rvrn(255)]), [(68, 0, 1239, 0, 0)]);
+    assert_eq!(rows(&[rvrn(0)]), [(68, 0, 1139, 0, 0)]);
 }

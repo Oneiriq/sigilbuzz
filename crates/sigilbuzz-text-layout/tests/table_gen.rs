@@ -5,8 +5,8 @@
 //!   of every code point, with a few flag bits the line breaking rules
 //!   read alongside it: East_Asian_Width F, W, or H (LB19a, LB30), the
 //!   initial and final quotation marks (LB15a, LB15b, LB19), the SA
-//!   characters that are marks (LB1), the typographic letter units
-//!   of CSS `word-break: keep-all`, and the unassigned
+//!   characters that are marks (LB1), the letter units of CSS
+//!   `word-break: keep-all` as Blink finds them, and the unassigned
 //!   Extended_Pictographic code points (LB30b).
 //! - `src/word_break_table.rs`: the `Word_Break` property (UAX #29)
 //!   and `Extended_Pictographic` (WB3c).
@@ -22,7 +22,9 @@
 //!
 //! - `LineBreak.txt`: every data line, as `range;class;category`. The
 //!   General_Category comes from the comment of the original line,
-//!   where `L&` stands for a range of cased letters.
+//!   where `L&` stands for a range of cased letters. The refresh checks
+//!   that each comment starts with one category and counts the code
+//!   points of its own line, and fails if the layout ever changes.
 //! - `EastAsianWidth.txt`: the F, W, and H lines.
 //! - `WordBreakProperty.txt`: every data line.
 //! - `emoji-data.txt`: the `Extended_Pictographic` lines.
@@ -106,9 +108,9 @@ const FINAL_QUOTE: u8 = 4;
 /// An SA character with General_Category Mn or Mc, which LB1 resolves
 /// to CM.
 const SA_MARK: u8 = 8;
-/// A typographic letter unit for CSS `word-break: keep-all`: a letter
-/// or number (General_Category L* or N*), or a character of class NU,
-/// AL, AI, or ID.
+/// A letter unit for CSS `word-break: keep-all`, as Blink's
+/// `ShouldKeepAfterKeepAll` finds them: a letter or number
+/// (General_Category L* or N*) that is not of class SA.
 const LETTER_UNIT: u8 = 16;
 /// An unassigned (General_Category Cn) Extended_Pictographic code
 /// point (LB30b).
@@ -256,7 +258,15 @@ fn line_break_values() -> Vec<(u8, u8)> {
     let xx = class_index("XX");
     let mut classes = vec![xx; CODE_SPACE];
     fill(&mut classes, &line_break, |row| Some(class_index(&row[1])));
-    // General_Category: the unlisted code points are unassigned.
+    // General_Category: the unlisted code points are unassigned. Every
+    // data row carries the category of its whole range.
+    for row in &line_break.rows {
+        assert_eq!(
+            row.len(),
+            3,
+            "{LINE_BREAK} snapshot row {row:?} has no category"
+        );
+    }
     let mut categories = vec!["Cn"; CODE_SPACE];
     fill(&mut categories, &line_break, |row| {
         row.get(2).map(|gc| match gc.as_str() {
@@ -295,7 +305,7 @@ fn line_break_values() -> Vec<(u8, u8)> {
                 flags |= SA_MARK;
             }
             let letter = gc.starts_with('L') || gc.starts_with('N');
-            if letter || ["NU", "AL", "AI", "ID"].iter().any(|c| is(cp, c)) {
+            if letter && !is(cp, "SA") {
                 flags |= LETTER_UNIT;
             }
             if pictographic[cp] && gc == "Cn" {
@@ -340,7 +350,7 @@ fn generate_line_break() -> String {
     out.push_str("/// XX without flags. Sorted, non-overlapping, inclusive. The flag bits\n");
     out.push_str("/// are the constants of `crate::class`: 1 East Asian (F, W, H), 2\n");
     out.push_str("/// initial quotation mark (QU and Pi), 4 final quotation mark (QU and\n");
-    out.push_str("/// Pf), 8 SA mark (Mn or Mc), 16 typographic letter unit, and 32\n");
+    out.push_str("/// Pf), 8 SA mark (Mn or Mc), 16 keep-all letter unit, and 32\n");
     out.push_str("/// unassigned Extended_Pictographic.\n");
     out.push_str("pub(crate) static LINE_BREAK: &[(u32, u32, LineBreakClass, u8)] = &[\n");
     let items: Vec<String> = table
@@ -451,6 +461,37 @@ fn reduce(raw: &str, url: &str, retrieved: &str, keep: Keep) -> String {
     out
 }
 
+/// What the `LineBreak.txt` snapshot keeps of a data line: the range,
+/// the class, and the General_Category, which the comment gives first.
+///
+/// The generator reads one category per line. The file guarantees
+/// that today: its header says the comment lists the General_Category
+/// value or `L&`, followed by the code point count of the line's range.
+/// Panics when a comment does not start with one known category, or
+/// when its count does not match the range, so a change to that layout
+/// fails the refresh instead of mislabeling code points.
+fn keep_line_break(fields: &[&str], comment: &str) -> Option<String> {
+    let mut words = comment.split_whitespace();
+    let gc = words.next().unwrap_or_default();
+    assert!(
+        gc == "L&" || LETTER_OR_OTHER.contains(&gc),
+        "LineBreak.txt {}: the comment {comment:?} does not start with one General_Category",
+        fields[0]
+    );
+    let (start, end) = parse_range(fields[0]);
+    let count = words
+        .next()
+        .and_then(|word| word.strip_prefix('['))
+        .and_then(|word| word.strip_suffix(']'));
+    let expected = (end > start).then(|| (end - start + 1).to_string());
+    assert!(
+        count == expected.as_deref(),
+        "LineBreak.txt {}: the comment {comment:?} does not count the code points of the line",
+        fields[0]
+    );
+    Some(format!("{};{};{gc}", fields[0], fields[1]))
+}
+
 fn refresh_snapshots() {
     let Ok(dir) = std::env::var("SIGILBUZZ_UCD_DIR") else {
         return;
@@ -460,11 +501,7 @@ fn refresh_snapshots() {
         std::env::var("SIGILBUZZ_UCD_RETRIEVED").expect("set SIGILBUZZ_UCD_RETRIEVED=YYYY-MM-DD");
     let base = format!("https://www.unicode.org/Public/{version}/ucd");
     let jobs: [(&str, String, Keep); 4] = [
-        (LINE_BREAK, format!("{base}/{LINE_BREAK}"), |f, comment| {
-            // The comment starts with the General_Category.
-            let gc = comment.split_whitespace().next().expect("a category");
-            Some(format!("{};{};{gc}", f[0], f[1]))
-        }),
+        (LINE_BREAK, format!("{base}/{LINE_BREAK}"), keep_line_break),
         (
             EAST_ASIAN_WIDTH,
             format!("{base}/{EAST_ASIAN_WIDTH}"),
@@ -516,6 +553,48 @@ fn committed_tables_match_snapshots() {
 }
 
 #[test]
+fn line_break_comments_give_one_category() {
+    let keep = |range, class, comment| keep_line_break(&[range, class], comment);
+    assert_eq!(
+        keep(
+            "0000..0008",
+            "CM",
+            "Cc     [9] <control-0000>..<control-0008>"
+        )
+        .as_deref(),
+        Some("0000..0008;CM;Cc")
+    );
+    assert_eq!(
+        keep("0020", "SP", "Zs         SPACE").as_deref(),
+        Some("0020;SP;Zs")
+    );
+    assert_eq!(
+        keep(
+            "01C4..01CC",
+            "AL",
+            "L&     [9] LATIN CAPITAL LETTER DZ WITH CARON.."
+        )
+        .as_deref(),
+        Some("01C4..01CC;AL;L&")
+    );
+}
+
+#[test]
+#[should_panic(expected = "does not start with one General_Category")]
+fn line_break_comment_without_a_category_fails() {
+    let _ = keep_line_break(&["0000..0008", "CM"], "[9] <control-0000>..<control-0008>");
+}
+
+#[test]
+#[should_panic(expected = "does not count the code points of the line")]
+fn line_break_comment_with_the_wrong_count_fails() {
+    let _ = keep_line_break(
+        &["0000..0008", "CM"],
+        "Cc     [8] <control-0000>..<control-0007>",
+    );
+}
+
+#[test]
 fn snapshots_derive_known_values() {
     let values = line_break_values();
     let class = |cp: u32| LINE_BREAK_CLASSES[values[cp as usize].0 as usize];
@@ -540,5 +619,11 @@ fn snapshots_derive_known_values() {
     assert_eq!(flags(0x0028), 0);
     // An unassigned code point in an emoji block.
     assert_eq!(class(0x1F02C), "ID");
-    assert_eq!(flags(0x1F02C), LETTER_UNIT | UNASSIGNED_PICTOGRAPHIC);
+    assert_eq!(flags(0x1F02C), UNASSIGNED_PICTOGRAPHIC);
+    // Letter units are the letters and numbers outside class SA. Emoji
+    // and symbols are not, whatever their class.
+    assert_eq!(flags(0x0041) & LETTER_UNIT, LETTER_UNIT);
+    assert_eq!(flags(0x0E01) & LETTER_UNIT, 0);
+    assert_eq!(flags(0x1F600) & LETTER_UNIT, 0);
+    assert_eq!(flags(0x0040) & LETTER_UNIT, 0);
 }

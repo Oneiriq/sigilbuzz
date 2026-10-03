@@ -15,6 +15,9 @@ use crate::tables::parse::Reader;
 pub(crate) struct TopDict {
     /// CharStrings INDEX offset. Operator 17.
     pub(super) char_strings: Option<u32>,
+    /// Charset: 0 to 2 for a predefined one, otherwise an offset.
+    /// Operator 15. Default 0, ISOAdobe.
+    pub(super) charset: Option<u32>,
     /// Private DICT (size, offset). Operator 18.
     pub(super) private: Option<(u32, u32)>,
     /// FDArray offset. Operator 12 36.
@@ -51,6 +54,7 @@ impl TopDict {
                     u16::from(b0)
                 };
                 match op {
+                    15 => out.charset = operands.last().and_then(DictOperand::as_u32),
                     17 => out.char_strings = operands.last().and_then(DictOperand::as_u32),
                     18 => {
                         if operands.len() >= 2 {
@@ -168,26 +172,36 @@ pub(super) fn read_local_subrs<'a>(
 /// Font DICT in the FDArray that holds its Private DICT. Shared with
 /// CFF2.
 ///
-/// Opening it checks only that the table fits. [`Self::fd_for_glyph`]
-/// then reads the one glyph it is asked about, so nothing is expanded
-/// per glyph up front.
+/// Opening it checks that the table fits and, for formats 3 and 4,
+/// whether the ranges ascend, which takes one pass over the range
+/// records. [`Self::fd_for_glyph`] then reads only what the one glyph
+/// it is asked about needs, so nothing is expanded per glyph up front.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FdSelect<'a> {
     /// Format 0: one FD index byte per glyph, exactly `n_glyphs` bytes.
     Bytes(&'a [u8]),
-    /// Format 3 (`Range3`: u16 first glyph, u8 FD) or format 4
-    /// (`Range4`: u32 first glyph, u16 FD, `wide`), followed by a
-    /// sentinel glyph id that ends the last range.
-    Ranges {
-        /// The packed range records.
-        ranges: &'a [u8],
-        /// True for format 4 records.
-        wide: bool,
-        /// One past the last glyph of the last range.
-        sentinel: usize,
-        /// Glyph count from the CharStrings INDEX.
-        n_glyphs: usize,
-    },
+    /// Format 3 or format 4.
+    Ranges(FdRanges<'a>),
+}
+
+/// The range records of FDSelect format 3 (`Range3`: u16 first glyph,
+/// u8 FD) or format 4 (`Range4`: u32 first glyph, u16 FD), followed by
+/// a sentinel glyph id that ends the last range. Format 4 is what lets
+/// a CFF2 font have more than 256 Font DICTs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FdRanges<'a> {
+    /// The packed range records.
+    ranges: &'a [u8],
+    /// True for format 4 records.
+    wide: bool,
+    /// One past the last glyph of the last range.
+    sentinel: usize,
+    /// Glyph count from the CharStrings INDEX.
+    n_glyphs: usize,
+    /// True when no range starts before the one ahead of it. Such
+    /// ranges cannot overlap, since each ends where the next begins, so
+    /// the one range that can hold a glyph is found by binary search.
+    ascending: bool,
 }
 
 impl<'a> FdSelect<'a> {
@@ -209,12 +223,9 @@ impl<'a> FdSelect<'a> {
                 let n_ranges = usize::from(r.read_u16()?);
                 let ranges = r.read_bytes(n_ranges * 3)?;
                 let sentinel = usize::from(r.read_u16()?);
-                Ok(Self::Ranges {
-                    ranges,
-                    wide: false,
-                    sentinel,
-                    n_glyphs,
-                })
+                Ok(Self::Ranges(FdRanges::new(
+                    ranges, false, sentinel, n_glyphs,
+                )))
             }
             4 if allow_format4 => {
                 // Format 4: 32-bit ranges. Used by huge CID fonts.
@@ -225,12 +236,9 @@ impl<'a> FdSelect<'a> {
                 })?;
                 let ranges = r.read_bytes(len)?;
                 let sentinel = r.read_u32()? as usize;
-                Ok(Self::Ranges {
-                    ranges,
-                    wide: true,
-                    sentinel,
-                    n_glyphs,
-                })
+                Ok(Self::Ranges(FdRanges::new(
+                    ranges, true, sentinel, n_glyphs,
+                )))
             }
             _ => Err(Error::Unsupported {
                 context: unsupported,
@@ -239,61 +247,154 @@ impl<'a> FdSelect<'a> {
     }
 
     /// The FD index for `gid`. A glyph that no range covers maps to
-    /// FD 0.
-    ///
-    /// Ranges are expected to ascend. Unsorted ranges resolve the way
-    /// a front-to-back fill would: range `i` covers glyphs from its
-    /// first glyph up to the next range's first glyph (the sentinel
-    /// for the last range), minus any glyph an earlier range already
-    /// passed. The scan stops at the range that covers `gid`, or as
-    /// soon as no later range can, so for sorted ranges it reads only
-    /// the ranges up to `gid`.
-    pub(crate) fn fd_for_glyph(&self, gid: usize) -> u8 {
+    /// FD 0. See [`FdRanges`] for how ranges resolve.
+    pub(crate) fn fd_for_glyph(&self, gid: usize) -> u16 {
         match *self {
-            Self::Bytes(fds) => fds.get(gid).copied().unwrap_or(0),
-            Self::Ranges {
-                ranges,
-                wide,
-                sentinel,
-                n_glyphs,
-            } => {
-                let stride = if wide { 6 } else { 3 };
-                let first_at = |i: usize| -> usize {
-                    if wide {
-                        be_uint(ranges, i * stride, 4)
-                    } else {
-                        be_uint(ranges, i * stride, 2)
-                    }
-                };
-                let n_ranges = ranges.len() / stride;
-                // Glyphs below `filled` were covered by an earlier
-                // range's span, so no later range may claim them.
-                let mut filled = 0usize;
-                for i in 0..n_ranges {
-                    let end = if i + 1 < n_ranges {
-                        first_at(i + 1)
-                    } else {
-                        sentinel
-                    };
-                    let end = end.min(n_glyphs);
-                    if gid >= first_at(i).max(filled) && gid < end {
-                        // Format 4 stores a u16 FD; only the low byte
-                        // is kept, as FDArray indices fit in a u8 here.
-                        return if wide {
-                            be_uint(ranges, i * stride + 4, 2) as u8
-                        } else {
-                            be_uint(ranges, i * stride + 2, 1) as u8
-                        };
-                    }
-                    filled = filled.max(end);
-                    if filled > gid {
-                        break;
-                    }
-                }
-                0
-            }
+            Self::Bytes(fds) => fds.get(gid).copied().map_or(0, u16::from),
+            Self::Ranges(ranges) => ranges.fd_for_glyph(gid),
         }
     }
+
+    /// True when lookups binary-search the ranges.
+    #[cfg(test)]
+    pub(crate) fn binary_searches(&self) -> bool {
+        matches!(self, Self::Ranges(r) if r.ascending)
+    }
+}
+
+impl<'a> FdRanges<'a> {
+    fn new(ranges: &'a [u8], wide: bool, sentinel: usize, n_glyphs: usize) -> Self {
+        // `Cff::parse` and `Cff2::parse` run this for every outline drawn
+        // through `Face`, so it reads each first glyph once, straight
+        // from its record.
+        let ascending = if wide {
+            ascends(
+                ranges
+                    .chunks_exact(6)
+                    .map(|r| u32::from_be_bytes([r[0], r[1], r[2], r[3]]) as usize),
+            )
+        } else {
+            ascends(
+                ranges
+                    .chunks_exact(3)
+                    .map(|r| usize::from(u16::from_be_bytes([r[0], r[1]]))),
+            )
+        };
+        Self {
+            ranges,
+            wide,
+            sentinel,
+            n_glyphs,
+            ascending,
+        }
+    }
+
+    /// Bytes per range record.
+    fn stride(&self) -> usize {
+        if self.wide {
+            6
+        } else {
+            3
+        }
+    }
+
+    /// Number of range records.
+    fn len(&self) -> usize {
+        self.ranges.len() / self.stride()
+    }
+
+    /// First glyph of range `i`.
+    fn first(&self, i: usize) -> usize {
+        let width = if self.wide { 4 } else { 2 };
+        be_uint(self.ranges, i * self.stride(), width)
+    }
+
+    /// FD of range `i`. Format 3 stores a u8 and format 4 a u16.
+    fn fd(&self, i: usize) -> u16 {
+        if self.wide {
+            be_uint(self.ranges, i * self.stride() + 4, 2) as u16
+        } else {
+            be_uint(self.ranges, i * self.stride() + 2, 1) as u16
+        }
+    }
+
+    /// One past the last glyph range `i` may cover: the next range's
+    /// first glyph, or the sentinel for the last range, capped at the
+    /// glyph count.
+    fn end(&self, i: usize) -> usize {
+        let end = if i + 1 < self.len() {
+            self.first(i + 1)
+        } else {
+            self.sentinel
+        };
+        end.min(self.n_glyphs)
+    }
+
+    /// The FD for `gid`, or 0 when no range covers it.
+    ///
+    /// Ranges are expected to ascend, and then range `i` covers its
+    /// first glyph up to the next range's first glyph (the sentinel for
+    /// the last range). Unsorted ranges resolve the way a front-to-back
+    /// fill would: the same span, minus any glyph an earlier range
+    /// already passed.
+    fn fd_for_glyph(&self, gid: usize) -> u16 {
+        if self.ascending {
+            self.search(gid)
+        } else {
+            self.scan(gid)
+        }
+    }
+
+    /// Binary search over ascending ranges. Only the last range that
+    /// starts at or before `gid` can cover it. Every later range starts
+    /// past `gid`, and every earlier one ends where its successor
+    /// starts, at or before `gid`.
+    fn search(&self, gid: usize) -> u16 {
+        // Ranges below `lo` start at or before `gid`, and ranges from
+        // `hi` on start after it.
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.first(mid) <= gid {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        match lo.checked_sub(1) {
+            Some(i) if gid < self.end(i) => self.fd(i),
+            _ => 0,
+        }
+    }
+
+    /// Front-to-back scan for ranges that do not ascend. It stops at
+    /// the range that covers `gid`, or as soon as no later range can.
+    fn scan(&self, gid: usize) -> u16 {
+        // Glyphs below `filled` were covered by an earlier range's span,
+        // so no later range may claim them.
+        let mut filled = 0usize;
+        for i in 0..self.len() {
+            let end = self.end(i);
+            if gid >= self.first(i).max(filled) && gid < end {
+                return self.fd(i);
+            }
+            filled = filled.max(end);
+            if filled > gid {
+                break;
+            }
+        }
+        0
+    }
+}
+
+/// True when no value is smaller than the one before it.
+fn ascends(mut firsts: impl Iterator<Item = usize>) -> bool {
+    let mut prev = 0;
+    firsts.all(|first| {
+        let ok = prev <= first;
+        prev = first;
+        ok
+    })
 }
 
 /// Reads a `width`-byte big-endian unsigned integer at `at`. Out of
@@ -314,8 +415,12 @@ fn be_uint(bytes: &[u8], at: usize, width: usize) -> usize {
 /// ranges cannot make the fill quadratic. For sorted ranges it changes
 /// nothing.
 #[cfg(test)]
-pub(crate) fn fill_fd_ranges(ranges: &[(usize, u8)], sentinel: usize, n_glyphs: usize) -> Vec<u8> {
-    let mut out = alloc::vec![0u8; n_glyphs];
+pub(crate) fn fill_fd_ranges(
+    ranges: &[(usize, u16)],
+    sentinel: usize,
+    n_glyphs: usize,
+) -> Vec<u16> {
+    let mut out = alloc::vec![0u16; n_glyphs];
     let mut filled = 0usize;
     for (i, &(first, fd)) in ranges.iter().enumerate() {
         let end = ranges.get(i + 1).map_or(sentinel, |next| next.0);

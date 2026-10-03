@@ -108,6 +108,26 @@ pub(crate) fn feature_lookup_indices(
     lang_sys.map(|_| Vec::new())
 }
 
+/// True when the language system [`select_lang_sys`] picks lists a
+/// feature tagged `tag`, whatever lookups it has: HarfBuzz's feature
+/// map then gives the feature an index in the table
+/// (`hb_ot_layout_collect_features_map`). A FeatureVariations record
+/// can leave such a feature without lookups, and it is still listed.
+/// The required feature does not count, as it does not there.
+pub(crate) fn lists_feature(
+    script_list: &ScriptList<'_>,
+    features: &ActiveFeatures<'_>,
+    language_tags: &[[u8; 4]],
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+) -> bool {
+    select_lang_sys(script_list, language_tags, script_priority).is_some_and(|lang_sys| {
+        lang_sys
+            .feature_indices()
+            .any(|index| features.tag(index) == Some(tag))
+    })
+}
+
 /// The required feature of the language system [`select_lang_sys`]
 /// picks: its tag and sorted lookup indices.
 pub(crate) fn required_feature(
@@ -129,11 +149,13 @@ fn lang_sys_lookups(
     features: &ActiveFeatures<'_>,
     tag: [u8; 4],
 ) -> Option<Vec<u16>> {
+    // The tag first: only a feature with the tag needs its
+    // substitutions looked up.
     let with_tag = |index: u16| {
-        features
-            .get(index)
-            .filter(|(feature_tag, _)| *feature_tag == tag)
-            .map(|(_, feature)| feature)
+        if features.tag(index) != Some(tag) {
+            return None;
+        }
+        features.get(index).map(|(_, feature)| feature)
     };
     let required = lang_sys.required_feature_index().and_then(with_tag);
     let regular = lang_sys.feature_indices().find_map(with_tag);
@@ -451,6 +473,39 @@ mod tests {
             Some(vec![97])
         );
         assert_eq!(f.lookups(&[], b"vert", &dflt), Some(vec![10]));
+    }
+
+    #[test]
+    fn a_listed_feature_stays_listed_without_lookups() {
+        let f = latin_fixture();
+        let scripts = ScriptList::parse(&f.scripts).unwrap();
+        let latn = [*b"latn"];
+        // Feature 1, the default language system's liga, loses its
+        // lookups to a null alternate.
+        let mut v = vec![0, 1, 0, 0, 0, 0, 0, 1];
+        v.extend_from_slice(&0u32.to_be_bytes()); // null ConditionSet
+        v.extend_from_slice(&16u32.to_be_bytes()); // substitution
+        v.extend_from_slice(&[0, 1, 0, 0, 0, 1, 0, 1]); // feature 1
+        v.extend_from_slice(&0u32.to_be_bytes()); // null alternate
+        let features = f.features(Some(&v));
+        assert_eq!(
+            feature_lookup_indices(&scripts, &features, &[], *b"liga", &latn),
+            Some(vec![])
+        );
+        let lists = |features: &ActiveFeatures<'_>, langs: &[[u8; 4]], tag: &[u8; 4]| {
+            lists_feature(&scripts, features, langs, *tag, &latn)
+        };
+        assert!(lists(&features, &[], b"liga"));
+        assert!(lists(&f.features(None), &[], b"liga"));
+        // The default language system has no locl, and AZE has rlig
+        // only as its required feature.
+        assert!(!lists(&features, &[], b"locl"));
+        assert!(lists(&features, &[*b"TRK "], b"locl"));
+        assert!(!lists(&features, &[*b"AZE "], b"rlig"));
+        // No usable script.
+        let empty = script_list(&[]);
+        let empty = ScriptList::parse(&empty).unwrap();
+        assert!(!lists_feature(&empty, &features, &[], *b"liga", &latn));
     }
 
     #[test]

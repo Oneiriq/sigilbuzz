@@ -79,26 +79,45 @@
 //! that check: it drops the whole GSUB or GPOS, and the shaper does
 //! the same.
 //!
-//! One limit differs from HarfBuzz. `parse` makes at most
-//! [`CHECK_BUDGET`] checks and rejects a table that needs more, so
-//! conditions that share subtrees cannot make it take exponential
-//! time. HarfBuzz instead allows 64 checks per byte of the whole GSUB
-//! or GPOS.
+//! One limit differs from HarfBuzz. `parse` counts a check for every
+//! ConditionSet, condition, FeatureTableSubstitution, and alternate
+//! Feature table each record reaches, a shared subtable once for every
+//! path to it, and rejects a table that needs more than 8 checks per
+//! byte (from the start of the table to the end of its GSUB or GPOS),
+//! or 16384 for a table under 2 KB. HarfBuzz instead allows 64 checks
+//! per byte of the whole GSUB or GPOS. A real font needs a few checks
+//! per record. The limit matters because the conditions are evaluated
+//! on every shaping call: with it, conditions that share subtrees can
+//! make neither `parse` nor [`FeatureVariations::find_index`] take
+//! more time than the table's size allows.
 
 use crate::error::{Error, Result};
 use crate::tables::layout::{Feature, FeatureList};
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 /// HarfBuzz's `HB_MAX_NESTING_LEVEL`: the deepest a condition can be,
 /// counting the conditions a ConditionSet names as depth 1.
 pub const MAX_CONDITION_DEPTH: u8 = 64;
 
-/// The most ConditionSets, conditions, FeatureTableSubstitutions, and
-/// alternate Feature tables [`FeatureVariations::parse`] checks. A real
-/// font has a few records of a few conditions each.
-pub const CHECK_BUDGET: u32 = 1 << 18;
+/// The fewest checks [`FeatureVariations::parse`] allows a table,
+/// HarfBuzz's `HB_SANITIZE_MAX_OPS_MIN`.
+const MIN_CHECK_BUDGET: u32 = 16_384;
+
+/// The checks [`FeatureVariations::parse`] allows per byte of a table
+/// larger than `MIN_CHECK_BUDGET / CHECKS_PER_BYTE` bytes.
+const CHECKS_PER_BYTE: u32 = 8;
+
+/// The checks [`FeatureVariations::parse`] allows a table of `len`
+/// bytes.
+fn check_budget(len: usize) -> u32 {
+    u32::try_from(len)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(CHECKS_PER_BYTE)
+        .max(MIN_CHECK_BUDGET)
+}
 
 /// `VarIdx::NO_VARIATION`: a value condition with this index has no
 /// delta.
@@ -134,7 +153,32 @@ impl<'a> FeatureVariations<'a> {
     /// [`Error::Truncated`] when a subtable does not fit, and
     /// [`Error::Malformed`] for a major version other than 1, conditions
     /// nested more than [`MAX_CONDITION_DEPTH`] deep, or a table that
-    /// needs more than [`CHECK_BUDGET`] checks.
+    /// needs more checks than its size allows (see the
+    /// [module documentation](self)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::FeatureVariations;
+    ///
+    /// // Version 1.0, one record: a null ConditionSet, which always
+    /// // holds, and a FeatureTableSubstitution at byte 16 that gives
+    /// // feature 3 an alternate Feature table at byte 12 of it, with
+    /// // the one lookup 7.
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, // header
+    ///     0, 0, 0, 0, 0, 0, 0, 16, // record
+    ///     0, 1, 0, 0, 0, 1, // FeatureTableSubstitution
+    ///     0, 3, 0, 0, 0, 12, // feature 3
+    ///     0, 0, 0, 1, 0, 7, // alternate Feature
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// assert_eq!(variations.len(), 1);
+    /// assert_eq!(variations.find_index(&[], None), Some(0));
+    /// // A record that runs past the end fails to parse.
+    /// assert!(FeatureVariations::parse(&data[..12]).is_err());
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
@@ -157,7 +201,7 @@ impl<'a> FeatureVariations<'a> {
         let table = Self { data, record_count };
         let mut check = Check {
             data,
-            budget: CHECK_BUDGET,
+            budget: check_budget(data.len()),
         };
         for index in 0..record_count {
             // The records fit, so neither the slot nor its fields
@@ -232,15 +276,37 @@ impl<'a> FeatureVariations<'a> {
         coords: &[f32],
         store: Option<&ItemVariationStore<'_>>,
     ) -> Option<u32> {
-        let cx = EvalContext::new(coords, store);
-        (0..self.record_count)
-            .find(|&index| self.condition_set(index).is_some_and(|set| set.holds(&cx)))
+        let mut cx = EvalContext::new(coords, store);
+        (0..self.record_count).find(|&index| {
+            self.condition_set(index)
+                .is_some_and(|set| set.holds(&mut cx))
+        })
     }
 
     /// The alternate Feature table record `record` puts in place of
     /// feature `feature_index`: that of the first substitution record
     /// with the index. `None` when the record substitutes nothing for
     /// the feature or `record` is past the last record.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::FeatureVariations;
+    ///
+    /// // One record, which gives feature 3 the one lookup 7 (see
+    /// // `FeatureVariations::parse`).
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 1, 0, 3, 0, 0, 0, 12,
+    ///     0, 0, 0, 1, 0, 7,
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// let feature = variations.substitute(0, 3).expect("feature 3 is substituted");
+    /// assert_eq!(feature.lookup_indices().collect::<Vec<_>>(), [7]);
+    /// // The record leaves feature 2 alone, and there is no record 1.
+    /// assert!(variations.substitute(0, 2).is_none());
+    /// assert!(variations.substitute(1, 3).is_none());
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn substitute(&self, record: u32, feature_index: u16) -> Option<Feature<'a>> {
         self.substitution(record)?.find(feature_index)
@@ -482,19 +548,44 @@ impl<'a> ConditionSet<'a> {
 
     /// True when every condition holds at the normalized coordinates
     /// `coords` (see [`FeatureVariations::find_index`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::FeatureVariations;
+    ///
+    /// // One record whose ConditionSet, at byte 16, names one axis
+    /// // range at byte 6 of it: axis 0 from 0.5 (F2DOT14 0x2000) to
+    /// // 1.0 (0x4000). The record substitutes nothing.
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, // header
+    ///     0, 0, 0, 16, 0, 0, 0, 0, // record
+    ///     0, 1, 0, 0, 0, 6, // ConditionSet
+    ///     0, 1, 0, 0, 0x20, 0, 0x40, 0, // axis range
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// let set = variations.condition_set(0).expect("record 0");
+    /// assert!(set.matches(&[0.75], None));
+    /// assert!(!set.matches(&[0.25], None));
+    /// // No coordinates read as the default instance, axis 0 at 0.
+    /// assert!(!set.matches(&[], None));
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn matches(&self, coords: &[f32], store: Option<&ItemVariationStore<'_>>) -> bool {
-        self.holds(&EvalContext::new(coords, store))
+        self.holds(&mut EvalContext::new(coords, store))
     }
 
-    fn holds(&self, cx: &EvalContext<'_>) -> bool {
+    fn holds(&self, cx: &mut EvalContext<'_>) -> bool {
         (0..self.count).all(|i| self.get(i).is_some_and(|c| c.holds(cx, 1)))
     }
 }
 
 /// One condition. A null offset reads as [`Condition::Unknown`] with
-/// format 0.
+/// format 0. Later versions of the format may add kinds of condition,
+/// so the enum is non-exhaustive.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Condition<'a> {
     /// Format 1: holds while the coordinate of axis `axis_index` lies
     /// in `min..=max`. All three are F2DOT14 values, as raw integers.
@@ -591,16 +682,44 @@ impl<'a> Condition<'a> {
 
     /// True when the condition holds at the normalized coordinates
     /// `coords` (see [`FeatureVariations::find_index`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::layout::{Condition, FeatureVariations};
+    ///
+    /// // One record whose ConditionSet names a negation (format 5) of
+    /// // an axis range: axis 0 from 0.5 (F2DOT14 0x2000) to 1.0
+    /// // (0x4000).
+    /// let data = [
+    ///     0, 1, 0, 0, 0, 0, 0, 1, // header
+    ///     0, 0, 0, 16, 0, 0, 0, 0, // record
+    ///     0, 1, 0, 0, 0, 6, // ConditionSet
+    ///     0, 5, 0, 0, 5, // negation of the condition 5 bytes on
+    ///     0, 1, 0, 0, 0x20, 0, 0x40, 0, // axis range
+    /// ];
+    /// let variations = FeatureVariations::parse(&data)?;
+    /// let set = variations.condition_set(0).expect("record 0");
+    /// let not = set.get(0).expect("condition 0");
+    /// let Condition::Negate(negation) = not else {
+    ///     panic!("a negation");
+    /// };
+    /// let range = negation.condition();
+    /// assert!(range.matches(&[0.75], None));
+    /// assert!(!not.matches(&[0.75], None));
+    /// assert!(not.matches(&[0.25], None));
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn matches(&self, coords: &[f32], store: Option<&ItemVariationStore<'_>>) -> bool {
-        self.holds(&EvalContext::new(coords, store), 1)
+        self.holds(&mut EvalContext::new(coords, store), 1)
     }
 
     /// Evaluates the condition at nesting depth `depth`, where the
     /// conditions of a ConditionSet are depth 1. `parse` rules out
     /// anything deeper than [`MAX_CONDITION_DEPTH`], and the check here
     /// keeps the recursion bounded whatever the data.
-    fn holds(&self, cx: &EvalContext<'_>, depth: u8) -> bool {
+    fn holds(&self, cx: &mut EvalContext<'_>, depth: u8) -> bool {
         if depth > MAX_CONDITION_DEPTH {
             return false;
         }
@@ -734,28 +853,38 @@ impl<'a> FeatureTableSubstitution<'a> {
     /// past the last record. A null alternate has no lookups.
     #[must_use]
     pub fn get(&self, index: u16) -> Option<(u16, Feature<'a>)> {
-        if index >= self.count {
-            return None;
-        }
-        let at = SUBSTITUTION_HEADER_SIZE + usize::from(index) * SUBSTITUTION_RECORD_SIZE;
-        let feature_index = u16_at(self.data, at)?;
-        let offset = u32_at(self.data, at + 2)?;
-        let feature = if offset == 0 {
-            Feature::empty()
-        } else {
-            Feature::parse_alternate(self.data, offset).unwrap_or(Feature::empty())
-        };
-        Some((feature_index, feature))
+        Some((self.feature_index(index)?, self.alternate(index)?))
     }
 
     /// The alternate for feature `feature_index`: that of the first
     /// record with the index, as HarfBuzz's `find_substitute` scans.
+    /// Only that record's alternate is read.
     #[must_use]
     pub fn find(&self, feature_index: u16) -> Option<Feature<'a>> {
         (0..self.count)
-            .filter_map(|i| self.get(i))
-            .find(|&(index, _)| index == feature_index)
-            .map(|(_, feature)| feature)
+            .filter(|&i| self.feature_index(i) == Some(feature_index))
+            .find_map(|i| self.alternate(i))
+    }
+
+    /// Where record `index` starts, or `None` past the last record.
+    fn record_at(&self, index: u16) -> Option<usize> {
+        (index < self.count)
+            .then(|| SUBSTITUTION_HEADER_SIZE + usize::from(index) * SUBSTITUTION_RECORD_SIZE)
+    }
+
+    /// The `featureIndex` of record `index`.
+    fn feature_index(&self, index: u16) -> Option<u16> {
+        u16_at(self.data, self.record_at(index)?)
+    }
+
+    /// The alternate Feature table of record `index`.
+    fn alternate(&self, index: u16) -> Option<Feature<'a>> {
+        let offset = u32_at(self.data, self.record_at(index)? + 2)?;
+        Some(if offset == 0 {
+            Feature::empty()
+        } else {
+            Feature::parse_alternate(self.data, offset).unwrap_or(Feature::empty())
+        })
     }
 }
 
@@ -812,6 +941,13 @@ impl<'a> ActiveFeatures<'a> {
         Self { list, variation }
     }
 
+    /// The tag of feature `index`, which a substitution leaves alone.
+    /// `None` when the index is out of range. Cheaper than
+    /// [`Self::get`], which also scans the substitutions.
+    pub(crate) fn tag(&self, index: u16) -> Option<[u8; 4]> {
+        self.list.tag(index)
+    }
+
     /// Feature `index` as `(tag, Feature)`: the FeatureList's tag and
     /// the substituted Feature table if there is one, the FeatureList's
     /// otherwise. `None` when the index is out of range or the
@@ -842,6 +978,9 @@ struct EvalContext<'s> {
     /// The same coordinates as floats, which the variation store reads.
     normalized: Vec<f32>,
     store: Option<&'s ItemVariationStore<'s>>,
+    /// The deltas read so far, by `varIndex`: conditions that share a
+    /// value condition, or name the same index, read the store once.
+    deltas: BTreeMap<u32, f32>,
 }
 
 impl<'s> EvalContext<'s> {
@@ -852,6 +991,7 @@ impl<'s> EvalContext<'s> {
             coords,
             normalized,
             store,
+            deltas: BTreeMap::new(),
         }
     }
 
@@ -865,14 +1005,21 @@ impl<'s> EvalContext<'s> {
 
     /// The delta of `var_index` at the coordinates: 0 without
     /// coordinates or a store, and for `NO_VARIATION_INDEX`.
-    fn delta(&self, var_index: u32) -> f32 {
+    fn delta(&mut self, var_index: u32) -> f32 {
         if self.coords.is_empty() || var_index == NO_VARIATION_INDEX {
             return 0.0;
         }
+        let Some(store) = self.store else {
+            return 0.0;
+        };
+        if let Some(&delta) = self.deltas.get(&var_index) {
+            return delta;
+        }
         let outer = (var_index >> 16) as u16;
         let inner = (var_index & 0xFFFF) as u16;
-        self.store
-            .map_or(0.0, |store| store.delta(outer, inner, &self.normalized))
+        let delta = store.delta(outer, inner, &self.normalized);
+        self.deltas.insert(var_index, delta);
+        delta
     }
 }
 

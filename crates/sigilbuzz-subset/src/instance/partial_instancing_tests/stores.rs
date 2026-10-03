@@ -390,6 +390,38 @@ fn huge_store_counts_are_truncation_not_wraparound() {
 }
 
 #[test]
+fn a_subtable_keeping_more_regions_than_word_delta_count_holds_is_an_error() {
+    // The rewrite writes every kept column wide, so wordDeltaCount
+    // equals the kept region count. At 32,768 its top bit, the
+    // LONG_WORDS flag, used to turn on and garble every row.
+    let region = [(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)];
+    let fits = |count: u16| {
+        let ivs = build_ivs2(
+            &alloc::vec![region; usize::from(count)],
+            &[(
+                (0..count).collect(),
+                alloc::vec![alloc::vec![0; usize::from(count)]],
+            )],
+        );
+        let sub = u32::from_be_bytes([ivs[8], ivs[9], ivs[10], ivs[11]]) as usize;
+        project_ivs(&ivs, &[1.0, 0.0], &PIN_KEEP).map_err(|e| (error_offset(&e), e, sub))
+    };
+    assert!(fits(0x7FFF).is_ok());
+    let (offset, err, sub) = fits(0x8000).unwrap_err();
+    assert_eq!(offset, sub + 4, "reported at regionIndexCount");
+    assert!(
+        matches!(
+            err,
+            SubsetError::Parse(sigilbuzz::Error::Malformed {
+                context: "ItemVariationData keeps more than 32,767 regions",
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn delta_set_index_maps_are_bounds_checked() {
     let remap = RegionRemap::default();
     // Format 1 with mapCount u32::MAX: the entry array would wrap a

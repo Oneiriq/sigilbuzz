@@ -30,9 +30,28 @@ use crate::GlyphId;
 /// The `STAT` table tag.
 pub(crate) const STAT: [u8; 4] = *b"STAT";
 
-/// Returns the source `STAT`, unchanged, when there is one.
-pub(crate) fn subset_stat(face: &Face<'_>) -> Option<Vec<u8>> {
-    face.table_bytes(STAT).ok().map(<[u8]>::to_vec)
+/// The bytes `table_bytes` returned for the source table `table`, or
+/// `None` when the source has no such table. Bytes that cannot be read
+/// leave the table out, and the reason is recorded in `warnings`.
+fn source_table<'a>(
+    table: [u8; 4],
+    table_bytes: Result<&'a [u8], Error>,
+    warnings: &Warnings,
+) -> Option<&'a [u8]> {
+    match table_bytes {
+        Ok(bytes) => Some(bytes),
+        Err(Error::MissingTable { .. }) => None,
+        Err(e) => {
+            warnings.parse_error(table, 0, &e, "the whole table");
+            None
+        }
+    }
+}
+
+/// Returns the source `STAT`, unchanged, when there is one. A `STAT`
+/// whose bytes cannot be read is left out and recorded in `warnings`.
+pub(crate) fn subset_stat(face: &Face<'_>, warnings: &Warnings) -> Option<Vec<u8>> {
+    source_table(STAT, face.table_bytes(STAT), warnings).map(<[u8]>::to_vec)
 }
 
 /// Subsets `BASE` through `gid_map` (`(old, new)` pairs sorted by old
@@ -44,14 +63,7 @@ pub(crate) fn subset_base(
     gid_map: &[(GlyphId, GlyphId)],
     warnings: &Warnings,
 ) -> Option<Vec<u8>> {
-    let bytes = match face.table_bytes(tag::BASE) {
-        Ok(b) => b,
-        Err(Error::MissingTable { .. }) => return None,
-        Err(e) => {
-            warnings.parse_error(tag::BASE, 0, &e, "the whole table");
-            return None;
-        }
-    };
+    let bytes = source_table(tag::BASE, face.table_bytes(tag::BASE), warnings)?;
     match remap(bytes, gid_map) {
         Ok(out) => Some(out),
         Err(e) => {
@@ -417,7 +429,44 @@ mod tests {
         let face = Face::parse_bytes(&font, 0).unwrap();
         let sink = Warnings::default();
         assert_eq!(subset_base(&face, &[(0, 0)], &sink), Some(src));
-        assert_eq!(subset_stat(&face), Some(vec![1, 2, 3, 4]));
+        assert_eq!(subset_stat(&face, &sink), Some(vec![1, 2, 3, 4]));
+        assert!(sink.into_sorted().is_empty());
+    }
+
+    #[test]
+    fn unreadable_table_bytes_are_left_out_with_a_warning() {
+        // `Face::parse_bytes` checks every table's range, so the error
+        // is built by hand. It used to be dropped without a word, and
+        // strict mode then rejected STAT as a table it cannot handle.
+        let sink = Warnings::default();
+        let past_end = Error::Malformed {
+            offset: 40,
+            context: "table extends past end of font",
+        };
+        assert_eq!(source_table(STAT, Err(past_end), &sink), None);
+        let missing = Error::MissingTable { tag: STAT };
+        assert_eq!(source_table(STAT, Err(missing), &sink), None);
+        assert_eq!(source_table(STAT, Ok(&[7]), &sink), Some(&[7][..]));
+        let got: Vec<_> = sink
+            .into_sorted()
+            .iter()
+            .map(|w| (w.table, w.offset, w.context, w.dropped))
+            .collect();
+        assert_eq!(
+            got,
+            [(
+                STAT,
+                40,
+                "table extends past end of font",
+                "the whole table"
+            )]
+        );
+
+        // Missing tables stay quiet in the subset too.
+        let font = crate::sfnt::build(0x4F54_544F, &[(tag::BASE, vec![0; 4])]);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let sink = Warnings::default();
+        assert_eq!(subset_stat(&face, &sink), None);
         assert!(sink.into_sorted().is_empty());
     }
 }

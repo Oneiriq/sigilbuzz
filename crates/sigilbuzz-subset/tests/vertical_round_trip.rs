@@ -367,6 +367,35 @@ fn dropping_variations_drops_vvar_and_keeps_the_metrics() {
 }
 
 #[test]
+fn dropping_layout_drops_base_and_keeps_stat_and_the_vertical_tables() {
+    // BASE is an OpenType layout table, so it goes with GSUB, GPOS and
+    // GDEF, on the rebuilding path and when every glyph is kept, in
+    // strict mode too. STAT and the vertical metrics are not layout
+    // tables.
+    let src = Face::parse_bytes(NOTO_KR, 0).unwrap();
+    let all: Vec<u16> = (0..src.maxp().unwrap().num_glyphs).collect();
+    let some = subset_text(NOTO_KR, "\u{300C}", |_| {}).gid_map;
+    let some: Vec<u16> = some.iter().map(|&(old, _)| old).collect();
+    for gids in [all, some] {
+        for drop_unhandled in [true, false] {
+            let input = SubsetInput {
+                gids: gids.clone(),
+                retain_layout: false,
+                drop_unhandled,
+                ..SubsetInput::default()
+            };
+            let out = subset(&src, &input).expect("subset succeeds");
+            for table in [tag::BASE, tag::GSUB, tag::GPOS, tag::GDEF] {
+                assert!(!has(&out.bytes, table));
+            }
+            for table in [STAT, tag::VHEA, tag::VMTX, tag::VORG] {
+                assert!(has(&out.bytes, table));
+            }
+        }
+    }
+}
+
+#[test]
 fn malformed_vertical_tables_are_left_out_with_warnings() {
     let src = Face::parse_bytes(NOTO_KR, 0).unwrap();
     let cut = |table: [u8; 4], len: usize| {
@@ -383,9 +412,9 @@ fn malformed_vertical_tables_are_left_out_with_warnings() {
     };
 
     // A vmtx shorter than vhea and maxp say: vhea, vmtx and the VVAR
-    // that varies them go; VORG stays.
+    // that varies them go, each reported; VORG stays.
     let (out, warnings) = warned(&cut(tag::VMTX, 10));
-    assert_eq!(warnings, [(tag::VMTX, 10)]);
+    assert_eq!(warnings, [(tag::VVAR, 0), (tag::VMTX, 10)]);
     for table in [tag::VHEA, tag::VMTX, tag::VVAR] {
         assert!(!has(&out.bytes, table));
     }
@@ -402,6 +431,59 @@ fn malformed_vertical_tables_are_left_out_with_warnings() {
     assert_eq!(warnings, [(tag::VVAR, 0)]);
     assert!(!has(&out.bytes, tag::VVAR));
     assert!(has(&out.bytes, tag::VMTX));
+}
+
+#[test]
+fn an_instance_leaves_malformed_vertical_tables_out_with_warnings() {
+    // These used to fail the whole instance.
+    let src = Face::parse_bytes(NOTO_KR, 0).unwrap();
+    let cut = |table: [u8; 4], len: usize| {
+        let bytes = src.table_bytes(table).unwrap()[..len].to_vec();
+        support::edit_tables(NOTO_KR, &[(table, Some(bytes))])
+    };
+    let instanced = |font: &[u8], drop_var_tables: bool| {
+        let input = InstanceInput {
+            coords: wght_700().0,
+            drop_var_tables,
+            ..InstanceInput::default()
+        };
+        let out = instance(&Face::parse_bytes(font, 0).unwrap(), &input).expect("instances");
+        // Vertical text still shapes, on the fallbacks.
+        shaped(&out.bytes, &[], "\u{300C}", Direction::Ttb);
+        let warnings: Vec<([u8; 4], usize)> =
+            out.warnings.iter().map(|w| (w.table, w.offset)).collect();
+        (out.bytes, warnings)
+    };
+
+    // A short vmtx, and a vhea too short to hold its long count: vhea
+    // and vmtx go together.
+    for table in [tag::VMTX, tag::VHEA] {
+        let (bytes, warnings) = instanced(&cut(table, 10), true);
+        assert_eq!(warnings, [(table, 10)]);
+        for gone in [tag::VHEA, tag::VMTX] {
+            assert!(!has(&bytes, gone));
+        }
+        assert!(has(&bytes, tag::VORG));
+    }
+
+    // A VVAR cut inside its store: its advance deltas cannot be read,
+    // so vmtx keeps the default advances. Kept variation tables would
+    // have carried it through; it goes all the same. The vmtx bake and
+    // the VORG bake each report it.
+    for drop_var_tables in [true, false] {
+        let (bytes, warnings) = instanced(&cut(tag::VVAR, 30), drop_var_tables);
+        let tables: Vec<[u8; 4]> = warnings.iter().map(|w| w.0).collect();
+        assert_eq!(tables, [tag::VVAR; 2], "{warnings:?}");
+        assert!(!has(&bytes, tag::VVAR));
+        let vmtx = |font: &[u8]| {
+            let face = Face::parse_bytes(font, 0).unwrap();
+            let vmtx = face.vmtx().unwrap().unwrap();
+            (0..face.maxp().unwrap().num_glyphs)
+                .map(|gid| vmtx.advance(gid))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(vmtx(&bytes), vmtx(NOTO_KR));
+    }
 }
 
 /// Open Sans with hand-built vertical tables: long metrics for the
