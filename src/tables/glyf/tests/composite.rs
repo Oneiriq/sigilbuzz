@@ -507,3 +507,74 @@ fn a_component_that_closes_a_cycle_is_skipped_like_harfbuzz() {
     assert!(glyf.outline(&loca, 0, None, None, &mut o).unwrap());
     assert!(o.ops().is_empty());
 }
+
+/// A chain of `levels` composites, glyph `i` placing glyph `i + 1` as
+/// its only component, flagged `USE_MY_METRICS` so the phantom walk
+/// follows it too, and a square as glyph `levels`. Returns the `glyf`
+/// and short `loca` bytes and the byte offset of every glyph.
+fn composite_chain(levels: u16) -> (Vec<u8>, Vec<u8>, Vec<usize>) {
+    let mut glyf_bytes = Vec::new();
+    let mut offsets = Vec::new();
+    let flags = COMP_ARGS_ARE_XY_VALUES | COMP_ARG_1_AND_2_ARE_WORDS | COMP_USE_MY_METRICS;
+    for gid in 0..=levels {
+        offsets.push(glyf_bytes.len());
+        if gid < levels {
+            glyf_bytes.extend_from_slice(&build_header(-1, 0, 0, 100, 100));
+            glyf_bytes.extend_from_slice(&flags.to_be_bytes());
+            glyf_bytes.extend_from_slice(&(gid + 1).to_be_bytes());
+            glyf_bytes.extend_from_slice(&1i16.to_be_bytes());
+            glyf_bytes.extend_from_slice(&0i16.to_be_bytes());
+        } else {
+            glyf_bytes.extend_from_slice(&pad_even(build_simple_glyph(
+                &[3],
+                &[
+                    (0, 0, true),
+                    (100, 0, true),
+                    (100, 100, true),
+                    (0, 100, true),
+                ],
+            )));
+        }
+    }
+    let mut loca_words: Vec<u16> = offsets.iter().map(|&o| (o / 2) as u16).collect();
+    loca_words.push((glyf_bytes.len() / 2) as u16);
+    (glyf_bytes, build_loca_short(&loca_words), offsets)
+}
+
+#[test]
+fn composites_nested_past_the_depth_cap_fail_at_the_deepest_glyph() {
+    // HarfBuzz stops a glyf walk deeper than 64 composites
+    // (HB_MAX_NESTING_LEVEL). An acyclic chain never meets the cycle
+    // check, so only the depth cap ends it. The root sits at depth 0,
+    // so a chain of 64 composites reaches the square at depth 64 and
+    // draws; one more level puts glyph 65 past the cap, and the error
+    // names that glyph's offset in `glyf`, in the outline walk and in
+    // the phantom walk alike.
+    for (levels, fails) in [(64u16, false), (65, true), (80, true)] {
+        let (glyf_bytes, loca_bytes, offsets) = composite_chain(levels);
+        let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, levels + 1).unwrap();
+        let glyf = Glyf::new(&glyf_bytes);
+        let hmtx_bytes = build_hmtx(&vec![(120, 0); usize::from(levels) + 1]);
+        let hmtx = Hmtx::parse(&hmtx_bytes, levels + 1, levels + 1).unwrap();
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: None,
+        };
+        let mut o = Outline::new();
+        let outline = glyf.outline(&loca, 0, None, Some(&metrics), &mut o);
+        let phantoms = glyf.phantom_points_at_coords(&loca, 0, None, &[], &metrics);
+        if !fails {
+            assert!(outline.unwrap(), "{levels} levels");
+            // 64 components, each moved one unit right.
+            assert_eq!(o.ops()[0], PathOp::MoveTo { x: 64.0, y: 0.0 });
+            assert_eq!(phantoms.unwrap()[1], (120.0, 0.0));
+            continue;
+        }
+        let want = Error::Malformed {
+            offset: offsets[65],
+            context: "glyf composite recursion exceeded cap",
+        };
+        assert_eq!(outline.unwrap_err(), want, "{levels} levels");
+        assert_eq!(phantoms.unwrap_err(), want, "{levels} levels");
+    }
+}
