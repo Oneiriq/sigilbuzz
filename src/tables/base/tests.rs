@@ -496,3 +496,20 @@ fn v11_baseline_at_coords_without_ivs_returns_static() {
     let script = axis.script(*b"latn").unwrap();
     assert_eq!(script.baseline_at_coords(*b"romn", &[0.5]), Some(42));
 }
+
+#[test]
+fn v11_baseline_deltas_round_halves_up_like_harfbuzz() {
+    // A delta of -5 at the axis tip is -2.5 halfway there. HarfBuzz's
+    // `roundf` is `floor(x + 0.5)`, so the coordinate moves by -2, not
+    // -3; a delta of 5 moves it by 3 there.
+    for (delta, want) in [(-5i16, 48i16), (5, 53)] {
+        let data = build_v11_base(50, delta);
+        let base = Base::parse(&data).unwrap();
+        let script = base.horizontal_axis().unwrap().script(*b"latn").unwrap();
+        assert_eq!(
+            script.baseline_at_coords(*b"romn", &[0.5]),
+            Some(want),
+            "{delta}"
+        );
+    }
+}
