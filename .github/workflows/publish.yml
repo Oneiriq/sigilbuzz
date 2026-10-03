@@ -199,6 +199,12 @@ jobs:
             attempt=$((attempt + 1))
             excludes=()
             pending=0
+            # A failed or empty member list must not read as every crate
+            # being up: process substitution would hide the failure.
+            if ! list=$(members) || [ -z "$list" ]; then
+              echo "::error::cargo metadata failed or listed no crate to publish"
+              exit 1
+            fi
             while read -r name version; do
               if on_crates_io "$name" "$version"; then
                 echo "$name $version is already on crates.io"
@@ -206,7 +212,7 @@ jobs:
               else
                 pending=$((pending + 1))
               fi
-            done < <(members)
+            done <<< "$list"
 
             if [ "$pending" -eq 0 ]; then
               echo "Every crate is on crates.io."
