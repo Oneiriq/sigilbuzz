@@ -148,6 +148,12 @@ fn bake_metrics_var_partial(
         .into());
     }
     let ivs_off = read::offset32_at(table, 4, 0, "metrics variations store offset past the end")?;
+    // Without an advance map, advances read outer 0 by glyph id, so
+    // outer 0 has to stay the first subtable.
+    let how = Projection {
+        keep_outer_zero: read::u32_at(table, 8, CTX)? == 0,
+        ..how
+    };
     let (new_ivs, remap) =
         project_ivs_with(&table[ivs_off..], coords, pins, how).map_err(|e| shifted(e, ivs_off))?;
     // The subtable count of the store just emitted.
@@ -226,6 +232,7 @@ pub(super) fn bake_hvar_partial_with(
         Projection {
             pinned_only,
             merge: true,
+            keep_outer_zero: false,
         },
         "partial instancing: HVAR exceeds 4 GiB",
     )
@@ -251,6 +258,7 @@ pub(super) fn bake_vvar_partial_with(
         Projection {
             pinned_only,
             merge: true,
+            keep_outer_zero: false,
         },
         "partial instancing: VVAR exceeds 4 GiB",
     )

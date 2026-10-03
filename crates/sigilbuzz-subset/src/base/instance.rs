@@ -117,6 +117,7 @@ fn apply_variations(
         let how = Projection {
             pinned_only: PinnedOnly::Drop,
             merge: true,
+            keep_outer_zero: false,
         };
         Some(
             project_ivs_with(store_bytes, coords, pins, how)

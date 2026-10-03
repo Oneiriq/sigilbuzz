@@ -276,6 +276,70 @@ fn bake_hvar_partial_zeroes_dropped_subtable_lookups() {
     assert!(d.abs() < 1e-3, "got {}", d);
 }
 
+#[test]
+fn implicit_advances_keep_reading_the_first_subtable() {
+    // No advance map: advances read outer 0 by glyph id. Subtable 0
+    // varies them on axis 0 only; subtable 1 (which only a side
+    // bearing map would name) varies on axis 1. Pinning axis 0 and
+    // dropping the pinned-only regions empties subtable 0, which must
+    // stay at outer 0 so advances read zero on the kept axis, not
+    // subtable 1's deltas.
+    let ivs = build_ivs2(
+        &[
+            [(0.0, 1.0, 1.0), (0.0, 0.0, 0.0)],
+            [(0.0, 0.0, 0.0), (0.0, 1.0, 1.0)],
+        ],
+        &[
+            (
+                alloc::vec![0],
+                alloc::vec![alloc::vec![100], alloc::vec![100]],
+            ),
+            (alloc::vec![1], alloc::vec![alloc::vec![7], alloc::vec![7]]),
+        ],
+    );
+    let hvar = build_hvar_no_maps(&ivs);
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let dropped = super::super::metrics_var::bake_hvar_partial_with(
+        &hvar,
+        &[1.0, 0.0],
+        &pins,
+        super::super::ivs::PinnedOnly::Drop,
+    )
+    .expect("bake");
+    let parsed = sigilbuzz::tables::Hvar::parse(&dropped).unwrap();
+    for gid in 0..2 {
+        for kept in [0.0, 1.0] {
+            let d = parsed.advance_delta(gid, &[kept]);
+            assert!(d.abs() < 1e-3, "gid {gid} at {kept}: {d}");
+        }
+    }
+    // Keeping the pinned-only regions keeps their deltas.
+    let kept = bake_hvar_partial(&hvar, &[1.0, 0.0], &pins).expect("bake");
+    let parsed = sigilbuzz::tables::Hvar::parse(&kept).unwrap();
+    assert!((parsed.advance_delta(1, &[1.0]) - 100.0).abs() < 1e-3);
+
+    // VVAR reads its advance heights the same way.
+    let mut vvar = Vec::new();
+    vvar.extend_from_slice(&[0, 1, 0, 0]);
+    vvar.extend_from_slice(&24u32.to_be_bytes()); // ivs offset = header end
+    vvar.extend_from_slice(&[0; 16]); // no maps
+    vvar.extend_from_slice(&ivs);
+    let dropped = super::super::metrics_var::bake_vvar_partial_with(
+        &vvar,
+        &[1.0, 0.0],
+        &pins,
+        super::super::ivs::PinnedOnly::Drop,
+    )
+    .expect("bake");
+    let parsed = sigilbuzz::tables::Vvar::parse(&dropped).unwrap();
+    for gid in 0..2 {
+        for kept in [0.0, 1.0] {
+            let d = parsed.advance_height_delta(gid, &[kept]);
+            assert!(d.abs() < 1e-3, "VVAR gid {gid} at {kept}: {d}");
+        }
+    }
+}
+
 /// Builds an MVAR table with `records` x (tag, outer=0, inner=0)
 /// pointing at the embedded IVS.
 fn build_mvar(records: &[[u8; 4]], ivs: &[u8]) -> Vec<u8> {

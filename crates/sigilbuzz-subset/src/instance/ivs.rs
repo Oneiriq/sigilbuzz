@@ -124,6 +124,11 @@ pub(crate) struct Projection {
     /// every surviving column stays, rounded on its own (halves away
     /// from zero); the CFF2 bake relies on that layout.
     pub(crate) merge: bool,
+    /// Keep the first subtable at outer index 0 even when it collapses,
+    /// as an empty subtable, so a lookup that names outer 0 without a
+    /// map (an HVAR or VVAR advance read by glyph id) still reads the
+    /// first subtable's rows, not the next surviving subtable's.
+    pub(crate) keep_outer_zero: bool,
 }
 
 impl Projection {
@@ -131,6 +136,7 @@ impl Projection {
     pub(crate) const KEEP_ALL: Self = Self {
         pinned_only: PinnedOnly::Keep,
         merge: false,
+        keep_outer_zero: false,
     };
 
     /// The projection of a store whose default values stay at the
@@ -140,6 +146,7 @@ impl Projection {
     pub(crate) const KEEP_MERGED: Self = Self {
         pinned_only: PinnedOnly::Keep,
         merge: true,
+        keep_outer_zero: false,
     };
 }
 
@@ -475,6 +482,17 @@ pub(crate) fn project_ivs_with(
         let new_outer = new_subtables.len() as u16;
         new_subtables.push(sub_bytes);
         new_outer_for_old.push(Some(new_outer));
+    }
+
+    // A collapsed first subtable whose rows a lookup reaches without a
+    // map stays at outer 0, empty, so every row there reads as zero
+    // instead of as the next surviving subtable's.
+    if how.keep_outer_zero && new_outer_for_old.first() == Some(&None) {
+        new_subtables.insert(0, alloc::vec![0; 6]);
+        for outer in new_outer_for_old.iter_mut().flatten() {
+            *outer += 1;
+        }
+        new_outer_for_old[0] = Some(0);
     }
 
     // Note: when every subtable collapses we still emit a valid (but
