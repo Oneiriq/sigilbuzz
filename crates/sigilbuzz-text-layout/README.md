@@ -23,7 +23,14 @@ case of the Unicode conformance files `LineBreakTest.txt` and `WordBreakTest.txt
 By default (`WordBreak::Normal`) Korean breaks between syllables, like Chinese and
 Japanese. Korean is usually set with spaces between words, so most Korean text wants
 `WordBreak::KeepAll`, CSS `word-break: keep-all`: no break between two letters or
-numbers, so each word (eojeol) stays whole and breaks at spaces and punctuation.
+numbers, so Korean breaks at spaces instead of between syllables.
+
+`KeepAll` changes nothing else. Punctuation, symbols, and emoji keep their default
+breaks, so a word (eojeol) is not always kept whole: a particle that follows a closing
+bracket, a closing quotation mark, or `%` can still wrap onto the next line by itself.
+`(한국어)를` may break before `를`, and so may `50%를`. CSS defines it that way, and
+Blink breaks there too. Like Blink, `KeepAll` also leaves the Southeast Asian scripts
+of class SA to their own breaks.
 
 ```rust
 use sigilbuzz_text_layout::{line_break_opportunities_with, WordBreak};

@@ -13,8 +13,9 @@
 //!
 //! - [`line_break_opportunities`]: the UAX 14 break iterator over a
 //!   `&str`, and [`line_break_opportunities_with`] for the CSS
-//!   `word-break` tailorings in [`WordBreak`] (`keep-all` keeps Korean
-//!   words whole, `break-all` breaks inside any word).
+//!   `word-break` tailorings in [`WordBreak`] (`keep-all` breaks Korean
+//!   between words instead of syllables, `break-all` breaks inside any
+//!   word).
 //! - [`wrap_lines`]: walks a slice of shaped [`sigilbuzz::Glyph`]s
 //!   and a width budget to produce [`LineRange`]s.
 //! - [`word_breaks`]: the UAX 29 word boundary iterator, for cursor
