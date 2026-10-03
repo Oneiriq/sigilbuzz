@@ -177,11 +177,12 @@ use partial::{layout_variations, partial_instance, pinned_axes};
 pub(crate) use ivs::{bake_ivs_partial, project_ivs_with, PinnedOnly, Projection, RegionRemap};
 pub(crate) use region::project_region_onto_kept_axes;
 
-/// F2DOT14 normalized axis coordinate. Matches the on-disk encoding the
-/// VF spec uses: a signed 2.14 fixed-point in the range `[-1.0, 1.0]`,
-/// where `0` is the axis default and `±1` is the extreme. Callers
-/// usually obtain the vector by feeding user-space coords through
-/// [`sigilbuzz::tables::Fvar::normalize_coords`].
+/// A normalized axis coordinate in `[-1.0, 1.0]`, where `0` is the axis
+/// default and `-1` and `1` its extremes. Pass the unrounded values
+/// [`sigilbuzz::tables::Fvar::normalize_coords`] gives: the instancer
+/// maps them through `avar` and only then rounds to the F2DOT14 grid,
+/// as HarfBuzz and fontTools do. Rounding before `avar` can land an
+/// axis one F2DOT14 step away and move outlines and advances by a unit.
 pub type F2Dot14 = f32;
 
 /// Per-axis pin policy for partial instancing.
@@ -210,8 +211,8 @@ pub enum AxisPin {
 /// Inputs to [`instance`].
 #[derive(Debug, Clone)]
 pub struct InstanceInput {
-    /// Per-axis normalized F2DOT14 coords. Length must match
-    /// `face.fvar()`'s axis count.
+    /// Per-axis normalized coords, unrounded, before `avar` (see
+    /// [`F2Dot14`]). Length must match `face.fvar()`'s axis count.
     pub coords: Vec<F2Dot14>,
     /// If true (the recommended setting), drop `fvar` / `avar` /
     /// `HVAR` / `gvar` from the output. The font becomes static:
