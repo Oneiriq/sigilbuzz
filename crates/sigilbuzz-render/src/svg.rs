@@ -128,10 +128,11 @@ use sigilbuzz::Face;
 
 use crate::affine::Affine;
 use crate::error::RenderError;
-use crate::pixmap::ColorPixmap;
+use crate::pixmap::{ColorPixmap, Placement};
 use crate::rasterizer::Rasterizer;
 
 use document::{build_defs, parse_document_with};
+use model::SvgDoc;
 use render::render_doc;
 use text_path::append_text_path_fills;
 use xml::parse_xml;
@@ -239,6 +240,9 @@ impl Rasterizer {
     /// spec hands a glyph document, until a `color` attribute changes
     /// it for a subtree.
     ///
+    /// [`Rasterizer::rasterize_svg_glyph_placed`] returns the same
+    /// pixmap together with its offset from the glyph origin.
+    ///
     /// # Errors
     /// - [`RenderError::SvgNotFound`] when `gid` has no SVG record.
     /// - [`RenderError::SvgGzipped`] when the payload is gzip-compressed
@@ -256,8 +260,48 @@ impl Rasterizer {
         face: &Face<'_>,
         gid: u16,
         size_pt: f32,
-        _coords: &[f32],
+        coords: &[f32],
     ) -> Result<ColorPixmap, RenderError> {
+        self.rasterize_svg_glyph_placed(face, gid, size_pt, coords)
+            .map(|(pixmap, _)| pixmap)
+    }
+
+    /// Rasterizes the SVG document for `gid` like
+    /// [`Rasterizer::rasterize_svg_glyph`] and also returns where the
+    /// pixmap sits relative to the glyph origin (see [`Placement`]).
+    ///
+    /// As the OpenType `SVG ` table defines it, the glyph origin is the
+    /// document's user-space point `(0, 0)` and user-space y runs down.
+    /// The pixmap shows the document's viewBox, scaled by `s`, the
+    /// factor that fits the viewBox into a `size_pt x size_pt` square,
+    /// so its top-left pixel sits at the viewBox's `(x, y)` corner:
+    /// `left` is `x * s` and `top` is `y * s`, each rounded to the
+    /// nearest pixel, ties away from zero. A document without a viewBox
+    /// shows `0 0 1000 1000`, or its `width` and `height` from the
+    /// origin, so its image sits at the origin.
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    /// use sigilbuzz_render::{Placement, Rasterizer};
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/svg_synthetic.ttf");
+    /// let face = Face::parse_bytes(data, 0).unwrap();
+    /// let rast = Rasterizer::new();
+    /// let (pix, at) = rast.rasterize_svg_glyph_placed(&face, 1, 64.0, &[]).unwrap();
+    /// assert_eq!(pix, rast.rasterize_svg_glyph(&face, 1, 64.0, &[]).unwrap());
+    /// // This document's viewBox starts at the glyph origin.
+    /// assert_eq!(at, Placement::default());
+    /// ```
+    ///
+    /// # Errors
+    /// The same as [`Rasterizer::rasterize_svg_glyph`].
+    pub fn rasterize_svg_glyph_placed(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        size_pt: f32,
+        _coords: &[f32],
+    ) -> Result<(ColorPixmap, Placement), RenderError> {
         if !size_pt.is_finite() || size_pt <= 0.0 {
             return Err(RenderError::BadSize(size_pt));
         }
@@ -274,40 +318,7 @@ impl Rasterizer {
         if doc.view_w <= 0.0 || doc.view_h <= 0.0 {
             return Err(RenderError::Parse("svg viewBox"));
         }
-        // Map document to pixel space: scale the viewBox onto a
-        // size_pt x size_pt square, preserving aspect ratio.
-        let s = (size_pt / doc.view_w).min(size_pt / doc.view_h);
-        let world = Affine {
-            xx: s,
-            yx: 0.0,
-            xy: 0.0,
-            yy: s,
-            dx: -doc.view_x * s,
-            dy: -doc.view_y * s,
-        };
-
-        // Cap output dimensions before allocation. Without this guard
-        // an extreme finite viewBox + matching size_pt yields a
-        // post-cast `u32::MAX * u32::MAX * 4` allocation that overflows
-        // `usize` even through `saturating_mul`, and `vec![0u8; len]`
-        // panics with "capacity overflow". 16384 matches the PNG
-        // decoder's per-dim ceiling (`Ihdr::parse`) so the bound is
-        // consistent across the public render surface.
-        let width_f = (doc.view_w * s).round().max(1.0);
-        let height_f = (doc.view_h * s).round().max(1.0);
-        if !width_f.is_finite()
-            || !height_f.is_finite()
-            || width_f > MAX_RENDER_DIM
-            || height_f > MAX_RENDER_DIM
-        {
-            return Err(RenderError::BadSize(size_pt));
-        }
-        let width = width_f as u32;
-        let height = height_f as u32;
-        let mut out = ColorPixmap::new(width, height);
-
-        render_doc(&mut out, &doc, &world, self.flattening_tolerance());
-        Ok(out)
+        render_view_box(&doc, size_pt, self.flattening_tolerance())
     }
 
     /// Rasterizes the SVG document for `gid` and additionally places
@@ -359,6 +370,39 @@ impl Rasterizer {
         coords: &[f32],
         text_paths: &[TextPathInput<'_>],
     ) -> Result<ColorPixmap, RenderError> {
+        self.rasterize_svg_glyph_with_text_paths_placed(face, gid, size_pt, coords, text_paths)
+            .map(|(pixmap, _)| pixmap)
+    }
+
+    /// Rasterizes the SVG document for `gid` with text-path runs like
+    /// [`Rasterizer::rasterize_svg_glyph_with_text_paths`] and also
+    /// returns where the pixmap sits relative to the glyph origin. The
+    /// placement is the one [`Rasterizer::rasterize_svg_glyph_placed`]
+    /// describes: the text runs do not move the canvas.
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    /// use sigilbuzz_render::Rasterizer;
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/svg_synthetic.ttf");
+    /// let face = Face::parse_bytes(data, 0).unwrap();
+    /// let rast = Rasterizer::new();
+    /// let placed = rast
+    ///     .rasterize_svg_glyph_with_text_paths_placed(&face, 1, 64.0, &[], &[])
+    ///     .unwrap();
+    /// assert_eq!(placed, rast.rasterize_svg_glyph_placed(&face, 1, 64.0, &[]).unwrap());
+    /// ```
+    ///
+    /// # Errors
+    /// The same as [`Rasterizer::rasterize_svg_glyph_with_text_paths`].
+    pub fn rasterize_svg_glyph_with_text_paths_placed(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        size_pt: f32,
+        coords: &[f32],
+        text_paths: &[TextPathInput<'_>],
+    ) -> Result<(ColorPixmap, Placement), RenderError> {
         if !size_pt.is_finite() || size_pt <= 0.0 {
             return Err(RenderError::BadSize(size_pt));
         }
@@ -401,31 +445,61 @@ impl Rasterizer {
             );
         }
 
-        let s = (size_pt / doc.view_w).min(size_pt / doc.view_h);
-        let world = Affine {
-            xx: s,
-            yx: 0.0,
-            xy: 0.0,
-            yy: s,
-            dx: -doc.view_x * s,
-            dy: -doc.view_y * s,
-        };
-        let width_f = (doc.view_w * s).round().max(1.0);
-        let height_f = (doc.view_h * s).round().max(1.0);
-        if !width_f.is_finite()
-            || !height_f.is_finite()
-            || width_f > MAX_RENDER_DIM
-            || height_f > MAX_RENDER_DIM
-        {
-            return Err(RenderError::BadSize(size_pt));
-        }
-        let width = width_f as u32;
-        let height = height_f as u32;
-        let mut out = ColorPixmap::new(width, height);
-
-        render_doc(&mut out, &doc, &world, self.flattening_tolerance());
-        Ok(out)
+        render_view_box(&doc, size_pt, self.flattening_tolerance())
     }
+}
+
+/// Renders `doc`'s viewBox onto a canvas that fits a `size_pt x size_pt`
+/// square, preserving the aspect ratio, and returns it with the offset
+/// of its top-left pixel from the glyph origin, user-space `(0, 0)`.
+/// The caller has checked that the viewBox has a positive size.
+fn render_view_box(
+    doc: &SvgDoc,
+    size_pt: f32,
+    tolerance: f32,
+) -> Result<(ColorPixmap, Placement), RenderError> {
+    // Map document to pixel space: scale the viewBox onto a
+    // size_pt x size_pt square, preserving aspect ratio.
+    let s = (size_pt / doc.view_w).min(size_pt / doc.view_h);
+    let world = Affine {
+        xx: s,
+        yx: 0.0,
+        xy: 0.0,
+        yy: s,
+        dx: -doc.view_x * s,
+        dy: -doc.view_y * s,
+    };
+
+    // Cap output dimensions before allocation. Without this guard
+    // an extreme finite viewBox + matching size_pt yields a
+    // post-cast `u32::MAX * u32::MAX * 4` allocation that overflows
+    // `usize` even through `saturating_mul`, and `vec![0u8; len]`
+    // panics with "capacity overflow". 16384 matches the PNG
+    // decoder's per-dim ceiling (`Ihdr::parse`) so the bound is
+    // consistent across the public render surface.
+    let width_f = (doc.view_w * s).round().max(1.0);
+    let height_f = (doc.view_h * s).round().max(1.0);
+    if !width_f.is_finite()
+        || !height_f.is_finite()
+        || width_f > MAX_RENDER_DIM
+        || height_f > MAX_RENDER_DIM
+    {
+        return Err(RenderError::BadSize(size_pt));
+    }
+    let width = width_f as u32;
+    let height = height_f as u32;
+    let mut out = ColorPixmap::new(width, height);
+
+    render_doc(&mut out, doc, &world, tolerance);
+    // Pixel (0, 0) shows the viewBox's top-left corner. The world
+    // transform does not snap it to the pixel grid, so the offset
+    // rounds to the nearest pixel; `as` saturates a corner that lies
+    // absurdly far from the origin.
+    let placement = Placement::new(
+        (doc.view_x * s).round() as i32,
+        (doc.view_y * s).round() as i32,
+    );
+    Ok((out, placement))
 }
 
 // =========================================================================

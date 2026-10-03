@@ -32,10 +32,11 @@ use sigilbuzz_paint::{Color, ColorStop, CompositeMode, EvalOptions, Extend, Grad
 
 use crate::canvas::RasterSink;
 use crate::error::RenderError;
-use crate::pixmap::ColorPixmap;
+use crate::pixmap::{ColorPixmap, Placement};
 
 /// Public entry: walks `gid`'s COLRv1 paint tree and renders it to a
-/// premultiplied RGBA pixmap.
+/// premultiplied RGBA pixmap, returned with its offset from the glyph
+/// origin.
 ///
 /// `palette_index` selects the CPAL palette palette entries resolve
 /// against. Foreground (`0xFFFF`) entries, and entries the font cannot
@@ -51,7 +52,7 @@ pub(crate) fn rasterize_colrv1(
     coords: &[f32],
     tolerance: f32,
     foreground: [u8; 4],
-) -> Result<ColorPixmap, RenderError> {
+) -> Result<(ColorPixmap, Placement), RenderError> {
     if !size_pt.is_finite() || size_pt <= 0.0 {
         return Err(RenderError::BadSize(size_pt));
     }

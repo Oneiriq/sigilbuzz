@@ -38,6 +38,14 @@
 //! let _ = pix.data;
 //! ```
 //!
+//! # Placing glyph images
+//!
+//! Each `rasterize_*` method has a `rasterize_*_placed` twin that
+//! returns the same image together with a [`Placement`]: the offset of
+//! the image's top-left pixel from the pen position on the baseline, in
+//! pixels with y down. Draw a run by copying every image to
+//! [`Placement::top_left`] of its rounded pen position.
+//!
 //! # PNG round-trip
 //!
 //! [`encode_png`] / [`encode_png_alpha`] turn a pixmap back into a
@@ -116,14 +124,17 @@ mod svg;
 mod tiff_decode;
 
 pub use affine::Affine;
-pub use bitmaps::{decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rescale_bilinear};
+pub use bitmaps::{
+    decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rasterize_bitmap_glyph_placed,
+    rescale_bilinear,
+};
 pub use error::RenderError;
 pub use flatten::{
     arc_length_cubic, arc_length_cubic_solve_t, arc_length_quad, arc_length_quad_solve_t, flatten,
     flatten_grouped, FlattenedCurve, Segment, DEFAULT_TOLERANCE,
 };
 pub use jpeg_decode::decode_jpeg;
-pub use pixmap::{ColorPixmap, Pixmap};
+pub use pixmap::{ColorPixmap, Pixmap, Placement};
 pub use png_encode::{encode_png, encode_png_alpha};
 pub use rasterizer::Rasterizer;
 pub use svg::{TextPathGlyph, TextPathInput};

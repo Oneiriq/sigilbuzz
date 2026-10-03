@@ -38,7 +38,7 @@ use sigilbuzz_paint::{CompositeMode, Extend, GradientKind, Transform2D};
 use crate::affine::Affine;
 use crate::colrv1::{composite_layer, mul_alpha, sample_gradient, to_premul};
 use crate::flatten::{flatten_limited, MAX_SEGMENTS};
-use crate::pixmap::{ColorPixmap, Pixmap};
+use crate::pixmap::{ColorPixmap, Pixmap, Placement};
 use crate::raster::{rasterize_in, Window};
 
 /// Largest canvas side, the same ceiling the SVG and bitmap paths use.
@@ -121,15 +121,21 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
         }
     }
 
-    /// The rendered glyph, or `None` when the root clip was too large.
-    pub(crate) fn finish(mut self) -> Option<ColorPixmap> {
+    /// The rendered glyph and the offset of its top-left pixel from the
+    /// glyph origin, or `None` when the root clip was too large. An
+    /// unbounded glyph is an empty pixmap at `(0, 0)`.
+    pub(crate) fn finish(mut self) -> Option<(ColorPixmap, Placement)> {
         if self.oversized {
             return None;
         }
-        Some(if self.layers.is_empty() {
-            ColorPixmap::new(0, 0)
-        } else {
-            self.layers.swap_remove(0)
+        // The device transform maps the glyph origin to pixel (0, 0),
+        // so the canvas origin is the placement.
+        Some(match self.canvas {
+            Some(canvas) if !self.layers.is_empty() => (
+                self.layers.swap_remove(0),
+                Placement::new(canvas.origin_x, canvas.origin_y),
+            ),
+            _ => (ColorPixmap::new(0, 0), Placement::default()),
         })
     }
 
