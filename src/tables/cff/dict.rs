@@ -177,7 +177,8 @@ pub(crate) enum FdSelect<'a> {
     Bytes(&'a [u8]),
     /// Format 3 (`Range3`: u16 first glyph, u8 FD) or format 4
     /// (`Range4`: u32 first glyph, u16 FD, `wide`), followed by a
-    /// sentinel glyph id that ends the last range.
+    /// sentinel glyph id that ends the last range. Format 4 is what
+    /// lets a CFF2 font have more than 256 Font DICTs.
     Ranges {
         /// The packed range records.
         ranges: &'a [u8],
@@ -248,9 +249,9 @@ impl<'a> FdSelect<'a> {
     /// passed. The scan stops at the range that covers `gid`, or as
     /// soon as no later range can, so for sorted ranges it reads only
     /// the ranges up to `gid`.
-    pub(crate) fn fd_for_glyph(&self, gid: usize) -> u8 {
+    pub(crate) fn fd_for_glyph(&self, gid: usize) -> u16 {
         match *self {
-            Self::Bytes(fds) => fds.get(gid).copied().unwrap_or(0),
+            Self::Bytes(fds) => fds.get(gid).copied().map_or(0, u16::from),
             Self::Ranges {
                 ranges,
                 wide,
@@ -277,12 +278,11 @@ impl<'a> FdSelect<'a> {
                     };
                     let end = end.min(n_glyphs);
                     if gid >= first_at(i).max(filled) && gid < end {
-                        // Format 4 stores a u16 FD; only the low byte
-                        // is kept, as FDArray indices fit in a u8 here.
+                        // Format 3 stores a u8 FD and format 4 a u16.
                         return if wide {
-                            be_uint(ranges, i * stride + 4, 2) as u8
+                            be_uint(ranges, i * stride + 4, 2) as u16
                         } else {
-                            be_uint(ranges, i * stride + 2, 1) as u8
+                            be_uint(ranges, i * stride + 2, 1) as u16
                         };
                     }
                     filled = filled.max(end);
@@ -314,8 +314,12 @@ fn be_uint(bytes: &[u8], at: usize, width: usize) -> usize {
 /// ranges cannot make the fill quadratic. For sorted ranges it changes
 /// nothing.
 #[cfg(test)]
-pub(crate) fn fill_fd_ranges(ranges: &[(usize, u8)], sentinel: usize, n_glyphs: usize) -> Vec<u8> {
-    let mut out = alloc::vec![0u8; n_glyphs];
+pub(crate) fn fill_fd_ranges(
+    ranges: &[(usize, u16)],
+    sentinel: usize,
+    n_glyphs: usize,
+) -> Vec<u16> {
+    let mut out = alloc::vec![0u16; n_glyphs];
     let mut filled = 0usize;
     for (i, &(first, fd)) in ranges.iter().enumerate() {
         let end = ranges.get(i + 1).map_or(sentinel, |next| next.0);

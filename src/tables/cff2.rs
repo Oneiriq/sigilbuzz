@@ -573,6 +573,164 @@ mod tests {
         out.ops().to_vec()
     }
 
+    /// The Private DICT of one Font DICT in a [`TestCff2`].
+    struct TestPrivate {
+        /// DICT bytes, written ahead of the Subrs entry.
+        dict: Vec<u8>,
+        /// Local Subrs. Without any, the Private DICT has no Subrs entry.
+        subrs: Vec<Vec<u8>>,
+    }
+
+    /// The parts of a CFF2 test table, laid out by [`TestCff2::build`].
+    #[derive(Default)]
+    struct TestCff2 {
+        /// One charstring per glyph.
+        charstrings: Vec<Vec<u8>>,
+        /// The FDArray. `None` is an empty Font DICT.
+        font_dicts: Vec<Option<TestPrivate>>,
+        /// FDSelect bytes, format byte first.
+        fd_select: Option<Vec<u8>>,
+        /// ItemVariationStore bytes for the VariationStore.
+        ivs: Option<Vec<u8>>,
+    }
+
+    /// Encodes a CFF2 INDEX (u32 count) with 4-byte offsets.
+    fn encode_index2(entries: &[Vec<u8>]) -> Vec<u8> {
+        let entries: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+        let mut out = alloc::vec![0, 0];
+        out.extend(crate::tables::cff::encode_index(&entries, 4));
+        out
+    }
+
+    /// Appends `v` as a 5-byte DICT integer.
+    fn dict_i32(out: &mut Vec<u8>, v: usize) {
+        out.push(29);
+        out.extend_from_slice(&(v as i32).to_be_bytes());
+    }
+
+    impl TestCff2 {
+        /// Lays the table out as header, Top DICT, Global Subrs (empty),
+        /// CharStrings, FDArray, FDSelect, VariationStore, and then each
+        /// Private DICT followed by its Local Subrs.
+        fn build(&self) -> Vec<u8> {
+            let top_len = 6
+                + 7
+                + if self.fd_select.is_some() { 7 } else { 0 }
+                + if self.ivs.is_some() { 6 } else { 0 };
+            let char_strings = encode_index2(&self.charstrings);
+            let cs_off = 5 + top_len + 4;
+            let fda_off = cs_off + char_strings.len();
+            // A Font DICT that names a Private DICT is two 5-byte
+            // integers and operator 18.
+            let fd_lens: usize = self.font_dicts.iter().flatten().map(|_| 11).sum();
+            let n_fds = self.font_dicts.len();
+            let fda_len = if n_fds == 0 {
+                4
+            } else {
+                4 + 1 + 4 * (n_fds + 1) + fd_lens
+            };
+            let fds = self.fd_select.clone().unwrap_or_default();
+            let fds_off = fda_off + fda_len;
+            let vstore_off = fds_off + fds.len();
+            let vstore_len = self.ivs.as_ref().map_or(0, |ivs| 2 + ivs.len());
+
+            let mut private_off = vstore_off + vstore_len;
+            let mut font_dicts = Vec::new();
+            let mut privates = Vec::new();
+            for fd in &self.font_dicts {
+                let mut dict = Vec::new();
+                if let Some(p) = fd {
+                    let mut private = p.dict.clone();
+                    if !p.subrs.is_empty() {
+                        // Subrs start right after the Private DICT.
+                        let size = private.len() + 6;
+                        dict_i32(&mut private, size);
+                        private.push(19);
+                    }
+                    let size = private.len();
+                    if !p.subrs.is_empty() {
+                        private.extend(encode_index2(&p.subrs));
+                    }
+                    dict_i32(&mut dict, size);
+                    dict_i32(&mut dict, private_off);
+                    dict.push(18);
+                    private_off += private.len();
+                    privates.extend(private);
+                }
+                font_dicts.push(dict);
+            }
+
+            let mut out = alloc::vec![2, 0, 5];
+            out.extend_from_slice(&(top_len as u16).to_be_bytes());
+            dict_i32(&mut out, cs_off);
+            out.push(17); // CharStrings
+            dict_i32(&mut out, fda_off);
+            out.extend_from_slice(&[12, 36]); // FDArray
+            if self.fd_select.is_some() {
+                dict_i32(&mut out, fds_off);
+                out.extend_from_slice(&[12, 37]); // FDSelect
+            }
+            if self.ivs.is_some() {
+                dict_i32(&mut out, vstore_off);
+                out.push(24); // VariationStore
+            }
+            out.extend_from_slice(&0u32.to_be_bytes()); // Global Subr INDEX
+            assert_eq!(out.len(), cs_off);
+            out.extend(char_strings);
+            out.extend(encode_index2(&font_dicts));
+            assert_eq!(out.len(), fds_off);
+            out.extend(fds);
+            if let Some(ivs) = &self.ivs {
+                out.extend_from_slice(&(ivs.len() as u16).to_be_bytes());
+                out.extend_from_slice(ivs);
+            }
+            out.extend(privates);
+            out
+        }
+    }
+
+    #[test]
+    fn cff2_glyph_uses_a_font_dict_past_255() {
+        // FDSelect format 4 sends glyph 0 to FD 256, the only Font DICT
+        // with Local Subrs. Its subr 0 draws `10 0 rlineto`, called as
+        // -107 (byte 32) since one subr has bias 107. The FD used to be
+        // cut to a byte, which read FD 0, so the call found no subrs.
+        let mut font_dicts: Vec<Option<TestPrivate>> = (0..256).map(|_| None).collect();
+        font_dicts.push(Some(TestPrivate {
+            dict: Vec::new(),
+            subrs: alloc::vec![alloc::vec![149, 139, op_code::RLINETO]],
+        }));
+        let mut fd_select = alloc::vec![4];
+        fd_select.extend_from_slice(&1u32.to_be_bytes()); // nRanges
+        fd_select.extend_from_slice(&0u32.to_be_bytes()); // first glyph
+        fd_select.extend_from_slice(&256u16.to_be_bytes()); // FD
+        fd_select.extend_from_slice(&1u32.to_be_bytes()); // sentinel
+        let table = TestCff2 {
+            charstrings: alloc::vec![alloc::vec![
+                139,
+                139,
+                op_code::RMOVETO,
+                32,
+                op_code::CALLSUBR
+            ]],
+            font_dicts,
+            fd_select: Some(fd_select),
+            ..TestCff2::default()
+        }
+        .build();
+        let cff2 = Cff2::parse(&table).unwrap();
+        let mut out = Outline::new();
+        assert!(cff2.outline(0, &[], &mut out).unwrap());
+        assert_eq!(
+            out.ops(),
+            [
+                PathOp::MoveTo { x: 0.0, y: 0.0 },
+                PathOp::LineTo { x: 10.0, y: 0.0 },
+                PathOp::Close,
+            ]
+        );
+    }
+
     #[test]
     fn cff2_outline_closes_the_last_contour_without_endchar() {
         // 100 100 rmoveto 50 0 rlineto 0 50 rlineto. CFF2 has no
