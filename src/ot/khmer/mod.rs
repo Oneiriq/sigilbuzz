@@ -21,9 +21,11 @@
 //!    flags).
 //! 4. The other features `pres`, `abvs`, `blws`, and `psts` run as one
 //!    stage with the default features HarfBuzz puts in the same stage
-//!    (`rlig`, `calt`, `clig`, `rclt`, or `vert` in vertical text) and
-//!    the caller's features. HarfBuzz turns `liga` off for Khmer and
-//!    `clig` on (`override_features_khmer`).
+//!    (`rlig`, `calt`, `clig`, and `rclt`, or `rlig`, `vert`, and `clig`
+//!    in vertical text) and the caller's features. HarfBuzz turns `liga`
+//!    off for Khmer and `clig` on after the caller's features
+//!    (`override_features_khmer`), so the caller can change neither, and
+//!    `clig` runs in vertical text too ([`override_features`]).
 
 mod machine;
 
@@ -73,17 +75,19 @@ const KHMER_EARLY_FEATURES: [MapFeature; 2] = [
 
 /// The default GSUB features HarfBuzz runs in the Khmer shaper's last
 /// stage, for horizontal and for vertical text (`common_features`,
-/// `horizontal_features`, and `vert` in `hb-ot-shape.cc`). `liga` is
-/// off, and `ccmp` and `locl` ran earlier.
+/// `horizontal_features`, and `vert` in `hb-ot-shape.cc`), with the
+/// overrides of `override_features_khmer`: `liga` is off, and `clig` is
+/// on in either direction. `ccmp` and `locl` ran earlier.
 const DEFAULT_HORIZONTAL: [MapFeature; 4] = [
     MapFeature::new(b"rlig", F::GLOBAL),
     MapFeature::new(b"calt", F::GLOBAL),
     MapFeature::new(b"clig", F::GLOBAL),
     MapFeature::new(b"rclt", F::GLOBAL),
 ];
-const DEFAULT_VERTICAL: [MapFeature; 2] = [
+const DEFAULT_VERTICAL: [MapFeature; 3] = [
     MapFeature::new(b"rlig", F::GLOBAL),
     MapFeature::new(b"vert", F::GLOBAL),
+    MapFeature::new(b"clig", F::GLOBAL),
 ];
 
 /// The mask bit of feature `i` of [`KHMER_FEATURES`].
@@ -131,6 +135,8 @@ pub(crate) fn shape(run: &KhmerRun<'_>, codepoints: &[char], glyphs: &mut Vec<Gl
     if codepoints.len() != glyphs.len() || glyphs.is_empty() {
         return;
     }
+    let features = override_features(run.features);
+    let features = features.as_slice();
     let mut info: Vec<GlyphInfo> = codepoints
         .iter()
         .map(|&c| GlyphInfo {
@@ -149,7 +155,7 @@ pub(crate) fn shape(run: &KhmerRun<'_>, codepoints: &[char], glyphs: &mut Vec<Gl
     let masks = Masks {
         cfar: runner
             .as_ref()
-            .is_some_and(|r| has_feature(r, run.features, *b"cfar", prio)),
+            .is_some_and(|r| has_feature(r, features, *b"cfar", prio)),
     };
     if let Some(circle) = run.dotted_circle {
         let spec = DottedCircle {
@@ -182,7 +188,7 @@ pub(crate) fn shape(run: &KhmerRun<'_>, codepoints: &[char], glyphs: &mut Vec<Gl
                 .map(|(i, &f)| StageFeature::of(f, bit(i))),
         )
         .collect();
-    apply_stage(runner, prio, &basic, run.features, glyphs, &mut info);
+    apply_stage(runner, prio, &basic, features, glyphs, &mut info);
 
     // HarfBuzz clears the syllables before the last stage.
     let defaults: &[MapFeature] = if run.vertical {
@@ -195,8 +201,8 @@ pub(crate) fn shape(run: &KhmerRun<'_>, codepoints: &[char], glyphs: &mut Vec<Gl
         .chain(defaults)
         .map(|&f| StageFeature::of(f, GLOBAL_MASK))
         .collect();
-    let alternates = add_user_features(&mut other, run.features, early_or_off);
-    apply_stage(runner, prio, &other, run.features, glyphs, &mut info);
+    let alternates = add_user_features(&mut other, features, early);
+    apply_stage(runner, prio, &other, features, glyphs, &mut info);
     for (tag, value) in alternates {
         apply_alternate_feature(runner, prio, tag, value, glyphs);
     }
@@ -253,14 +259,28 @@ fn reorder_consonant_syllable(
     }
 }
 
+/// The caller's features as HarfBuzz's Khmer feature map ends up with
+/// them. `override_features_khmer` enables `clig` and disables `liga`
+/// after the caller's features, and the last value a feature gets wins,
+/// so the caller's `clig` and `liga` are dropped: `clig` always runs, as
+/// a feature of the last stage with no alternate, and `liga` never does.
+/// A required feature tagged `clig` therefore always joins the last
+/// stage, and one tagged `liga` runs in stage 0.
+fn override_features(features: &[Feature]) -> Vec<Feature> {
+    features
+        .iter()
+        .filter(|f| !matches!(&f.tag, b"clig" | b"liga"))
+        .copied()
+        .collect()
+}
+
 /// Tags the caller's features cannot add to the last stage: those of
-/// the basic stage, and `liga`, which the Khmer shaper turns off.
-fn early_or_off(tag: [u8; 4]) -> bool {
-    tag == *b"liga"
-        || KHMER_FEATURES[..KHMER_BASIC_FEATURES]
-            .iter()
-            .chain(&KHMER_EARLY_FEATURES)
-            .any(|f| f.tag == tag)
+/// the basic stage.
+fn early(tag: [u8; 4]) -> bool {
+    KHMER_FEATURES[..KHMER_BASIC_FEATURES]
+        .iter()
+        .chain(&KHMER_EARLY_FEATURES)
+        .any(|f| f.tag == tag)
 }
 
 #[cfg(test)]

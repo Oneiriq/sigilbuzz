@@ -15,6 +15,8 @@
 //! script alone: an Indic or Myanmar script whose font has only `DFLT`,
 //! `dflt` or `latn` lookups (or `mymr` for Myanmar) takes the default
 //! shaper, and a required feature then runs in that shaper's stages.
+//! The Khmer shaper turns `liga` off and `clig` on after the caller's
+//! features, whatever the caller asks.
 //!
 //! None of the vendored fonts has a required feature, so each test
 //! patches one at run time, or builds a GSUB of one lookup. Every
@@ -293,6 +295,13 @@ fn khmer_required_liga() -> Vec<u8> {
     let mut gsub = table(KHMER, b"GSUB").to_vec();
     retag(&mut gsub, b"clig", b"liga");
     make_required(&mut gsub, b"liga");
+    with_gsub(KHMER, gsub)
+}
+
+/// Khmer whose `clig` is only the required feature.
+fn khmer_required_clig() -> Vec<u8> {
+    let mut gsub = table(KHMER, b"GSUB").to_vec();
+    make_required(&mut gsub, b"clig");
     with_gsub(KHMER, gsub)
 }
 
@@ -753,6 +762,129 @@ fn a_required_ljmo_runs_once_on_hangul_syllables() {
                 ),
                 ("\u{1100}\u{1161}", &[(341, 0, 920, 0, 0)]),
             ],
+        );
+    }
+}
+
+#[test]
+fn khmer_runs_clig_whatever_the_caller_says() {
+    // `override_features_khmer` turns `clig` on after the caller's
+    // features, so `clig=0` changes nothing. It used to turn `clig` off.
+    let off = [feature(b"clig", 0)];
+    let liga_on = [feature(b"liga", 1), feature(b"clig", 0)];
+    for features in [&off[..], &liga_on] {
+        check_with(
+            KHMER,
+            features,
+            &[
+                (
+                    "\u{1787}\u{17B6}\u{17DC}\u{17D3}\u{17A9}",
+                    &[
+                        (226, 0, 923, 0, 0),
+                        (146, 6, 733, 0, 0),
+                        (360, 6, 635, 0, 0),
+                        (136, 6, 0, -20, -84),
+                        (69, 12, 734, 0, 0),
+                    ],
+                ),
+                (
+                    "\u{1782}\u{17C4}\u{17D3}\u{1794}\u{17D2}\u{1781}",
+                    &[
+                        (107, 0, 288, 0, 0),
+                        (216, 0, 923, 0, 0),
+                        (136, 0, 0, 47, -29),
+                        (46, 9, 635, 0, 0),
+                        (160, 9, 0, -1, -26),
+                    ],
+                ),
+                (
+                    "\u{1792}\u{1798}\u{17C5}\u{17BF}",
+                    &[
+                        (44, 0, 635, 0, 0),
+                        (107, 3, 288, 0, 0),
+                        (265, 3, 923, 0, 0),
+                        (107, 3, 288, 0, 0),
+                        (360, 3, 635, 0, 0),
+                        (99, 3, 288, 0, 0),
+                    ],
+                ),
+            ],
+        );
+    }
+}
+
+#[test]
+fn khmer_runs_clig_in_vertical_text() {
+    // The override turns `clig` on in vertical text too, where HarfBuzz
+    // runs none of the other horizontal default features. It used to
+    // stay off there.
+    let cases: [(&str, &[Row]); 2] = [
+        (
+            "\u{1799}\u{17D2}\u{1783}\u{17C5}",
+            &[
+                (107, 0, -1362, -144, -974),
+                (53, 0, -1362, -476, -974),
+                (288, 0, -1362, -287, -986),
+            ],
+        ),
+        (
+            "\u{1791}\u{1783}\u{17D2}\u{17AC}\u{17B6}",
+            &[
+                (43, 0, -1362, -299, -974),
+                (218, 3, -1362, -608, -974),
+                (210, 3, -1362, 353, 362),
+            ],
+        ),
+    ];
+    for features in [&[][..], &[feature(b"clig", 0)]] {
+        for (text, expected) in cases {
+            assert_eq!(vertical_rows(KHMER, text, features), expected, "{text:?}");
+        }
+    }
+}
+
+#[test]
+fn a_required_clig_stays_in_the_khmer_last_stage() {
+    // As `clig` is always on, a required `clig` always runs in the Khmer
+    // shaper's last stage, after the syllables are reordered. With
+    // `clig=0` it used to run in stage 0, and in vertical text nowhere.
+    let font = khmer_required_clig();
+    let off = [feature(b"clig", 0)];
+    let calt_off = [feature(b"calt", 0), feature(b"clig", 0)];
+    for features in [&[][..], &off, &calt_off] {
+        check_with(
+            &font,
+            features,
+            &[
+                (
+                    "\u{17AA}\u{17A1}\u{17C4}",
+                    &[
+                        (70, 0, 636, 0, 0),
+                        (107, 3, 288, 0, 0),
+                        (282, 3, 1134, 0, 0),
+                    ],
+                ),
+                (
+                    "\u{1790}\u{17C5}\u{17C9}",
+                    &[
+                        (107, 0, 288, 0, 0),
+                        (247, 0, 923, 0, 0),
+                        (360, 0, 635, 0, 0),
+                        (117, 0, 0, -20, -84),
+                    ],
+                ),
+            ],
+        );
+        let text = "\u{1794}\u{17C5}\u{17D2}\u{1789}\u{1788}";
+        assert_eq!(
+            vertical_rows(&font, text, features),
+            [
+                (107, 0, -1362, -144, -974),
+                (256, 0, -1362, -461, -1088),
+                (170, 0, -1362, 482, 218),
+                (33, 12, -1362, -625, -974),
+            ],
+            "{text:?}"
         );
     }
 }

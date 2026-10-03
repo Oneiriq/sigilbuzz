@@ -87,6 +87,11 @@ const KHMER_TAGS: &[&[u8; 4]] = &[
 /// `override_features_khmer`), so it is off whatever the caller asks.
 const LIGA: [u8; 4] = *b"liga";
 
+/// `clig`, which HarfBuzz's Khmer shaper turns on after the caller's
+/// features (`override_features_khmer`), so it is on whatever the
+/// caller asks, in vertical text too.
+const CLIG: [u8; 4] = *b"clig";
+
 /// The shaper whose GSUB passes run for one segment, as
 /// [`super::shape`] dispatches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +164,9 @@ impl SegmentPlan<'_> {
         let khmer = self.shaper == SegmentShaper::Khmer;
         if tag == LIGA && (indic || khmer) {
             return false;
+        }
+        if tag == CLIG && khmer {
+            return true;
         }
         let chain = if self.vertical {
             VERTICAL_CHAIN
@@ -456,6 +464,25 @@ mod tests {
         }
         for shaper in [S::Use, S::Myanmar, S::Default] {
             assert!(plan(shaper, &[]).applies(LIGA), "{shaper:?}");
+        }
+    }
+
+    #[test]
+    fn khmer_always_applies_clig() {
+        // `override_features_khmer` turns `clig` on after the caller's
+        // features, in vertical text too.
+        let clig_off = [off(b"clig")];
+        assert!(plan(S::Khmer, &[]).applies(CLIG));
+        assert!(plan(S::Khmer, &clig_off).applies(CLIG));
+        let vertical = SegmentPlan {
+            vertical: true,
+            ..plan(S::Khmer, &clig_off)
+        };
+        assert!(vertical.applies(CLIG));
+        // Other shapers leave `clig` to the caller.
+        for shaper in [S::Indic, S::Myanmar, S::Use, S::Default] {
+            assert!(plan(shaper, &[]).applies(CLIG), "{shaper:?}");
+            assert!(!plan(shaper, &[off(b"clig")]).applies(CLIG), "{shaper:?}");
         }
     }
 }
