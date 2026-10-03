@@ -73,10 +73,14 @@ pub enum WordBreak {
     /// syllables. Everything else, including punctuation and spaces,
     /// breaks as under [`WordBreak::Normal`].
     KeepAll,
-    /// CSS `word-break: break-all`. Letters and digits of class AL,
-    /// HL, NU, AI, and SA are treated as ideographs (ID), so words in
-    /// any script may break between characters. Punctuation still
-    /// follows the default rules.
+    /// CSS `word-break: break-all`. The characters of class AL, HL, NU,
+    /// AI, SA (but not its combining marks), CJ, SG, and XX are treated
+    /// as ideographs (ID), as ICU4X does, so words in any script may
+    /// break between characters, and Japanese may break before small
+    /// kana. Besides letters and digits, that covers the ordinary
+    /// symbols of class AL, such as `#`, `&`, `*`, `@`, and `_`, and
+    /// unassigned and private use code points. Punctuation of the other
+    /// classes still follows the default rules.
     BreakAll,
 }
 
@@ -162,9 +166,12 @@ fn resolve(c: char, word_break: WordBreak) -> Base {
     use LineBreakClass as L;
     let (class, flags) = lookup(c);
     let class = match class {
-        L::AL | L::HL | L::NU | L::AI if word_break == WordBreak::BreakAll => L::ID,
         L::SA if flags & SA_MARK != 0 => L::CM,
-        L::SA if word_break == WordBreak::BreakAll => L::ID,
+        L::AL | L::HL | L::NU | L::AI | L::SA | L::CJ | L::SG | L::XX
+            if word_break == WordBreak::BreakAll =>
+        {
+            L::ID
+        }
         L::AI | L::SG | L::XX | L::SA => L::AL,
         L::CJ => L::NS,
         other => other,
@@ -1000,6 +1007,46 @@ mod tests {
         assert_eq!(
             offsets(STUDY, WordBreak::BreakAll),
             offsets(STUDY, WordBreak::Normal)
+        );
+    }
+
+    #[test]
+    fn break_all_breaks_before_small_kana() {
+        // "ちょっと": the small kana U+3087 and U+3063 are class CJ.
+        // The default rules resolve CJ to NS, so no line starts with
+        // them. Break-all resolves CJ to ID, as ICU4X does, and CSS
+        // counts small kana as letters there.
+        let text = "\u{3061}\u{3087}\u{3063}\u{3068}";
+        assert_eq!(
+            segments(text, WordBreak::Normal),
+            ["\u{3061}\u{3087}\u{3063}", "\u{3068}"]
+        );
+        assert_eq!(
+            segments(text, WordBreak::BreakAll),
+            ["\u{3061}", "\u{3087}", "\u{3063}", "\u{3068}"]
+        );
+        assert_eq!(segments(text, WordBreak::KeepAll), [text]);
+    }
+
+    #[test]
+    fn break_all_breaks_around_symbols_and_unknown_characters() {
+        // '@' and '_' are class AL, so break-all breaks around them
+        // like letters.
+        assert_eq!(
+            segments("a@b_c", WordBreak::BreakAll),
+            ["a", "@", "b", "_", "c"]
+        );
+        // U+E000 (private use) and U+0378 (unassigned) are class XX.
+        // LB1 resolves XX to AL, and break-all to ID.
+        for text in ["a\u{E000}b", "a\u{0378}b"] {
+            assert_eq!(segments(text, WordBreak::Normal), [text]);
+            assert_eq!(segments(text, WordBreak::BreakAll).len(), 3, "{text:?}");
+        }
+        // Other punctuation keeps the default rules: no break before
+        // '!' (LB13) or after '(' (LB14).
+        assert_eq!(
+            segments("ab! (cd)", WordBreak::BreakAll),
+            ["a", "b! ", "(c", "d)"]
         );
     }
 
