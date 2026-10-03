@@ -196,7 +196,7 @@ impl<'a> Cff2<'a> {
     /// picks. A glyph whose FD has no Font DICT, or whose Font DICT has
     /// no Private DICT, gets the defaults: no Local Subrs and vsindex 0.
     fn private(&self, gid: usize) -> Result<Private<'a>> {
-        let fd = usize::from(self.fd_select.map_or(0, |s| s.fd_for_glyph(gid)));
+        let fd = usize::from(self.fd_select.as_ref().map_or(0, |s| s.fd_for_glyph(gid)));
         if fd >= self.fd_array.len() {
             return Ok(Private::default());
         }
