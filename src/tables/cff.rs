@@ -40,6 +40,9 @@ pub(crate) use charstring::{BlendContext, Interp2};
 pub(crate) use dict::FdSelect;
 pub(crate) use index::{read_index2, Index};
 
+#[cfg(test)]
+pub(crate) use index::encode_index;
+
 use charstring::Interp;
 use dict::{read_local_subrs, TopDict};
 use index::{read_index, slice_at};

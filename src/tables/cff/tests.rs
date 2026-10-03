@@ -362,36 +362,38 @@ fn charstring_exponential_subr_calls_hit_op_limit() {
 
 use crate::tables::cff::dict::fill_fd_ranges;
 
-fn fd_select_format3(ranges: &[(usize, u8)], sentinel: usize) -> Vec<u8> {
+/// Encodes FDSelect format 3. Every FD must fit its u8 field.
+fn fd_select_format3(ranges: &[(usize, u16)], sentinel: usize) -> Vec<u8> {
     let mut out = alloc::vec![3];
     out.extend_from_slice(&(ranges.len() as u16).to_be_bytes());
     for &(first, fd) in ranges {
         out.extend_from_slice(&(first as u16).to_be_bytes());
-        out.push(fd);
+        out.push(u8::try_from(fd).unwrap());
     }
     out.extend_from_slice(&(sentinel as u16).to_be_bytes());
     out
 }
 
-fn fd_select_format4(ranges: &[(usize, u8)], sentinel: usize) -> Vec<u8> {
+fn fd_select_format4(ranges: &[(usize, u16)], sentinel: usize) -> Vec<u8> {
     let mut out = alloc::vec![4];
     out.extend_from_slice(&(ranges.len() as u32).to_be_bytes());
     for &(first, fd) in ranges {
         out.extend_from_slice(&(first as u32).to_be_bytes());
-        out.extend_from_slice(&u16::from(fd).to_be_bytes());
+        out.extend_from_slice(&fd.to_be_bytes());
     }
     out.extend_from_slice(&(sentinel as u32).to_be_bytes());
     out
 }
 
 /// Checks the per-glyph lookup against the front-to-back fill that
-/// FDSelect used to be expanded with, in both range formats.
-fn assert_matches_fill(ranges: &[(usize, u8)], sentinel: usize, n_glyphs: usize) {
+/// FDSelect used to be expanded with, in format 4 and, when every FD
+/// fits in a byte, in format 3.
+fn assert_matches_fill(ranges: &[(usize, u16)], sentinel: usize, n_glyphs: usize) {
     let expected = fill_fd_ranges(ranges, sentinel, n_glyphs);
-    let formats = [
-        (fd_select_format3(ranges, sentinel), false),
-        (fd_select_format4(ranges, sentinel), true),
-    ];
+    let mut formats = alloc::vec![(fd_select_format4(ranges, sentinel), true)];
+    if ranges.iter().all(|&(_, fd)| fd <= 0xFF) {
+        formats.push((fd_select_format3(ranges, sentinel), false));
+    }
     for (bytes, allow_format4) in formats {
         let sel = FdSelect::parse(&bytes, 0, n_glyphs, allow_format4, "test").unwrap();
         for (gid, &fd) in expected.iter().enumerate() {
@@ -429,8 +431,8 @@ fn fd_select_alternating_ranges_match_the_fill() {
     // The shape of the fuzzer find in
     // `cff_fd_select_with_unsorted_ranges_fills_in_linear_time`, small.
     let n = 40;
-    let ranges: Vec<(usize, u8)> = (0..64)
-        .map(|i| (if i % 2 == 0 { 0 } else { n }, i as u8))
+    let ranges: Vec<(usize, u16)> = (0..64)
+        .map(|i| (if i % 2 == 0 { 0 } else { n }, i as u16))
         .collect();
     assert_matches_fill(&ranges, n, n);
 }
@@ -446,7 +448,7 @@ fn fd_select_pseudo_random_ranges_match_the_fill() {
     };
     for _ in 0..300 {
         let n_ranges = next(12);
-        let ranges: Vec<(usize, u8)> = (0..n_ranges).map(|_| (next(40), next(8) as u8)).collect();
+        let ranges: Vec<(usize, u16)> = (0..n_ranges).map(|_| (next(40), next(8) as u16)).collect();
         let sentinel = next(45);
         assert_matches_fill(&ranges, sentinel, 32);
     }
@@ -485,6 +487,20 @@ fn fd_select_format4_is_cff2_only() {
     let err = FdSelect::parse(&f4, 0, 4, false, "CFF FDSelect format != 0/3").unwrap_err();
     assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
     assert!(FdSelect::parse(&f4, 0, 4, true, "test").is_ok());
+}
+
+#[test]
+fn fd_select_format4_keeps_fd_indices_past_255() {
+    // Format 4 FDs are u16. They used to be cut to their low byte, so
+    // FD 256 read as FD 0 and FD 0x1234 as FD 0x34.
+    let ranges = [(0, 1), (2, 256), (5, 0x1234), (7, 0xFFFF)];
+    let f4 = fd_select_format4(&ranges, 9);
+    let sel = FdSelect::parse(&f4, 0, 10, true, "test").unwrap();
+    assert_eq!(
+        (0..10).map(|g| sel.fd_for_glyph(g)).collect::<Vec<_>>(),
+        [1, 1, 256, 256, 256, 0x1234, 0x1234, 0xFFFF, 0xFFFF, 0]
+    );
+    assert_matches_fill(&ranges, 9, 10);
 }
 
 // ----------------------------------------------------------------------------
