@@ -701,6 +701,58 @@ fn subset_keeps_vertical_metrics_for_vertical_text() {
     assert_eq!(ttb(&out), want);
 }
 
+/// `font` with the length of `table` in its table directory cut to
+/// `len` bytes.
+fn with_table_cut(font: &[u8], table: [u8; 4], len: u32) -> Vec<u8> {
+    let num_tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    let record = (0..num_tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| font[at..at + 4] == table)
+        .expect("the font has the table");
+    let mut out = font.to_vec();
+    out[record + 12..record + 16].copy_from_slice(&len.to_be_bytes());
+    out
+}
+
+#[test]
+fn subset_reports_what_it_left_out() {
+    // A vmtx cut short: the subset leaves out vhea, vmtx and the VVAR
+    // that varies them, says so, and still succeeds.
+    const NOTO_KR: &[u8] =
+        include_bytes!("../../../tests/fixtures/noto_sans_kr_vf_vertical_subset.otf");
+    let font = write_tempfile("noto_kr_cut.otf", &with_table_cut(NOTO_KR, *b"vmtx", 10));
+    let out = write_tempfile("noto_kr_cut_sub.otf", b"");
+    let (_, stderr, ok) = run_cli([
+        "subset".as_ref(),
+        font.as_os_str(),
+        out.as_os_str(),
+        "--text".as_ref(),
+        "\u{300C}".as_ref(),
+    ]);
+    assert!(ok, "warnings do not fail the command: {stderr}");
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("warning: "))
+        .collect();
+    assert_eq!(warnings.len(), 2, "{stderr}");
+    assert!(
+        warnings[0].starts_with("warning: 'VVAR' byte 0: ")
+            && warnings[0].ends_with("; left out the whole table"),
+        "{stderr}"
+    );
+    assert!(
+        warnings[1].starts_with("warning: 'vmtx' byte 10: ")
+            && warnings[1].ends_with("; left out the vhea and vmtx tables"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("wrote "), "{stderr}");
+
+    // A well-formed font warns about nothing.
+    let (_, stderr, ok) = subset_open_sans("subset_quiet.ttf", &["--text".as_ref(), "Hi".as_ref()]);
+    assert!(ok, "{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+}
+
 /// The integer after `key` in a flat JSON object.
 fn parse_json_int(object: &str, key: &str) -> i32 {
     let rest = &object[object.find(key).expect("key present") + key.len()..];

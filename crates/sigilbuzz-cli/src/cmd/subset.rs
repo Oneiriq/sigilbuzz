@@ -7,6 +7,11 @@
 //! merged before being fed to the subsetter so a caller can mix and
 //! match. A character the font lacks is an error unless
 //! `--skip-missing` is given. Defaults match `SubsetInput::default()`.
+//!
+//! Each piece of the source font the subset leaves out because it
+//! could not be read (`SubsetOutput::warnings`) is reported on stderr
+//! as a `warning:` line naming the table, byte offset, reason, and what
+//! was left out. Warnings do not change the exit status.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -121,6 +126,11 @@ pub fn run(args: Args) -> CliResult {
     let out = subset(&face, &input).map_err(|e| format!("subset: {e}"))?;
     std::fs::write(&args.output, &out.bytes)
         .map_err(|e| format!("write {}: {e}", args.output.display()))?;
+    // Pieces of the source that could not be read and were left out.
+    // The subset is still written and the command still succeeds.
+    for warning in &out.warnings {
+        status(format_args!("warning: {warning}"));
+    }
     status(format_args!(
         "wrote {} bytes ({} kept glyphs) to {}",
         out.bytes.len(),
