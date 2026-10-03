@@ -71,10 +71,12 @@ pub struct Gvar<'a> {
     glyph_count: u16,
     long_offsets: bool,
     data_array_off: u32,
-    /// Parsed per-glyph offsets (already doubled for short form). One
-    /// more than `glyph_count`, so adjacent pairs yield each glyph's
-    /// byte range.
-    glyph_offsets: Vec<u32>,
+    /// The per-glyph data offsets, read on demand: `glyph_count + 1`
+    /// big-endian entries, halved `u16`s in the short form and `u32`s
+    /// in the long form, so adjacent pairs give each glyph's byte
+    /// range. Parsing never copies them out, so it stays cheap for
+    /// fonts with tens of thousands of glyphs.
+    glyph_offsets: &'a [u8],
 }
 
 /// A single contour point delta emitted by [`Gvar::glyph_deltas`].
@@ -108,22 +110,10 @@ impl<'a> Gvar<'a> {
         let data_array_off = r.read_u32()?;
         let long_offsets = flags & 0x0001 != 0;
 
-        // Parse glyph offset array: glyphCount + 1 entries of at least
-        // 2 bytes each, so the remaining bytes bound the capacity.
-        let n_offsets = glyph_count as usize + 1;
-        let mut glyph_offsets = Vec::with_capacity(n_offsets.min(r.remaining() / 2));
-        if long_offsets {
-            for _ in 0..n_offsets {
-                glyph_offsets.push(r.read_u32()?);
-            }
-        } else {
-            for _ in 0..n_offsets {
-                // Short offsets are stored halved: the spec multiplies
-                // by two to recover the byte offset.
-                let half = u32::from(r.read_u16()?);
-                glyph_offsets.push(half * 2);
-            }
-        }
+        // The glyph offset array: glyphCount + 1 entries, checked to
+        // fit here and read when a glyph is looked up.
+        let entry_size = if long_offsets { 4 } else { 2 };
+        let glyph_offsets = r.read_bytes((glyph_count as usize + 1) * entry_size)?;
 
         Ok(Self {
             data,
@@ -371,9 +361,21 @@ impl<'a> Gvar<'a> {
         if glyph_id >= self.glyph_count {
             return None;
         }
-        let start = *self.glyph_offsets.get(glyph_id as usize)?;
-        let end = *self.glyph_offsets.get(glyph_id as usize + 1)?;
-        Some((start, end))
+        let i = usize::from(glyph_id);
+        Some((self.glyph_offset(i)?, self.glyph_offset(i + 1)?))
+    }
+
+    /// Entry `i` of the glyph offset array, as a byte offset into the
+    /// glyph variation data. Short offsets are stored halved: the spec
+    /// multiplies them by two.
+    fn glyph_offset(&self, i: usize) -> Option<u32> {
+        if self.long_offsets {
+            let b = self.glyph_offsets.get(i * 4..i * 4 + 4)?;
+            Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        } else {
+            let b = self.glyph_offsets.get(i * 2..i * 2 + 2)?;
+            Some(u32::from(u16::from_be_bytes([b[0], b[1]])) * 2)
+        }
     }
 
     /// Decodes every tuple of `glyph_id` whose region scalar at
@@ -1082,6 +1084,20 @@ mod tests {
         assert_eq!(g.glyph_count(), 2);
         assert_eq!(g.axis_count(), 1);
         assert!(!g.long_offsets());
+        // Short offsets are halved: entries 0, 3, 5 give glyph 0 bytes 0
+        // to 6 and glyph 1 bytes 6 to 10.
+        out[22..24].copy_from_slice(&3u16.to_be_bytes());
+        out[24..26].copy_from_slice(&5u16.to_be_bytes());
+        let g = Gvar::parse(&out).unwrap();
+        assert_eq!(g.glyph_range(0), Some((0, 6)));
+        assert_eq!(g.glyph_range(1), Some((6, 10)));
+        assert_eq!(g.glyph_range(2), None);
+        // The offset array must fit, though parsing reads none of it.
+        out.pop();
+        assert!(matches!(
+            Gvar::parse(&out),
+            Err(Error::Truncated { offset: 20, .. })
+        ));
     }
 
     #[test]
