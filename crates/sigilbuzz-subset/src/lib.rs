@@ -35,8 +35,16 @@
 //! table (`vhea`, `vmtx`, `VORG`, `VVAR`), or `BASE` is left out of the
 //! output, the way HarfBuzz's sanitizer neuters it, instead of failing
 //! the subset. Every piece left out this way is reported in
-//! [`SubsetOutput::warnings`] with its table, byte offset and reason;
-//! [`InstancedOutput::warnings`] does the same for [`instance()`].
+//! [`SubsetOutput::warnings`] with its table, byte offset and reason.
+//!
+//! [`instance()`] treats the vertical metrics tables the same way. A
+//! `vhea` or `vmtx` it cannot read is left out with its partner, a
+//! `VVAR` it cannot read is left out without its deltas being applied,
+//! and a malformed `VORG` is left out. So is a malformed GDEF piece or
+//! FeatureVariations record it rebuilds, and, in a partial instance, an
+//! `avar`, `HVAR`, `VVAR` or `MVAR` it cannot rebuild. Each is reported
+//! in [`InstancedOutput::warnings`]. Tables an instance passes through
+//! unchanged are not read, so they are neither checked nor reported.
 //!
 //! # What happens to each table
 //!

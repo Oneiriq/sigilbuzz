@@ -404,6 +404,59 @@ fn malformed_vertical_tables_are_left_out_with_warnings() {
     assert!(has(&out.bytes, tag::VMTX));
 }
 
+#[test]
+fn an_instance_leaves_malformed_vertical_tables_out_with_warnings() {
+    // These used to fail the whole instance.
+    let src = Face::parse_bytes(NOTO_KR, 0).unwrap();
+    let cut = |table: [u8; 4], len: usize| {
+        let bytes = src.table_bytes(table).unwrap()[..len].to_vec();
+        support::edit_tables(NOTO_KR, &[(table, Some(bytes))])
+    };
+    let instanced = |font: &[u8], drop_var_tables: bool| {
+        let input = InstanceInput {
+            coords: wght_700().0,
+            drop_var_tables,
+            ..InstanceInput::default()
+        };
+        let out = instance(&Face::parse_bytes(font, 0).unwrap(), &input).expect("instances");
+        // Vertical text still shapes, on the fallbacks.
+        shaped(&out.bytes, &[], "\u{300C}", Direction::Ttb);
+        let warnings: Vec<([u8; 4], usize)> =
+            out.warnings.iter().map(|w| (w.table, w.offset)).collect();
+        (out.bytes, warnings)
+    };
+
+    // A short vmtx, and a vhea too short to hold its long count: vhea
+    // and vmtx go together.
+    for table in [tag::VMTX, tag::VHEA] {
+        let (bytes, warnings) = instanced(&cut(table, 10), true);
+        assert_eq!(warnings, [(table, 10)]);
+        for gone in [tag::VHEA, tag::VMTX] {
+            assert!(!has(&bytes, gone));
+        }
+        assert!(has(&bytes, tag::VORG));
+    }
+
+    // A VVAR cut inside its store: its advance deltas cannot be read,
+    // so vmtx keeps the default advances. Kept variation tables would
+    // have carried it through; it goes all the same. The vmtx bake and
+    // the VORG bake each report it.
+    for drop_var_tables in [true, false] {
+        let (bytes, warnings) = instanced(&cut(tag::VVAR, 30), drop_var_tables);
+        let tables: Vec<[u8; 4]> = warnings.iter().map(|w| w.0).collect();
+        assert_eq!(tables, [tag::VVAR; 2], "{warnings:?}");
+        assert!(!has(&bytes, tag::VVAR));
+        let vmtx = |font: &[u8]| {
+            let face = Face::parse_bytes(font, 0).unwrap();
+            let vmtx = face.vmtx().unwrap().unwrap();
+            (0..face.maxp().unwrap().num_glyphs)
+                .map(|gid| vmtx.advance(gid))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(vmtx(&bytes), vmtx(NOTO_KR));
+    }
+}
+
 /// Open Sans with hand-built vertical tables: long metrics for the
 /// first 40 glyphs and short ones after, and a `VORG` entry
 /// for every third glyph.
