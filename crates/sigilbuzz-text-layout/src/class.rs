@@ -1,228 +1,176 @@
-//! UAX #14 line-break classes and a curated codepoint classifier.
+//! UAX #14 line break classes and the code point classifier.
 //!
-//! The classifier covers the codepoints needed to wrap English /
-//! European text (Latin / Greek / Cyrillic, ASCII punctuation, common
-//! quotation forms, hyphens) and CJK ideographs at every grapheme
-//! boundary. Anything we have not classified falls back to
-//! [`LineBreakClass::AL`], which is the UAX 14 default class for
-//! "alphabetic", a safe choice that participates in normal
-//! pair-table behavior without inventing breaks.
+//! The classes come from the generated `LINE_BREAK` table, which holds
+//! the `Line_Break` property of Unicode 17.0.0 together with the flag
+//! bits below.
 
-/// UAX #14 line-break class, restricted to the subset we implement.
+use crate::line_break_table::LINE_BREAK;
+
+/// The `Line_Break` property of a character (UAX #14, Unicode 17.0.0).
 ///
 /// Variants mirror the spec's two-letter abbreviations (`BK`, `CR`,
-/// `LF`, ...) so the pair-table reads like the spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `LF`, ...) so the rules read like the spec. [`line_break_class`]
+/// returns the property as the Unicode Character Database assigns it,
+/// before the algorithm resolves AI, CJ, SA, SG, and XX (rule LB1).
+///
+/// New Unicode versions can add classes, so the enum is
+/// `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 // The public variant names are the spec's class codes, so they stay upper case.
 #[allow(clippy::upper_case_acronyms)]
 pub enum LineBreakClass {
-    /// Mandatory break (LB4).
+    /// Mandatory break, such as U+2028 LINE SEPARATOR (LB4).
     BK,
     /// Carriage return (LB5).
     CR,
     /// Line feed (LB5).
     LF,
-    /// Next line (LB5).
+    /// Next line, U+0085 (LB5).
     NL,
-    /// Word joiner: never break around (LB11).
-    WJ,
-    /// Close punctuation (LB13).
-    CL,
-    /// Closing parenthesis (LB13/LB16).
-    CP,
-    /// Open punctuation (LB14).
-    OP,
-    /// Quotation (LB15/LB19).
-    QU,
-    /// Non-breaking glue (LB12).
-    GL,
-    /// Non-starter (LB16).
-    NS,
-    /// Combining mark (LB9 / LB10).
-    CM,
-    /// Space (LB7 / LB18).
+    /// Space, U+0020 (LB7, LB18).
     SP,
-    /// Break-after: hyphen-minus, en-dash, etc. (LB21).
-    BA,
-    /// Break-before (LB21).
-    BB,
-    /// Hyphen: break-after but with NU interaction (LB21).
-    HY,
-    /// Alphabetic: Latin / Greek / Cyrillic letters (LB28).
-    AL,
-    /// Numeric (LB23 / LB25).
-    NU,
-    /// Prefix numeric (LB25).
-    PR,
-    /// Postfix numeric (LB25).
-    PO,
-    /// Ideographic: CJK, Yi, etc. (LB23a / LB29).
-    ID,
-    /// Exclamation / question marks (LB13).
-    EX,
-    /// Zero-width space: break after (LB8).
+    /// Zero width space, U+200B (LB7, LB8).
     ZW,
+    /// Word joiner: never break around it (LB11).
+    WJ,
+    /// Non-breaking glue, such as U+00A0 NO-BREAK SPACE (LB12).
+    GL,
+    /// Combining mark (LB9, LB10).
+    CM,
+    /// Zero width joiner, U+200D (LB8a).
+    ZWJ,
+    /// Contingent break opportunity, such as U+FFFC (LB20).
+    CB,
+    /// Close punctuation (LB13, LB16).
+    CL,
+    /// Closing parenthesis (LB13, LB30).
+    CP,
+    /// Open punctuation (LB14, LB30).
+    OP,
+    /// Quotation mark (LB15a, LB15b, LB19).
+    QU,
+    /// Exclamation or interrogation (LB13).
+    EX,
+    /// Infix numeric separator, such as `.` and `,` (LB15c, LB15d).
+    IS,
+    /// Symbol allowing a break after, such as `/` (LB13).
+    SY,
+    /// Nonstarter, such as small kana and U+3005 (LB21).
+    NS,
+    /// Break after, such as tab and most dashes (LB21).
+    BA,
+    /// Break before (LB21).
+    BB,
+    /// Break opportunity before and after, U+2014 EM DASH (LB17).
+    B2,
+    /// Hyphen-minus (LB20a, LB21).
+    HY,
+    /// Unambiguous hyphen, such as U+2010 HYPHEN (LB20a, LB21).
+    HH,
+    /// Inseparable characters, such as the ellipsis (LB22).
+    IN,
+    /// Numeric (LB23, LB25).
+    NU,
+    /// Prefix numeric, such as `$` (LB24, LB25).
+    PR,
+    /// Postfix numeric, such as `%` (LB24, LB25).
+    PO,
+    /// Alphabetic and ordinary symbols (LB28).
+    AL,
+    /// Hebrew letter (LB21a, LB28).
+    HL,
+    /// Ideographic, such as CJK ideographs and kana (LB31).
+    ID,
     /// Emoji base (LB30b).
     EB,
     /// Emoji modifier (LB30b).
     EM,
+    /// Regional indicator (LB30a).
+    RI,
+    /// Hangul LV syllable (LB26).
+    H2,
+    /// Hangul LVT syllable (LB26).
+    H3,
+    /// Hangul leading jamo (LB26).
+    JL,
+    /// Hangul vowel jamo (LB26).
+    JV,
+    /// Hangul trailing jamo (LB26).
+    JT,
+    /// Aksara of a Brahmic script (LB28a).
+    AK,
+    /// Aksara prebase of a Brahmic script (LB28a).
+    AP,
+    /// Aksara start of a Brahmic script (LB28a).
+    AS,
+    /// Virama final of a Brahmic script (LB28a).
+    VF,
+    /// Virama of a Brahmic script (LB28a).
+    VI,
+    /// Ambiguous: resolved to AL (LB1).
+    AI,
+    /// Complex context dependent, Southeast Asian: resolved to CM or AL
+    /// (LB1).
+    SA,
+    /// Surrogate: resolved to AL (LB1).
+    SG,
+    /// Conditional Japanese starter, small kana: resolved to NS (LB1).
+    CJ,
+    /// Unknown, including unassigned code points: resolved to AL (LB1).
+    XX,
 }
 
-/// Returns the UAX 14 line-break class for a codepoint.
+// The flag bits of the `LINE_BREAK` table. `tests/table_gen.rs` uses
+// the same values.
+
+/// East_Asian_Width is F, W, or H (`$EastAsian` in UAX #14).
+pub(crate) const EAST_ASIAN: u8 = 1;
+/// A QU character with General_Category Pi.
+pub(crate) const INITIAL_QUOTE: u8 = 2;
+/// A QU character with General_Category Pf.
+pub(crate) const FINAL_QUOTE: u8 = 4;
+/// An SA character with General_Category Mn or Mc, which LB1 resolves
+/// to CM.
+pub(crate) const SA_MARK: u8 = 8;
+/// A typographic letter unit for CSS `word-break: keep-all`: a letter
+/// or number (General_Category L* or N*), or a character of class NU,
+/// AL, AI, or ID.
+pub(crate) const LETTER_UNIT: u8 = 16;
+/// An unassigned (General_Category Cn) Extended_Pictographic code
+/// point (LB30b).
+pub(crate) const UNASSIGNED_PICTOGRAPHIC: u8 = 32;
+
+/// Returns the line break class and the flag bits of `c`.
+pub(crate) fn lookup(c: char) -> (LineBreakClass, u8) {
+    let cp = c as u32;
+    let i = LINE_BREAK.partition_point(|&(_, last, _, _)| last < cp);
+    match LINE_BREAK.get(i) {
+        Some(&(first, _, class, flags)) if first <= cp => (class, flags),
+        _ => (LineBreakClass::XX, 0),
+    }
+}
+
+/// Returns the UAX #14 `Line_Break` property of `c`, as the Unicode
+/// Character Database (Unicode 17.0.0) assigns it.
 ///
-/// Codepoints we have not curated fall back to [`LineBreakClass::AL`].
+/// Unassigned code points are [`LineBreakClass::XX`]. The line break
+/// iterators resolve AI, SG, and XX to AL, SA to CM or AL, and CJ to
+/// NS before they apply the rules.
+///
+/// ```
+/// use sigilbuzz_text_layout::{line_break_class, LineBreakClass};
+///
+/// assert_eq!(line_break_class('a'), LineBreakClass::AL);
+/// assert_eq!(line_break_class(' '), LineBreakClass::SP);
+/// // A Hangul LV syllable and the jamo it decomposes into.
+/// assert_eq!(line_break_class('\u{AC00}'), LineBreakClass::H2);
+/// assert_eq!(line_break_class('\u{1100}'), LineBreakClass::JL);
+/// assert_eq!(line_break_class('\u{1161}'), LineBreakClass::JV);
+/// ```
 #[must_use]
 pub fn line_break_class(c: char) -> LineBreakClass {
-    let cp = c as u32;
-
-    // Mandatory break / line-feed family: the LB4-LB6 controls.
-    match cp {
-        0x000B | 0x000C | 0x0085 | 0x2028 | 0x2029 => return LineBreakClass::BK,
-        0x000D => return LineBreakClass::CR,
-        0x000A => return LineBreakClass::LF,
-        _ => {}
-    }
-
-    // Zero-width space and word-joiner.
-    if cp == 0x200B {
-        return LineBreakClass::ZW;
-    }
-    if cp == 0x2060 || cp == 0xFEFF {
-        return LineBreakClass::WJ;
-    }
-
-    // Spaces.
-    if cp == 0x0020
-        || cp == 0x1680
-        || (0x2000..=0x200A).contains(&cp)
-        || cp == 0x205F
-        || cp == 0x3000
-    {
-        return LineBreakClass::SP;
-    }
-    if cp == 0x00A0 || cp == 0x202F {
-        // Non-breaking space: GL in UAX 14.
-        return LineBreakClass::GL;
-    }
-    // Tab counts as BA in our subset (break-after) so wrapping treats it
-    // like a soft break point.
-    if cp == 0x0009 {
-        return LineBreakClass::BA;
-    }
-
-    // ASCII punctuation.
-    match cp {
-        // Open punctuation.
-        0x0028 | 0x005B | 0x007B => return LineBreakClass::OP,
-        // Close punctuation.
-        0x005D | 0x007D => return LineBreakClass::CL,
-        // Closing parenthesis.
-        0x0029 => return LineBreakClass::CP,
-        // Hyphen-minus is HY in UAX 14.
-        0x002D => return LineBreakClass::HY,
-        // Exclamation / question / colon / semicolon / ASCII fullwidth.
-        0x0021 | 0x003F => return LineBreakClass::EX,
-        // Comma, period, colon, semicolon: non-starters in UAX 14.
-        0x002C | 0x002E | 0x003A | 0x003B => return LineBreakClass::NS,
-        // Slash and other break-after punctuation.
-        0x002F => return LineBreakClass::BA,
-        // Quotation forms.
-        0x0022 | 0x0027 => return LineBreakClass::QU,
-        // Numeric digits.
-        0x0030..=0x0039 => return LineBreakClass::NU,
-        // Currency / prefix-numeric (PR).
-        0x0024 | 0x00A3 | 0x00A5 | 0x20AC | 0x00A2 => return LineBreakClass::PR,
-        // Postfix-numeric (PO): percent / per-mille / degree.
-        0x0025 | 0x00B0 | 0x2030 | 0x2031 => return LineBreakClass::PO,
-        _ => {}
-    }
-
-    // Curly / smart quotation marks.
-    if matches!(
-        cp,
-        0x2018 | 0x2019 | 0x201A | 0x201B | 0x201C | 0x201D | 0x201E | 0x201F | 0x00AB | 0x00BB
-    ) {
-        return LineBreakClass::QU;
-    }
-
-    // Dashes: en/em/figure/horizontal-bar are BA. Soft-hyphen -> BA.
-    if matches!(cp, 0x2010 | 0x2012 | 0x2013 | 0x2014 | 0x2015 | 0x00AD) {
-        return LineBreakClass::BA;
-    }
-
-    // Mid-line dot leaders / horizontal ellipsis are non-starters.
-    if matches!(cp, 0x2026 | 0x2025 | 0x22EF) {
-        return LineBreakClass::NS;
-    }
-
-    // CJK ideographic ranges. We treat each as its own break point
-    // (LB29/LB30), which matches the UAX 14 spec and gives Chinese / Japanese
-    // / Korean text the per-grapheme wrap behavior the user expects.
-    if (0x3040..=0x309F).contains(&cp)        // Hiragana
-        || (0x30A0..=0x30FF).contains(&cp)    // Katakana
-        || (0x3400..=0x4DBF).contains(&cp)    // CJK Ext A
-        || (0x4E00..=0x9FFF).contains(&cp)    // CJK Unified
-        || (0xF900..=0xFAFF).contains(&cp)    // CJK Compat Ideographs
-        || (0xAC00..=0xD7AF).contains(&cp)    // Hangul Syllables
-        || (0x20000..=0x2FFFF).contains(&cp)
-    // CJK Ext B-F
-    {
-        return LineBreakClass::ID;
-    }
-
-    // Halfwidth / fullwidth CJK punctuation that *must not* start a
-    // line: non-starters in UAX 14.
-    if matches!(
-        cp,
-        0x3001 | 0x3002 | 0xFF01 | 0xFF0C | 0xFF0E | 0xFF1A | 0xFF1B | 0xFF1F
-    ) {
-        return LineBreakClass::NS;
-    }
-    // Fullwidth open / close brackets.
-    if matches!(
-        cp,
-        0x3008 | 0x300A | 0x300C | 0x300E | 0x3010 | 0xFF08 | 0xFF3B | 0xFF5B
-    ) {
-        return LineBreakClass::OP;
-    }
-    if matches!(
-        cp,
-        0x3009 | 0x300B | 0x300D | 0x300F | 0x3011 | 0xFF09 | 0xFF3D | 0xFF5D
-    ) {
-        return LineBreakClass::CL;
-    }
-
-    // Combining marks (general category Mn / Mc) for the Latin /
-    // Greek / Cyrillic ranges we cover. Any combining mark that lacks
-    // a specific class falls into CM.
-    if (0x0300..=0x036F).contains(&cp)
-        || (0x1AB0..=0x1AFF).contains(&cp)
-        || (0x1DC0..=0x1DFF).contains(&cp)
-        || (0x20D0..=0x20FF).contains(&cp)
-        || (0xFE20..=0xFE2F).contains(&cp)
-    {
-        return LineBreakClass::CM;
-    }
-
-    // Emoji modifiers: Fitzpatrick skin tones (LB30b).
-    if (0x1F3FB..=0x1F3FF).contains(&cp) {
-        return LineBreakClass::EM;
-    }
-
-    // Common emoji bases. We err on the side of covering pictographic
-    // ranges; over-classifying as EB is benign because EB only matters
-    // in the EB x EM rule.
-    if (0x1F300..=0x1F5FF).contains(&cp)
-        || (0x1F600..=0x1F64F).contains(&cp)
-        || (0x1F900..=0x1F9FF).contains(&cp)
-        || (0x1FA70..=0x1FAFF).contains(&cp)
-    {
-        return LineBreakClass::EB;
-    }
-
-    // Latin / Greek / Cyrillic / general alphabetic. The UAX 14
-    // default for any letter we have not specially classified.
-    LineBreakClass::AL
+    lookup(c).0
 }
 
 #[cfg(test)]
@@ -230,53 +178,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ascii_letters_are_alphabetic() {
+    fn ascii_classes() {
         assert_eq!(line_break_class('A'), LineBreakClass::AL);
         assert_eq!(line_break_class('z'), LineBreakClass::AL);
-    }
-
-    #[test]
-    fn space_is_sp() {
+        assert_eq!(line_break_class('0'), LineBreakClass::NU);
         assert_eq!(line_break_class(' '), LineBreakClass::SP);
-    }
-
-    #[test]
-    fn hyphen_minus_is_hy() {
         assert_eq!(line_break_class('-'), LineBreakClass::HY);
-    }
-
-    #[test]
-    fn newline_classes() {
+        assert_eq!(line_break_class('\t'), LineBreakClass::BA);
         assert_eq!(line_break_class('\n'), LineBreakClass::LF);
         assert_eq!(line_break_class('\r'), LineBreakClass::CR);
+        assert_eq!(line_break_class('.'), LineBreakClass::IS);
+        assert_eq!(line_break_class(','), LineBreakClass::IS);
+        assert_eq!(line_break_class('/'), LineBreakClass::SY);
+        assert_eq!(line_break_class('"'), LineBreakClass::QU);
+        assert_eq!(line_break_class('('), LineBreakClass::OP);
+        assert_eq!(line_break_class(')'), LineBreakClass::CP);
     }
 
     #[test]
-    fn cjk_is_ideographic() {
-        assert_eq!(line_break_class('世'), LineBreakClass::ID);
-        assert_eq!(line_break_class('界'), LineBreakClass::ID);
-        assert_eq!(line_break_class('あ'), LineBreakClass::ID);
+    fn korean_classes() {
+        assert_eq!(line_break_class('\u{D55C}'), LineBreakClass::H3);
+        assert_eq!(line_break_class('\u{AC00}'), LineBreakClass::H2);
+        assert_eq!(line_break_class('\u{1112}'), LineBreakClass::JL);
+        assert_eq!(line_break_class('\u{1161}'), LineBreakClass::JV);
+        assert_eq!(line_break_class('\u{11AB}'), LineBreakClass::JT);
     }
 
     #[test]
-    fn digits_are_numeric() {
-        assert_eq!(line_break_class('0'), LineBreakClass::NU);
-        assert_eq!(line_break_class('9'), LineBreakClass::NU);
+    fn cjk_classes() {
+        assert_eq!(line_break_class('\u{4E16}'), LineBreakClass::ID);
+        assert_eq!(line_break_class('\u{3042}'), LineBreakClass::ID);
+        assert_eq!(line_break_class('\u{3041}'), LineBreakClass::CJ);
+        assert_eq!(line_break_class('\u{3005}'), LineBreakClass::NS);
+        assert_eq!(line_break_class('\u{300C}'), LineBreakClass::OP);
+        assert_eq!(line_break_class('\u{300D}'), LineBreakClass::CL);
+        assert_eq!(line_break_class('\u{3002}'), LineBreakClass::CL);
     }
 
     #[test]
-    fn smart_quotes_are_qu() {
-        assert_eq!(line_break_class('\u{201C}'), LineBreakClass::QU);
-        assert_eq!(line_break_class('\u{201D}'), LineBreakClass::QU);
-    }
-
-    #[test]
-    fn nbsp_is_glue() {
+    fn other_classes() {
         assert_eq!(line_break_class('\u{00A0}'), LineBreakClass::GL);
+        assert_eq!(line_break_class('\u{200B}'), LineBreakClass::ZW);
+        assert_eq!(line_break_class('\u{200D}'), LineBreakClass::ZWJ);
+        assert_eq!(line_break_class('\u{2060}'), LineBreakClass::WJ);
+        assert_eq!(line_break_class('\u{2014}'), LineBreakClass::B2);
+        assert_eq!(line_break_class('\u{0E01}'), LineBreakClass::SA);
+        assert_eq!(line_break_class('\u{05D0}'), LineBreakClass::HL);
+        assert_eq!(line_break_class('\u{1F1E6}'), LineBreakClass::RI);
+        assert_eq!(line_break_class('\u{1F466}'), LineBreakClass::EB);
+        assert_eq!(line_break_class('\u{1F3FB}'), LineBreakClass::EM);
+        assert_eq!(line_break_class('\u{1B05}'), LineBreakClass::AK);
+        assert_eq!(line_break_class('\u{10FFFF}'), LineBreakClass::XX);
     }
 
     #[test]
-    fn zwsp_is_zw() {
-        assert_eq!(line_break_class('\u{200B}'), LineBreakClass::ZW);
+    fn flags_match_the_generator() {
+        let flags = |c| lookup(c).1;
+        assert_eq!(flags('\u{AC00}'), EAST_ASIAN | LETTER_UNIT);
+        assert_eq!(flags('\u{201C}'), INITIAL_QUOTE);
+        assert_eq!(flags('\u{201D}'), FINAL_QUOTE);
+        assert_eq!(flags('\u{0E31}') & SA_MARK, SA_MARK);
+        assert_eq!(flags('\u{0E01}') & SA_MARK, 0);
+        assert_eq!(flags('\u{300C}'), EAST_ASIAN);
+        assert_eq!(flags('('), 0);
+        assert_eq!(flags('\u{1F02C}'), LETTER_UNIT | UNASSIGNED_PICTOGRAPHIC);
     }
 }

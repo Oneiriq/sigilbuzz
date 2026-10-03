@@ -38,11 +38,16 @@
 extern crate alloc;
 
 mod class;
+#[rustfmt::skip]
+mod line_break_table;
 mod linebreak;
 mod word;
 mod wrap;
 
-pub use class::LineBreakClass;
-pub use linebreak::{line_break_opportunities, BreakOpportunity, LineBreakIter};
+pub use class::{line_break_class, LineBreakClass};
+pub use linebreak::{
+    line_break_opportunities, line_break_opportunities_with, BreakOpportunity, LineBreakIter,
+    WordBreak,
+};
 pub use word::word_breaks;
 pub use wrap::{wrap_lines, LineRange, WrapOptions};
