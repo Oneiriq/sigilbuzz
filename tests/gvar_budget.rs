@@ -9,13 +9,15 @@
 //! outline call spend close to a minute. The tuple work of the whole
 //! walk now shares one cap, as HarfBuzz shares one budget across its
 //! `get_points` recursion, and the walk fails with `Malformed` once the
-//! cap runs out.
+//! cap runs out. Shaping, which takes a varied advance from the phantom
+//! points when the font has no `HVAR`, walks each glyph once per call
+//! and keeps the glyph's `hmtx` advance when the walk fails.
 
 use std::time::{Duration, Instant};
 
 use sigilbuzz::tables::glyf::PhantomMetrics;
 use sigilbuzz::tables::{Glyf, Gvar, Hmtx, IndexToLocFormat, Loca};
-use sigilbuzz::{Blob, Error, Face};
+use sigilbuzz::{shape, Blob, Buffer, Error, Face, Font};
 
 /// What one call may take in an optimized build. Debug builds are
 /// slower and only check the result.
@@ -264,4 +266,26 @@ fn a_crafted_use_my_metrics_tree_stops_at_the_shared_budget() {
     assert_over_budget(timed("phantom points", || {
         glyf.phantom_points_at_coords(&loca, c.root, &metrics, Some(&gvar), &[1.0])
     }));
+}
+
+#[test]
+fn shaping_the_crafted_font_keeps_the_static_advances() {
+    // Without HVAR the advances come from the phantom points, and the
+    // root's USE_MY_METRICS walk runs out of budget. The root then keeps
+    // its hmtx advance. The walk runs once per glyph, not once per
+    // occurrence, so a thousand copies cost what one does.
+    let c = crafted(3, 15, 4095, true);
+    let bytes = sfnt(&c);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let coords = [1.0];
+    let font = Font::new(face, 1000.0).with_coords(&coords);
+    let mut buffer = Buffer::new();
+    buffer.push_str(&"A".repeat(1000));
+    let run = timed("shaping", || shape(&font, &buffer, &[])).unwrap();
+    assert_eq!(run.glyphs.len(), 1000);
+    assert!(run
+        .glyphs
+        .iter()
+        .all(|g| g.glyph_id == u32::from(c.root) && g.x_advance == 600));
 }

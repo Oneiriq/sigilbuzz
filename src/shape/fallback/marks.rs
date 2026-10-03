@@ -15,6 +15,7 @@ use crate::buffer::{char_class, Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
 use crate::shape::lig;
+use crate::shape::position::FontAdvances;
 use crate::tables::gdef::Gdef;
 use crate::tables::layout::skip_iter::GlyphClasses;
 
@@ -102,6 +103,8 @@ pub(in crate::shape) struct MarkPositioner<'a> {
     pub(in crate::shape) adjust_offsets: bool,
     /// The run's cluster level, for the glyph flags.
     pub(in crate::shape) level: crate::buffer::ClusterLevel,
+    /// The shaping call's advances.
+    pub(in crate::shape) advances: &'a FontAdvances<'a, 'a>,
 }
 
 /// True for glyphs mark positioning treats as marks.
@@ -149,8 +152,8 @@ impl MarkPositioner<'_> {
         Ok(())
     }
 
-    fn h_advance(&self, gid: u16) -> Result<i32> {
-        super::advance(self.face, self.coords, gid, true)
+    fn h_advance(&self, gid: u16) -> i32 {
+        self.advances.h_advance(u32::from(gid))
     }
 
     /// `position_around_base`: positions the marks in
@@ -170,7 +173,7 @@ impl MarkPositioner<'_> {
         // The horizontal advance works better than the ink here, and
         // also for glyphs without ink.
         base_extents.x_bearing = 0;
-        base_extents.width = self.h_advance(base_glyph.glyph_id as u16)?;
+        base_extents.width = self.h_advance(base_glyph.glyph_id as u16);
 
         let lig_id = lig::lig_id(&base_glyph);
         let num_lig_components =
