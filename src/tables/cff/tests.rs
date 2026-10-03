@@ -387,15 +387,18 @@ fn fd_select_format4(ranges: &[(usize, u16)], sentinel: usize) -> Vec<u8> {
 
 /// Checks the per-glyph lookup against the front-to-back fill that
 /// FDSelect used to be expanded with, in format 4 and, when every FD
-/// fits in a byte, in format 3.
+/// fits in a byte, in format 3. Ascending ranges must take the
+/// binary search and any others the scan.
 fn assert_matches_fill(ranges: &[(usize, u16)], sentinel: usize, n_glyphs: usize) {
     let expected = fill_fd_ranges(ranges, sentinel, n_glyphs);
+    let ascending = ranges.windows(2).all(|w| w[0].0 <= w[1].0);
     let mut formats = alloc::vec![(fd_select_format4(ranges, sentinel), true)];
     if ranges.iter().all(|&(_, fd)| fd <= 0xFF) {
         formats.push((fd_select_format3(ranges, sentinel), false));
     }
     for (bytes, allow_format4) in formats {
         let sel = FdSelect::parse(&bytes, 0, n_glyphs, allow_format4, "test").unwrap();
+        assert_eq!(sel.binary_searches(), ascending, "ranges {ranges:?}");
         for (gid, &fd) in expected.iter().enumerate() {
             assert_eq!(
                 sel.fd_for_glyph(gid),
@@ -429,7 +432,7 @@ fn fd_select_ranges_match_the_fill() {
 #[test]
 fn fd_select_alternating_ranges_match_the_fill() {
     // The shape of the fuzzer find in
-    // `cff_fd_select_with_unsorted_ranges_fills_in_linear_time`, small.
+    // `cff_fd_select_with_unsorted_ranges_is_not_expanded`, small.
     let n = 40;
     let ranges: Vec<(usize, u16)> = (0..64)
         .map(|i| (if i % 2 == 0 { 0 } else { n }, i as u16))
@@ -452,6 +455,39 @@ fn fd_select_pseudo_random_ranges_match_the_fill() {
         let sentinel = next(45);
         assert_matches_fill(&ranges, sentinel, 32);
     }
+}
+
+#[test]
+fn fd_select_pseudo_random_ascending_ranges_match_the_fill() {
+    // As above, with the first glyphs sorted, so every case takes the
+    // binary search. Repeated first glyphs, first glyphs past the glyph
+    // count, and sentinels before the last range all come up.
+    let mut state = 0x1b87_3593_u32;
+    let mut next = |bound: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((state >> 8) % bound) as usize
+    };
+    for _ in 0..300 {
+        let n_ranges = next(12);
+        let mut ranges: Vec<(usize, u16)> =
+            (0..n_ranges).map(|_| (next(40), next(8) as u16)).collect();
+        ranges.sort_by_key(|&(first, _)| first);
+        let sentinel = next(45);
+        assert_matches_fill(&ranges, sentinel, 32);
+    }
+}
+
+#[test]
+fn fd_select_binary_search_finds_every_one_glyph_range() {
+    // 300 one-glyph ranges, each in its own FD, then glyphs past the
+    // sentinel.
+    let ranges: Vec<(usize, u16)> = (0..300).map(|g| (g, g as u16 + 1)).collect();
+    assert_matches_fill(&ranges, 300, 310);
+    let f4 = fd_select_format4(&ranges, 300);
+    let sel = FdSelect::parse(&f4, 0, 310, true, "test").unwrap();
+    assert_eq!(sel.fd_for_glyph(0), 1);
+    assert_eq!(sel.fd_for_glyph(299), 300);
+    assert_eq!(sel.fd_for_glyph(300), 0);
 }
 
 #[test]

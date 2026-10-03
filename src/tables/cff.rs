@@ -16,7 +16,9 @@
 //!
 //! Parsing is lazy. [`Cff::parse`] reads the header, the Top DICT, and
 //! the headers of the INDEX structures, which costs the same for ten
-//! glyphs or sixty thousand. Charstrings, subroutines, and the Font
+//! glyphs or sixty thousand. The one extra pass is over the FDSelect
+//! range records of a CID-keyed font, to see whether they ascend and
+//! can be binary-searched. Charstrings, subroutines, and the Font
 //! DICT and Private DICT of a CID-keyed glyph are located when that
 //! glyph is drawn, so malformed data in one of them fails only the
 //! glyphs that use it.
@@ -79,9 +81,9 @@ enum FontDicts<'a> {
 impl<'a> Cff<'a> {
     /// Parses the CFF1 table.
     ///
-    /// This reads only the header, the Top DICT, and INDEX headers, so
-    /// its cost does not grow with the glyph count. Problems inside a
-    /// single charstring, subroutine, or CID Font DICT surface from
+    /// This reads only the header, the Top DICT, INDEX headers, and the
+    /// FDSelect range records, never anything per glyph. Problems inside
+    /// a single charstring, subroutine, or CID Font DICT surface from
     /// [`Cff::outline`] for the glyphs that use it.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);

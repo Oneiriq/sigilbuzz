@@ -20,8 +20,9 @@
 //! are referenced by absolute offset from that dict.
 //!
 //! Parsing is lazy, as for `CFF `: [`Cff2::parse`] reads the header,
-//! the Top DICT, and INDEX headers, and each outline locates its own
-//! charstring, Font DICT, Private DICT, and Local Subrs. Variable fonts
+//! the Top DICT, INDEX headers, and the FDSelect range records, and
+//! each outline locates its own charstring, Font DICT, Private DICT,
+//! and Local Subrs. Variable fonts
 //! are often drawn one glyph at a time at changing coordinates, so the
 //! per-call cost matters more here than anywhere else.
 
@@ -51,9 +52,9 @@ pub struct Cff2<'a> {
 impl<'a> Cff2<'a> {
     /// Parses a CFF2 table.
     ///
-    /// This reads only the header, the Top DICT, and INDEX headers, so
-    /// its cost does not grow with the glyph count. Problems inside a
-    /// single charstring, subroutine, or Font DICT surface from
+    /// This reads only the header, the Top DICT, INDEX headers, and the
+    /// FDSelect range records, never anything per glyph. Problems inside
+    /// a single charstring, subroutine, or Font DICT surface from
     /// [`Cff2::outline`] for the glyphs that use it.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
