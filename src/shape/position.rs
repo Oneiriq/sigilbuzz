@@ -383,7 +383,8 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
 /// them. At the default instance (no coords, or all zero) an advance
 /// is the `hmtx` (or `vmtx`) one. Otherwise:
 ///
-/// - with `HVAR` (or `VVAR`), the advance moves by the rounded delta;
+/// - with `HVAR` (or `VVAR`), the advance moves by the rounded delta,
+///   and stops at zero, as HarfBuzz's `hb_max (0, ...)` stops it;
 ///   every rounding here is HarfBuzz's `roundf`, `floor(x + 0.5)`, so
 ///   halves round up (a delta of -13.5 moves the advance by -13);
 /// - without it, in a `glyf` font with `gvar`, the advance is the
@@ -466,7 +467,9 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             return base;
         }
         if let Some(hvar) = &self.hvar {
-            return base.saturating_add(hb_round(hvar.advance_delta(id, self.coords)));
+            let delta = hvar.advance_delta(id, self.coords);
+            // HarfBuzz's `hb_max (0.0f, advance + roundf (delta))`.
+            return base.saturating_add(hb_round(delta)).max(0);
         }
         self.phantom_advance(&self.h_phantom, id, false)
             .unwrap_or(base)
@@ -483,7 +486,7 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         }
         if let Some(vvar) = &self.vvar {
             let delta = vvar.advance_height_delta(id, self.coords);
-            return Some(base.saturating_add(hb_round(delta)));
+            return Some(base.saturating_add(hb_round(delta)).max(0));
         }
         Some(
             self.phantom_advance(&self.v_phantom, id, true)
