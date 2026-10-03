@@ -482,6 +482,11 @@ impl<'a> Gvar<'a> {
             None
         };
 
+        // Scratch for each tuple's point numbers and deltas, reused so
+        // that decoding a tuple does not allocate.
+        let mut private: Vec<u16> = Vec::new();
+        let mut xs: Vec<i32> = Vec::new();
+        let mut ys: Vec<i32> = Vec::new();
         for header in &headers {
             let tuple_start = cursor;
             let tuple_data_len = header.variation_data_size as usize;
@@ -505,9 +510,9 @@ impl<'a> Gvar<'a> {
 
             // Compute the region scalar.
             let scalar = tuple_scalar(
-                &peak,
-                header.intermediate_start.as_deref(),
-                header.intermediate_end.as_deref(),
+                peak,
+                header.intermediate_start,
+                header.intermediate_end,
                 coords,
             );
             if scalar == 0.0 {
@@ -524,27 +529,25 @@ impl<'a> Gvar<'a> {
             // numbers, then packed x deltas, then packed y deltas.
             let at = |e: Error| rebase(e, data_off + tuple_start);
             let mut tr = 0usize;
-            let private_points = if header.private_point_numbers {
-                let (pts, used) = read_packed_point_numbers(tuple_bytes).map_err(at)?;
-                tr = used;
-                Some(pts)
-            } else {
-                None
-            };
+            if header.private_point_numbers {
+                tr = read_packed_point_numbers_into(tuple_bytes, &mut private).map_err(at)?;
+            }
             // Neither private nor shared point numbers means all
             // points, as does an empty list.
-            let points: Option<&[u16]> = private_points
-                .as_deref()
-                .or(shared_points.as_deref())
-                .filter(|p| !p.is_empty());
+            let points: Option<&[u16]> = if header.private_point_numbers {
+                Some(private.as_slice())
+            } else {
+                shared_points.as_deref()
+            }
+            .filter(|p| !p.is_empty());
 
             // X and Y streams each carry exactly `n` deltas: one per
             // listed point, or one per point in the all-points form.
             let n = points.map_or(num_points, <[u16]>::len);
-            let (xs, consumed_x) = read_packed_deltas_n(&tuple_bytes[tr..], n)
+            let consumed_x = read_packed_deltas_into(&tuple_bytes[tr..], n, &mut xs)
                 .map_err(|e| rebase(e, data_off + tuple_start + tr))?;
             tr += consumed_x;
-            let (ys, _consumed_y) = read_packed_deltas_n(&tuple_bytes[tr..], n)
+            read_packed_deltas_into(&tuple_bytes[tr..], n, &mut ys)
                 .map_err(|e| rebase(e, data_off + tuple_start + tr))?;
             visit(&TupleDeltas {
                 scalar,
@@ -699,13 +702,16 @@ fn infer_delta(target: f32, prev: f32, next: f32, prev_delta: f32, next_delta: f
 // TupleVariationHeader
 // ----------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct TupleVariationHeader {
+/// One tuple variation header. The peak and intermediate rows borrow
+/// the table's bytes, `axis_count` big-endian F2DOT14 values each, so
+/// reading a header never allocates.
+#[derive(Debug, Clone, Copy)]
+struct TupleVariationHeader<'a> {
     variation_data_size: u16,
     tuple_index: u16,
-    embedded_peak: Option<Vec<f32>>,
-    intermediate_start: Option<Vec<f32>>,
-    intermediate_end: Option<Vec<f32>>,
+    embedded_peak: Option<&'a [u8]>,
+    intermediate_start: Option<&'a [u8]>,
+    intermediate_end: Option<&'a [u8]>,
     private_point_numbers: bool,
 }
 
@@ -714,22 +720,21 @@ const FLAG_INTERMEDIATE_REGION: u16 = 0x4000;
 const FLAG_PRIVATE_POINT_NUMBERS: u16 = 0x2000;
 const TUPLE_INDEX_MASK: u16 = 0x0FFF;
 
-impl TupleVariationHeader {
-    fn read(r: &mut Reader<'_>, axis_count: u16) -> Result<Self> {
+impl<'a> TupleVariationHeader<'a> {
+    fn read(r: &mut Reader<'a>, axis_count: u16) -> Result<Self> {
         let variation_data_size = r.read_u16()?;
         let tuple_index = r.read_u16()?;
-        // Each tuple is `axis_count` F2DOT14 values. Taking the bytes
-        // first means a truncated table fails before any allocation.
+        // Each tuple is `axis_count` F2DOT14 values.
         let row = usize::from(axis_count) * 2;
         let embedded_peak = if tuple_index & FLAG_EMBEDDED_PEAK != 0 {
-            Some(decode_f2dot14s(r.read_bytes(row)?))
+            Some(r.read_bytes(row)?)
         } else {
             None
         };
         let (intermediate_start, intermediate_end) = if tuple_index & FLAG_INTERMEDIATE_REGION != 0
         {
-            let s = decode_f2dot14s(r.read_bytes(row)?);
-            let e = decode_f2dot14s(r.read_bytes(row)?);
+            let s = r.read_bytes(row)?;
+            let e = r.read_bytes(row)?;
             (Some(s), Some(e))
         } else {
             (None, None)
@@ -745,15 +750,17 @@ impl TupleVariationHeader {
         })
     }
 
+    /// The tuple's peak row: its own, or the shared tuple it names.
+    /// `None` when the shared tuple does not exist.
     fn resolve_peak(
         &self,
-        gvar_data: &[u8],
+        gvar_data: &'a [u8],
         shared_tuples_off: usize,
         shared_tuple_count: u16,
         axis_count: u16,
-    ) -> Option<Vec<f32>> {
-        if let Some(ref peak) = self.embedded_peak {
-            return Some(peak.clone());
+    ) -> Option<&'a [u8]> {
+        if let Some(peak) = self.embedded_peak {
+            return Some(peak);
         }
         let idx = self.tuple_index & TUPLE_INDEX_MASK;
         if idx >= shared_tuple_count {
@@ -763,28 +770,27 @@ impl TupleVariationHeader {
         // Checked: `shared_tuples_off` is a u32 from the font, so the
         // sum can overflow a 32-bit usize.
         let base = shared_tuples_off.checked_add(idx as usize * row)?;
-        let bytes = gvar_data.get(base..base.checked_add(row)?)?;
-        Some(decode_f2dot14s(bytes))
+        gvar_data.get(base..base.checked_add(row)?)
     }
 }
 
-/// Decodes a run of big-endian F2DOT14 values. A trailing odd byte is
-/// ignored, which never happens for the even-length slices callers
-/// pass.
-fn decode_f2dot14s(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(2)
-        .map(|b| f32::from(i16::from_be_bytes([b[0], b[1]])) / 16384.0)
-        .collect()
+/// The F2DOT14 value at index `i` of a row of big-endian F2DOT14
+/// values, or `None` past the end.
+fn f2dot14_at(row: &[u8], i: usize) -> Option<f32> {
+    let b = row.get(i * 2..i * 2 + 2)?;
+    Some(f32::from(i16::from_be_bytes([b[0], b[1]])) / 16384.0)
 }
 
 // ----------------------------------------------------------------------------
 // Region scalar (mirrors OpenType spec's supportScalar).
 // ----------------------------------------------------------------------------
 
-fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords: &[f32]) -> f32 {
+/// The region scalar of a tuple at `coords`. `peak`, `start`, and `end`
+/// are rows of big-endian F2DOT14 values, one per axis.
+fn tuple_scalar(peak: &[u8], start: Option<&[u8]>, end: Option<&[u8]>, coords: &[f32]) -> f32 {
     let mut scalar: f32 = 1.0;
-    for (i, &p) in peak.iter().enumerate() {
+    for i in 0..peak.len() / 2 {
+        let p = f2dot14_at(peak, i).unwrap_or(0.0);
         let c = *coords.get(i).unwrap_or(&0.0);
         // Spec: a peak of zero on an axis means the axis does not
         // participate in this region; skip without touching the
@@ -797,7 +803,10 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
         }
         // Default region: [0, peak] or [peak, 0] depending on sign.
         let (s, e) = match (start, end) {
-            (Some(s), Some(e)) => (*s.get(i).unwrap_or(&0.0), *e.get(i).unwrap_or(&0.0)),
+            (Some(s), Some(e)) => (
+                f2dot14_at(s, i).unwrap_or(0.0),
+                f2dot14_at(e, i).unwrap_or(0.0),
+            ),
             _ => {
                 if p > 0.0 {
                     (0.0, p)
@@ -838,6 +847,15 @@ fn tuple_scalar(peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>, coords
 /// glyph"; signaled by an empty returned `Vec`. Callers must treat
 /// that as the all-points case rather than a zero-length point list.
 pub(crate) fn read_packed_point_numbers(data: &[u8]) -> Result<(Vec<u16>, usize)> {
+    let mut out = Vec::new();
+    let used = read_packed_point_numbers_into(data, &mut out)?;
+    Ok((out, used))
+}
+
+/// [`read_packed_point_numbers`] into `out`, which it clears first.
+/// Returns the number of bytes consumed.
+fn read_packed_point_numbers_into(data: &[u8], out: &mut Vec<u16>) -> Result<usize> {
+    out.clear();
     if data.is_empty() {
         return Err(Error::Truncated {
             offset: 0,
@@ -861,10 +879,10 @@ pub(crate) fn read_packed_point_numbers(data: &[u8]) -> Result<(Vec<u16>, usize)
     if count == 0 {
         // Shortcut: all points. Caller discovers the actual length
         // from the delta stream.
-        return Ok((Vec::new(), cursor));
+        return Ok(cursor);
     }
 
-    let mut out = Vec::with_capacity(count as usize);
+    out.reserve(count as usize);
     let mut last: u32 = 0;
     while out.len() < count as usize {
         if cursor >= data.len() {
@@ -905,7 +923,7 @@ pub(crate) fn read_packed_point_numbers(data: &[u8]) -> Result<(Vec<u16>, usize)
             out.push(last.min(u32::from(u16::MAX)) as u16);
         }
     }
-    Ok((out, cursor))
+    Ok(cursor)
 }
 
 // ----------------------------------------------------------------------------
@@ -920,8 +938,21 @@ const DELTA_COUNT_MASK: u8 = 0x3F;
 /// byte covers up to 64 values; deltas are i8, i16, or implicit
 /// zeros. Unused bytes inside an over-long run are consumed to keep
 /// the cursor consistent for the next decode call.
+#[cfg(test)]
 fn read_packed_deltas_n(data: &[u8], n: usize) -> Result<(Vec<i32>, usize)> {
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::new();
+    let used = read_packed_deltas_into(data, n, &mut out)?;
+    Ok((out, used))
+}
+
+/// Decodes exactly `n` packed delta values from `data` into `out`,
+/// which it clears first, and returns the number of bytes consumed.
+/// Each control byte covers up to 64 values; deltas are i8, i16, or
+/// implicit zeros. Unused bytes inside an over-long run are consumed
+/// to keep the cursor consistent for the next decode call.
+fn read_packed_deltas_into(data: &[u8], n: usize, out: &mut Vec<i32>) -> Result<usize> {
+    out.clear();
+    out.reserve(n);
     let mut cursor = 0usize;
     while out.len() < n {
         if cursor >= data.len() {
@@ -983,7 +1014,7 @@ fn read_packed_deltas_n(data: &[u8], n: usize) -> Result<(Vec<i32>, usize)> {
             }
         }
     }
-    Ok((out, cursor))
+    Ok(cursor)
 }
 
 /// Per-point delta sums in order of first appearance.
@@ -1162,11 +1193,27 @@ mod tests {
 
     #[test]
     fn tuple_scalar_peaks_at_one_and_tapers() {
-        let peak = [1.0];
+        let peak = 0x4000u16.to_be_bytes(); // 1.0
         assert!((tuple_scalar(&peak, None, None, &[1.0]) - 1.0).abs() < 1e-6);
         assert!((tuple_scalar(&peak, None, None, &[0.5]) - 0.5).abs() < 1e-6);
         assert!(tuple_scalar(&peak, None, None, &[0.0]).abs() < 1e-6);
         assert!(tuple_scalar(&peak, None, None, &[-0.5]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tuple_scalar_reads_intermediate_rows() {
+        // Peak 0.5 inside the region from 0.25 to 1.0, on one axis.
+        let (peak, start, end) = (0x2000u16, 0x1000u16, 0x4000u16);
+        let row = |v: u16| v.to_be_bytes();
+        let scalar = |c: f32| tuple_scalar(&row(peak), Some(&row(start)), Some(&row(end)), &[c]);
+        assert!((scalar(0.5) - 1.0).abs() < 1e-6);
+        assert!((scalar(0.375) - 0.5).abs() < 1e-6);
+        assert!((scalar(0.75) - 0.5).abs() < 1e-6);
+        assert!(scalar(0.2).abs() < 1e-6);
+        assert!(scalar(1.0).abs() < 1e-6);
+        // Coords past the rows play no part.
+        let two_axes = tuple_scalar(&row(peak), Some(&row(start)), Some(&row(end)), &[0.5, 1.0]);
+        assert!((two_axes - 1.0).abs() < 1e-6);
     }
 
     fn build_single_glyph_gvar() -> Vec<u8> {
