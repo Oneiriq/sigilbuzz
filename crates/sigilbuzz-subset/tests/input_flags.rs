@@ -145,6 +145,45 @@ fn cff_passthrough_drops_what_the_flags_drop() {
     }
 }
 
+/// `MVAR` varies along the axes `fvar` defines, so it goes with the
+/// other variable-font tables. The CFF identity path used to keep it
+/// when asked to drop them, leaving an `MVAR` without its `fvar`. It
+/// has no subset implementation, so a rebuilt subset drops it as
+/// unhandled, and strict mode rejects it unless the variations go.
+#[test]
+fn dropping_variations_drops_mvar() {
+    // An MVAR with no value records and no store.
+    let mvar = vec![0, 1, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0];
+    let font = support::edit_tables(SOURCE_SANS_3_VF, &[(*b"MVAR", Some(mvar))]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let all: Vec<u16> = (0..face.maxp().unwrap().num_glyphs).collect();
+    let some = gids_for(&face, "Hi");
+    let tables = |input: SubsetInput| {
+        let out = subset(&face, &input).map(|out| out.bytes)?;
+        let sub = Face::parse_bytes(&out, 0).unwrap();
+        Ok::<_, SubsetError>([*b"MVAR", *b"fvar"].map(|t| sub.record(t).is_some()))
+    };
+    let input = |gids: &[u16], retain_variations: bool, drop_unhandled: bool| SubsetInput {
+        gids: gids.to_vec(),
+        retain_variations,
+        drop_unhandled,
+        ..SubsetInput::default()
+    };
+
+    // Every glyph kept: MVAR passes through with fvar, or goes with it.
+    assert_eq!(tables(input(&all, true, true)), Ok([true, true]));
+    assert_eq!(tables(input(&all, false, true)), Ok([false, false]));
+    assert_eq!(tables(input(&all, false, false)), Ok([false, false]));
+    // A rebuilt subset drops it either way, and strict mode objects
+    // only while the variations would stay.
+    assert_eq!(tables(input(&some, true, true)), Ok([false, true]));
+    assert_eq!(tables(input(&some, false, false)), Ok([false, false]));
+    assert!(matches!(
+        tables(input(&some, true, false)),
+        Err(SubsetError::Unsupported(_))
+    ));
+}
+
 /// In strict mode a table without a subset implementation is an error.
 /// The CFF path used to drop such tables silently even in strict mode.
 /// The fixture's `BASE` used to be one; it is kept now, so a `DSIG` is

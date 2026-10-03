@@ -78,10 +78,11 @@
 //!   source has (advance height, top and bottom side bearings, and the
 //!   vertical origin) and goes with `vmtx`: a subset without `vmtx`
 //!   has no `VVAR`. A `VVAR` left out that way, or one that cannot be
-//!   rebuilt, is reported in the warnings. The GDEF `ItemVariationStore` that GPOS kerning,
-//!   anchors, and ligature carets vary through is carried verbatim. Set
-//!   [`SubsetInput::retain_variations`] to `false` to drop them and get a
-//!   static subset at the default instance.
+//!   rebuilt, is reported in the warnings. The GDEF
+//!   `ItemVariationStore` that GPOS kerning, anchors, and ligature
+//!   carets vary through is carried verbatim. Set
+//!   [`SubsetInput::retain_variations`] to `false` to drop them (and
+//!   `MVAR`) and get a static subset at the default instance.
 //! - Dropped when [`SubsetInput::drop_unhandled`] is true (the default):
 //!   every table without a subset implementation. That is `kern`,
 //!   `kerx`, `morx`, and the other AAT tables; `COLR` and `CPAL`; `MVAR`
@@ -208,14 +209,17 @@ const HINTING_TABLES: [[u8; 4]; 3] = [*b"cvt ", *b"fpgm", *b"prep"];
 const LAYOUT_TABLES: [[u8; 4]; 3] = [tag::GSUB, tag::GPOS, tag::GDEF];
 
 /// Variable-font tables that [`SubsetInput::retain_variations`] keeps
-/// or drops.
-const VARIATION_TABLES: [[u8; 4]; 6] = [
+/// or drops. `MVAR` has no subset implementation: only the CFF identity
+/// passthrough keeps it, and the other paths drop it as unhandled (see
+/// `check_unhandled_tables`).
+const VARIATION_TABLES: [[u8; 4]; 7] = [
     tag::FVAR,
     tag::AVAR,
     tag::GVAR,
     tag::HVAR,
     tag::VVAR,
     tag::VARC,
+    tag::MVAR,
 ];
 
 /// Tables the subset always keeps unless they are malformed, when it
@@ -254,7 +258,9 @@ pub struct SubsetInput {
     /// passed through verbatim; `gvar` is rebuilt with one entry per
     /// kept gid; `HVAR` and `VVAR` are rebuilt around fresh
     /// `DeltaSetIndexMap`s plus a deduped `ItemVariationStore`. When
-    /// false, every variable-font table is dropped. The resulting
+    /// false, every variable-font table is dropped, `MVAR` included,
+    /// and strict mode (`drop_unhandled` false) no longer rejects an
+    /// `MVAR` it would otherwise have no way to keep. The resulting
     /// subset behaves as a static font pinned to the source's default
     /// instance. A `CFF2` table keeps its own variation store either
     /// way, since it is part of the outline data.
@@ -653,10 +659,12 @@ fn push_layout_and_variation_tables(
 /// In strict mode (`drop_unhandled` false), fails on any source table
 /// the subset did not emit. Layout, variable-font, and hinting tables
 /// are exempt: their own flags decide whether they stay, so dropping
-/// them is intended. So are the vertical metrics tables and `BASE`,
-/// which the subset always keeps unless they are malformed, and then
-/// reports in its warnings. In permissive mode the rest are dropped,
-/// because their glyph id references would be stale.
+/// them is intended. `MVAR` is the exception: it has no subset
+/// implementation, so it is exempt only when `retain_variations` drops
+/// it. The vertical metrics tables and `BASE` are exempt too: the
+/// subset always keeps them unless they are malformed, and then
+/// reports them in its warnings. In permissive mode the rest are
+/// dropped, because their glyph id references would be stale.
 fn check_unhandled_tables(
     face: &Face<'_>,
     tables: &[([u8; 4], Vec<u8>)],
@@ -667,8 +675,10 @@ fn check_unhandled_tables(
     }
     for rec in face.records() {
         let emitted = tables.iter().any(|(t, _)| *t == rec.tag);
+        let variation_exempt = VARIATION_TABLES.contains(&rec.tag)
+            && (rec.tag != tag::MVAR || !input.retain_variations);
         let exempt = LAYOUT_TABLES.contains(&rec.tag)
-            || VARIATION_TABLES.contains(&rec.tag)
+            || variation_exempt
             || HINTING_TABLES.contains(&rec.tag)
             || KEPT_UNLESS_MALFORMED.contains(&rec.tag);
         if !emitted && !exempt {
