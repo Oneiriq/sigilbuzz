@@ -16,15 +16,16 @@
 //! output (uharfbuzz, `guess_segment_properties`) on the same patched
 //! bytes: glyph id, cluster, x advance, x offset, y offset.
 
-use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Face, Font};
+use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Face, Feature, Font};
 
 const DEVANAGARI: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 const MALAYALAM: &[u8] = include_bytes!("fonts/NotoSansMalayalam-Regular.ttf");
+const KHMER: &[u8] = include_bytes!("fonts/NotoSansKhmer-Regular.ttf");
 const TIRHUTA: &[u8] = include_bytes!("fonts/NotoSansTirhuta-Regular.ttf");
 
 type Row = (u32, u32, i32, i32, i32);
 
-fn rows(font: &[u8], text: &str) -> Vec<Row> {
+fn rows(font: &[u8], text: &str, features: &[Feature]) -> Vec<Row> {
     let blob = Blob::new(font);
     let face = Face::parse(&blob, 0).expect("parse face");
     let font = Font::new(face, 1000.0);
@@ -32,7 +33,7 @@ fn rows(font: &[u8], text: &str) -> Vec<Row> {
     buffer.push_str(text);
     buffer.guess_segment_properties();
     buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
-    shape(&font, &buffer, &[])
+    shape(&font, &buffer, features)
         .expect("shape")
         .glyphs
         .iter()
@@ -41,8 +42,12 @@ fn rows(font: &[u8], text: &str) -> Vec<Row> {
 }
 
 fn check(font: &[u8], cases: &[(&str, &[Row])]) {
+    check_with(font, &[], cases);
+}
+
+fn check_with(font: &[u8], features: &[Feature], cases: &[(&str, &[Row])]) {
     for &(text, expected) in cases {
-        assert_eq!(rows(font, text), expected, "{text:?}");
+        assert_eq!(rows(font, text, features), expected, "{text:?}");
     }
 }
 
@@ -137,6 +142,17 @@ fn make_required(gsub: &mut [u8], tag: &[u8; 4]) {
     }
 }
 
+/// Retags every feature tagged `from` as `to`.
+fn retag(gsub: &mut [u8], from: &[u8; 4], to: &[u8; 4]) {
+    let list = u16_at(gsub, 6);
+    for i in 0..u16_at(gsub, list) {
+        let at = list + 2 + 6 * i;
+        if gsub[at..at + 4] == *from {
+            gsub[at..at + 4].copy_from_slice(to);
+        }
+    }
+}
+
 /// `gsub` (version 1.0) as version 1.1, with one FeatureVariations
 /// record that holds everywhere and gives each feature of
 /// `substitutions` the lookups listed with it.
@@ -228,12 +244,30 @@ fn malayalam_required_pref() -> Vec<u8> {
     with_gsub(MALAYALAM, gsub)
 }
 
+/// Khmer whose `pstf` is retagged `cfar` and made only the required
+/// feature.
+fn khmer_required_cfar() -> Vec<u8> {
+    let mut gsub = table(KHMER, b"GSUB").to_vec();
+    retag(&mut gsub, b"pstf", b"cfar");
+    make_required(&mut gsub, b"cfar");
+    with_gsub(KHMER, gsub)
+}
+
 /// Tirhuta (Universal Shaping Engine) whose `rphf` is only the
 /// required feature.
 fn tirhuta_required_rphf() -> Vec<u8> {
     let mut gsub = table(TIRHUTA, b"GSUB").to_vec();
     make_required(&mut gsub, b"rphf");
     with_gsub(TIRHUTA, gsub)
+}
+
+/// Khmer whose `clig` is retagged `liga` and made only the required
+/// feature.
+fn khmer_required_liga() -> Vec<u8> {
+    let mut gsub = table(KHMER, b"GSUB").to_vec();
+    retag(&mut gsub, b"clig", b"liga");
+    make_required(&mut gsub, b"liga");
+    with_gsub(KHMER, gsub)
 }
 
 #[test]
@@ -395,6 +429,50 @@ fn a_required_pref_reorders_no_pre_base_form() {
 }
 
 #[test]
+fn a_required_cfar_runs_in_the_khmer_basic_stage_on_every_glyph() {
+    // Khmer whose `pstf` is retagged `cfar` and made only the required
+    // feature. HarfBuzz's Khmer shaper has `cfar`, so the required
+    // feature runs in its basic stage, on every glyph, not only after
+    // a coeng and ro: the coeng and ya take their post-base form and
+    // ligate with the vowel sign that follows.
+    check(
+        &khmer_required_cfar(),
+        &[
+            (
+                "\u{1780}\u{17D2}\u{1799}\u{17B6}",
+                &[(25, 0, 636, 0, 0), (302, 0, 580, 0, 0)],
+            ),
+            (
+                "\u{1780}\u{17D2}\u{1799}\u{17BE}",
+                &[
+                    (107, 0, 288, 0, 0),
+                    (25, 0, 636, 0, 0),
+                    (194, 0, 298, 0, 0),
+                    (85, 0, 0, 1, 30),
+                ],
+            ),
+            (
+                "\u{1780}\u{17D2}\u{1799}\u{17C4}",
+                &[(107, 0, 288, 0, 0), (25, 0, 636, 0, 0), (302, 0, 580, 0, 0)],
+            ),
+            (
+                "\u{1780}\u{17D2}\u{179A}\u{17B6}",
+                &[(196, 0, 287, 0, 0), (212, 0, 924, 0, 0)],
+            ),
+            (
+                "\u{1780}\u{17D2}\u{179A}\u{17BE}",
+                &[
+                    (107, 0, 288, 0, 0),
+                    (196, 0, 287, 0, 0),
+                    (25, 0, 636, 0, 0),
+                    (85, 0, 0, -23, -29),
+                ],
+            ),
+        ],
+    );
+}
+
+#[test]
 fn the_universal_shaping_engine_finds_no_reph_in_a_required_rphf() {
     // Tirhuta whose `rphf` is only the required feature: no `rphf` mask,
     // so no repha to reorder, while the required lookups still form the
@@ -420,4 +498,58 @@ fn the_universal_shaping_engine_finds_no_reph_in_a_required_rphf() {
             ),
         ],
     );
+}
+
+#[test]
+fn a_required_feature_whose_tag_the_caller_turns_off_runs_in_stage_zero() {
+    // With `rphf=0` HarfBuzz's map has no `rphf`, so the required
+    // `rphf` runs in stage 0 with `rvrn`, on every glyph, and no reph is
+    // reordered. It used to run nowhere.
+    let off = [Feature {
+        tag: *b"rphf",
+        value: 0,
+    }];
+    check_with(
+        &devanagari_required_rphf(),
+        &off,
+        &[
+            (
+                "\u{0930}\u{094D}\u{0915}",
+                &[(506, 0, 0, 0, 0), (56, 6, 768, 0, 0)],
+            ),
+            (
+                "\u{0915}\u{0930}\u{094D}",
+                &[(56, 0, 768, 0, 0), (506, 3, 0, -221, 0)],
+            ),
+            (
+                "\u{0930}\u{094D}\u{0930}\u{094D}\u{0915}",
+                &[(506, 0, 0, 0, 0), (506, 6, 0, 0, 0), (56, 12, 768, 0, 0)],
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_required_liga_runs_in_stage_zero_in_khmer() {
+    // HarfBuzz's Khmer shaper turns `liga` off after the caller's
+    // features, so a required `liga` runs in stage 0, whatever the
+    // caller says about `liga`. It used to run nowhere.
+    let font = khmer_required_liga();
+    let on = [Feature {
+        tag: *b"liga",
+        value: 1,
+    }];
+    for features in [&[][..], &on[..]] {
+        check_with(
+            &font,
+            features,
+            &[
+                ("\u{1780}\u{17B6}", &[(212, 0, 924, 0, 0)]),
+                (
+                    "\u{1781}\u{17B6}\u{17C6}",
+                    &[(214, 0, 923, 0, 0), (113, 0, 0, 47, -29)],
+                ),
+            ],
+        );
+    }
 }
