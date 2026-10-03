@@ -141,6 +141,18 @@ signatures only change in a major version.
 - `line_break_opportunities`, `LineBreakIter`, `BreakOpportunity`, `LineBreakClass`
 - `wrap_lines`, `LineRange`, `WrapOptions`
 - `word_breaks`
+- Added in 0.2.0:
+  - `line_break_opportunities_with` and `WordBreak` (`Normal`, `KeepAll`, `BreakAll`):
+    the CSS `word-break` tailorings of the line breaking rules
+  - `WrapOptions::word_break`, which `wrap_lines` passes on. A struct literal of
+    `WrapOptions` needs the field, or `..WrapOptions::default()`
+  - `line_break_class`: the `Line_Break` property of a character
+  - `WordBreakIter`: the iterator `word_breaks` returns, now nameable
+  - `LineBreakClass` has every UAX 14 class and is `#[non_exhaustive]` from 0.2.0: a
+    class a later Unicode version adds is an additive change, and a `match` on it
+    outside the crate needs a wildcard arm
+- The breaks follow UAX 14 and UAX 29 of the Unicode version the tables come from
+  (17.0.0 in 0.2.0). A newer Unicode version can move breaks in a minor release.
 
 `sigilbuzz-hyphen`:
 

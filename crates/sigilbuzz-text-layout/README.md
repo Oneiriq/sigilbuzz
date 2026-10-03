@@ -2,25 +2,63 @@
 
 Line breaking, word wrap, and word boundaries for [sigilbuzz].
 
-It implements the parts of [UAX 14, the Unicode Line Breaking Algorithm][uax14], that
-you need to wrap English, other European languages, and CJK text correctly. It also has
-a simplified [UAX 29][uax29] word iterator for cursor movement and double-click
-selection, so you don't need a full Unicode segmentation crate for that.
+It implements [UAX 14, the Unicode Line Breaking Algorithm][uax14] (revision 55), and
+the word boundary rules of [UAX 29, Unicode Text Segmentation][uax29] (revision 47),
+from tables generated out of the Unicode 17.0.0 Character Database. Both pass every
+case of the Unicode conformance files `LineBreakTest.txt` and `WordBreakTest.txt`.
 
 ## Entry points
 
 - `line_break_opportunities(text)`: the UAX 14 break iterator.
+- `line_break_opportunities_with(text, word_break)`: the same, tailored by a
+  `WordBreak` the way CSS `word-break` tailors line breaking.
 - `wrap_lines(glyphs, text, options)`: takes shaped glyphs (`&[sigilbuzz::Glyph]`) and
-  a width and returns `LineRange`s.
-- `word_breaks(text)`: the simplified UAX 29 word iterator.
+  a width and returns `LineRange`s. `WrapOptions::word_break` picks the tailoring.
+- `word_breaks(text)`: the UAX 29 word boundary iterator, for cursor movement and
+  double-click selection.
+- `line_break_class(c)`: the `Line_Break` property of a character.
+
+## Korean and `word-break`
+
+By default (`WordBreak::Normal`) Korean breaks between syllables, like Chinese and
+Japanese. Korean is usually set with spaces between words, so most Korean text wants
+`WordBreak::KeepAll`, CSS `word-break: keep-all`: no break between two letters or
+numbers, so each word (eojeol) stays whole and breaks at spaces and punctuation.
+
+```rust
+use sigilbuzz_text_layout::{line_break_opportunities_with, WordBreak};
+
+// "한국어를 공부해요." ("I study Korean.")
+let text = "\u{D55C}\u{AD6D}\u{C5B4}\u{B97C} \u{ACF5}\u{BD80}\u{D574}\u{C694}.";
+let breaks: Vec<usize> = line_break_opportunities_with(text, WordBreak::KeepAll)
+    .map(|(offset, _)| offset)
+    .collect();
+assert_eq!(breaks, [13, 26]);
+```
+
+`WordBreak::BreakAll`, CSS `word-break: break-all`, goes the other way and lets words
+in any script break between letters.
 
 ## Coverage
 
-The line-break classifier covers the UAX 14 classes that matter most in practice: BK,
-CR, LF, NL, WJ, CL, CP, OP, QU, GL, NS, CM, SP, BA, BB, HY, AL, NU, PR, PO, ID, EX, ZW,
-EB, and EM. Brahmic combining marks, Korean Jamo clusters, dictionary-based breaking
-for Southeast Asian scripts, and the LB30a regional-indicator rule are not implemented
-yet.
+Every UAX 14 rule is implemented, including Korean syllable blocks of conjoining jamo
+(LB26, LB27), Brahmic orthographic syllables (LB28a), and regional indicator pairs
+(LB30a). The Southeast Asian scripts of class SA (Thai, Lao, Khmer, Myanmar, and
+others) need a dictionary to find the boundaries between words, which this crate does
+not have. Line breaking treats a run of them as one word that breaks at spaces and
+punctuation.
+
+## Regenerating the tables
+
+The tables in `src/line_break_table.rs` and `src/word_break_table.rs` come from the
+snapshots in `tests/tools/ucd/`:
+
+```text
+cargo test -p sigilbuzz-text-layout --test table_gen -- --ignored
+```
+
+`tests/table_gen.rs` explains how to refresh the snapshots for a new Unicode version,
+and `tests/conformance.rs` how to run the conformance files.
 
 ## License
 

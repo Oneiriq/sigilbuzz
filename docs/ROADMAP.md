@@ -19,9 +19,14 @@ These are smaller pieces that are not scheduled yet.
 
 - SVG filters: `feTurbulence`, `feImage`, `feMorphology`, `feConvolveMatrix`,
   `feSpecularLighting`, `feDiffuseLighting`, and `feComponentTransfer`.
-- Line breaking in `sigilbuzz-text-layout`: Brahmic combining marks, Korean Jamo
-  clusters, dictionary-based breaking for Thai, Lao, and Khmer, and the LB30a
-  regional-indicator rule.
+- Dictionary-based breaking in `sigilbuzz-text-layout` for the Southeast Asian
+  scripts in UAX 14 class SA (Thai, Lao, Khmer, Myanmar, Tai Tham, and others), which
+  write words without spaces between them. Without a dictionary, line breaking treats
+  a run of them as one word that breaks only at spaces and punctuation (LB1 resolves
+  SA to AL), and `word_breaks` puts a boundary between every character of such a run
+  (UAX 29 leaves SA letters out of ALetter). The rest of UAX 14 and UAX 29 is done,
+  including Korean jamo, Brahmic orthographic syllables (LB28a), and regional
+  indicators (LB30a).
 - Hyphenation patterns for German, French, and Spanish. The cargo features exist but
   ship no patterns yet.
 - Language tags from version 1 `name` tables are read but not exposed.

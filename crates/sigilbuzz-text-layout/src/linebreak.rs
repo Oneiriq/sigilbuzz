@@ -957,6 +957,22 @@ mod tests {
     }
 
     #[test]
+    fn southeast_asian_runs_break_only_at_spaces() {
+        // Thai "ภาษาไทย ดี" ("the Thai language is good"). There is no
+        // dictionary, so LB1 resolves the SA letters to AL and the
+        // vowel marks to CM, and each run is one word.
+        let text = "\u{0E20}\u{0E32}\u{0E29}\u{0E32}\u{0E44}\u{0E17}\u{0E22} \u{0E14}\u{0E35}";
+        assert_eq!(offsets(text, WordBreak::Normal), [22, 28]);
+        assert_eq!(offsets(text, WordBreak::KeepAll), [22, 28]);
+        // Break-all breaks between letters but keeps the mark U+0E35
+        // on its letter.
+        assert_eq!(
+            offsets(text, WordBreak::BreakAll),
+            [3, 6, 9, 12, 15, 18, 22, 28]
+        );
+    }
+
+    #[test]
     fn keep_all_leaves_other_scripts_alone() {
         assert_eq!(
             offsets("the quick brown", WordBreak::KeepAll),
