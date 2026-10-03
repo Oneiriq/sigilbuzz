@@ -450,8 +450,16 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                         // from the 7/11/9/11 args respectively.
                         self.flex(b1)?;
                     }
-                    // Type 1 deprecated ops: reject.
-                    0 | 3 | 4 | 5 | 7 | 8 | 13 | 14 | 15 | 16 | 17 | 21 | 32 | 33 => {
+                    // `dotsection`, a Type 1 hint that Type 2 keeps
+                    // only as a deprecated no-op. Fonts converted from
+                    // Type 1 still carry it. HarfBuzz and FreeType
+                    // ignore it: they clear the operand stack and take
+                    // no width from it.
+                    op_code::ESC_DOTSECTION => {
+                        self.stack.clear();
+                    }
+                    // Other Type 1 deprecated ops: reject.
+                    3 | 4 | 5 | 7 | 8 | 13 | 14 | 15 | 16 | 17 | 21 | 32 | 33 => {
                         return Err(Error::Unsupported {
                             context: "CFF deprecated Type 1 operator",
                         });

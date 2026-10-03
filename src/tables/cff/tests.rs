@@ -255,6 +255,118 @@ fn charstring_rejects_operand_stack_overflow() {
     assert!(matches!(err, Error::Malformed { .. }));
 }
 
+/// The two bytes of `dotsection` (operator 12 0).
+const DOTSECTION: [u8; 2] = [op_code::ESCAPE, op_code::ESC_DOTSECTION];
+
+/// The outline of the one glyph of a CFF1 font whose charstring is
+/// `cs`.
+fn draw_single(cs: &[u8]) -> Result<Vec<PathOp>> {
+    let cff = build_cff_with_charstring(cs);
+    let mut o = Outline::new();
+    Cff::parse(&cff)?.outline(0, &mut o)?;
+    Ok(o.ops().to_vec())
+}
+
+#[test]
+fn dotsection_draws_nothing() {
+    // A charstring as a Type 1 conversion leaves it: a width, a stem
+    // hint, and `dotsection` around the path, `100 10 20 hstem
+    // dotsection 0 0 rmoveto 10 0 rlineto 0 10 rlineto dotsection
+    // endchar`. HarfBuzz and FreeType skip `dotsection`, which used to
+    // fail the glyph as a deprecated operator.
+    let mut cs = alloc::vec![239, 149, 159, op_code::HSTEM];
+    cs.extend_from_slice(&DOTSECTION);
+    cs.extend_from_slice(&[139, 139, op_code::RMOVETO]);
+    cs.extend_from_slice(&[149, 139, op_code::RLINETO, 139, 149, op_code::RLINETO]);
+    cs.extend_from_slice(&DOTSECTION);
+    cs.push(op_code::ENDCHAR);
+    let square = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 10.0 },
+        PathOp::Close,
+    ];
+    assert_eq!(draw_single(&cs).unwrap(), square);
+    // The same charstring without `dotsection` draws the same.
+    let plain: Vec<u8> = [
+        239,
+        149,
+        159,
+        op_code::HSTEM,
+        139,
+        139,
+        op_code::RMOVETO,
+        149,
+        139,
+        op_code::RLINETO,
+        139,
+        149,
+        op_code::RLINETO,
+        op_code::ENDCHAR,
+    ]
+    .to_vec();
+    assert_eq!(draw_single(&plain).unwrap(), square);
+}
+
+#[test]
+fn dotsection_clears_the_operand_stack() {
+    // `0 0 rmoveto 7 dotsection 10 0 rlineto endchar`: the 7 goes with
+    // `dotsection`, as in HarfBuzz, so `rlineto` draws one line to
+    // (10, 0). Left on the stack it would draw a line to (7, 10).
+    let mut cs = alloc::vec![139, 139, op_code::RMOVETO, 146];
+    cs.extend_from_slice(&DOTSECTION);
+    cs.extend_from_slice(&[149, 139, op_code::RLINETO, op_code::ENDCHAR]);
+    assert_eq!(
+        draw_single(&cs).unwrap(),
+        [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 10.0, y: 0.0 },
+            PathOp::Close,
+        ]
+    );
+}
+
+#[test]
+fn dotsection_in_a_subroutine_and_in_cff2() {
+    // `dotsection` inside a global subroutine, then in a CFF2
+    // charstring, where HarfBuzz clears the stack for it too, as for
+    // any operator it does not know.
+    let subr = [146, DOTSECTION[0], DOTSECTION[1], op_code::RETURN];
+    let bytes = encode_index(&[&subr], 1);
+    let globals = read_index(&mut Reader::new(&bytes)).unwrap();
+    // One global subr has bias 107: subr 0 is pushed as -107, byte 32.
+    let cs = [
+        139,
+        139,
+        op_code::RMOVETO,
+        32,
+        op_code::CALLGSUBR,
+        149,
+        139,
+        op_code::RLINETO,
+    ];
+    let expected = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 0.0 },
+        PathOp::Close,
+    ];
+    for is_cff2 in [false, true] {
+        let mut out = Outline::new();
+        let mut interp = Interp::new(globals, Index::default(), &mut out, is_cff2);
+        interp.run(&cs, 0).unwrap();
+        interp.finish();
+        assert_eq!(out.ops(), expected, "is_cff2 {is_cff2}");
+    }
+}
+
+#[test]
+fn other_deprecated_type1_operators_are_still_rejected() {
+    // `callothersubr` (12 16) stays unsupported.
+    let cs = [139, op_code::ESCAPE, 16, op_code::ENDCHAR];
+    let err = draw_single(&cs).unwrap_err();
+    assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
+}
+
 #[test]
 fn charstring_hflex1_endpoint_returns_to_start_y() {
     // hflex1 spec: the flex starts and ends at the same y value.
@@ -373,8 +485,10 @@ fn fd_select_format4(ranges: &[(usize, u16)], sentinel: usize) -> Vec<u8> {
 
 /// Checks the per-glyph lookup against the front-to-back fill that
 /// FDSelect used to be expanded with, in format 4 and, when every FD
-/// fits in a byte, in format 3. Ascending ranges must take the
-/// binary search and any others the scan.
+/// fits in a byte, in format 3. Ascending ranges must search the
+/// records as they are, and any others must work out their spans, at
+/// most one per glyph and one per range. Glyphs past the glyph count
+/// map to FD 0.
 fn assert_matches_fill(ranges: &[(usize, u16)], sentinel: usize, n_glyphs: usize) {
     let expected = fill_fd_ranges(ranges, sentinel, n_glyphs);
     let ascending = ranges.windows(2).all(|w| w[0].0 <= w[1].0);
@@ -384,13 +498,22 @@ fn assert_matches_fill(ranges: &[(usize, u16)], sentinel: usize, n_glyphs: usize
     }
     for (bytes, allow_format4) in formats {
         let sel = FdSelect::parse(&bytes, 0, n_glyphs, allow_format4, "test").unwrap();
-        assert_eq!(sel.binary_searches(), ascending, "ranges {ranges:?}");
+        match sel.span_count() {
+            None => assert!(ascending, "ranges {ranges:?}"),
+            Some(spans) => {
+                assert!(!ascending, "ranges {ranges:?}");
+                assert!(spans <= ranges.len().min(n_glyphs), "ranges {ranges:?}");
+            }
+        }
         for (gid, &fd) in expected.iter().enumerate() {
             assert_eq!(
                 sel.fd_for_glyph(gid),
                 fd,
                 "gid {gid}, ranges {ranges:?}, sentinel {sentinel}"
             );
+        }
+        for gid in [n_glyphs, n_glyphs + 1, usize::MAX] {
+            assert_eq!(sel.fd_for_glyph(gid), 0, "gid {gid}, ranges {ranges:?}");
         }
     }
 }
@@ -461,6 +584,85 @@ fn fd_select_pseudo_random_ascending_ranges_match_the_fill() {
         let sentinel = next(45);
         assert_matches_fill(&ranges, sentinel, 32);
     }
+}
+
+#[test]
+fn fd_select_larger_pseudo_random_unsorted_ranges_match_the_fill() {
+    // More and longer unsorted tables than above, in three shapes:
+    // first glyphs anywhere, sorted ranges with a few swapped, and
+    // ranges that mostly restart near glyph 0. First glyphs and
+    // sentinels run past the glyph count, and FDs past 255 test format
+    // 4 alone.
+    let mut state = 0x9e37_79b9_u32;
+    let mut next = |bound: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((state >> 8) % bound) as usize
+    };
+    for case in 0..600 {
+        let n_glyphs = 1 + next(300);
+        let n_ranges = next(80);
+        let bound = (n_glyphs + n_glyphs / 4 + 1) as u32;
+        let fd_bound = if case % 3 == 0 { 600 } else { 16 };
+        let mut ranges: Vec<(usize, u16)> = (0..n_ranges)
+            .map(|_| (next(bound), next(fd_bound) as u16))
+            .collect();
+        match case % 3 {
+            1 => {
+                ranges.sort_by_key(|&(first, _)| first);
+                for _ in 0..=next(3) {
+                    if ranges.len() >= 2 {
+                        let i = next(ranges.len() as u32);
+                        let j = next(ranges.len() as u32);
+                        ranges.swap(i, j);
+                    }
+                }
+            }
+            2 => {
+                for r in &mut ranges {
+                    if next(4) != 0 {
+                        r.0 = next(8);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let sentinel = next(bound + 8);
+        assert_matches_fill(&ranges, sentinel, n_glyphs);
+    }
+}
+
+#[test]
+fn fd_select_unsorted_spans_skip_ranges_that_keep_nothing() {
+    // Range 0 runs from glyph 3 to glyph 1, where range 1 starts, so it
+    // keeps nothing, and glyph 0 maps to FD 0. Range 1 keeps glyphs 1
+    // to 5. Range 2 runs from glyph 6 back to glyph 2 and keeps
+    // nothing. Range 3 starts at glyph 2, inside what range 1 already
+    // passed, so it keeps glyphs 6 to 8 only. Glyph 9 is past the
+    // sentinel.
+    let ranges = [(3, 1), (1, 2), (6, 3), (2, 4)];
+    let f3 = fd_select_format3(&ranges, 9);
+    let sel = FdSelect::parse(&f3, 0, 10, false, "test").unwrap();
+    assert_eq!(sel.span_count(), Some(2));
+    assert_eq!(
+        (0..10).map(|g| sel.fd_for_glyph(g)).collect::<Vec<_>>(),
+        [0, 2, 2, 2, 2, 2, 4, 4, 4, 0]
+    );
+    assert_matches_fill(&ranges, 9, 10);
+}
+
+#[test]
+fn fd_select_unsorted_spans_stay_bounded_by_the_glyph_count() {
+    // 65,535 ranges that alternate between first glyph 0 and first
+    // glyph 40, over 40 glyphs. Range 0 keeps every glyph, so one span
+    // is all the lookup keeps, whatever the range count.
+    let n = 40;
+    let ranges: Vec<(usize, u16)> = (0..65_535)
+        .map(|i| (if i % 2 == 0 { 0 } else { n }, (i % 200) as u16))
+        .collect();
+    let f3 = fd_select_format3(&ranges, n);
+    let sel = FdSelect::parse(&f3, 0, n, false, "test").unwrap();
+    assert_eq!(sel.span_count(), Some(1));
+    assert_matches_fill(&ranges, n, n);
 }
 
 #[test]

@@ -128,6 +128,43 @@ pub(crate) fn lists_feature(
     })
 }
 
+/// Sorted, deduplicated lookup indices of the feature tagged `tag`
+/// that the language system [`select_lang_sys`] picks lists (for
+/// `vert`, found anywhere in the FeatureList when it does not list
+/// it), without the required feature [`feature_lookup_indices`]
+/// merges in. Empty when there is no such feature.
+///
+/// HarfBuzz's feature map adds these lookups with the feature's own
+/// mask, and the required feature's with the global mask
+/// (`hb_ot_map_builder_t::compile`). The two masks only part ways
+/// where the feature picks an alternate, so this is for a caller that
+/// needs to tell which lookups the two share.
+pub(crate) fn listed_feature_lookups(
+    script_list: &ScriptList<'_>,
+    features: &ActiveFeatures<'_>,
+    language_tags: &[[u8; 4]],
+    tag: [u8; 4],
+    script_priority: &[[u8; 4]],
+) -> Vec<u16> {
+    let listed =
+        select_lang_sys(script_list, language_tags, script_priority).and_then(|lang_sys| {
+            lang_sys
+                .feature_indices()
+                .find(|&index| features.tag(index) == Some(tag))
+        });
+    let index = listed.or_else(|| {
+        if GLOBAL_SEARCH_FEATURES.contains(&tag) {
+            features.find(tag)
+        } else {
+            None
+        }
+    });
+    index
+        .and_then(|index| features.get(index))
+        .map(|(_, feature)| sorted(feature.lookup_indices().collect()))
+        .unwrap_or_default()
+}
+
 /// The required feature of the language system [`select_lang_sys`]
 /// picks: its tag and sorted lookup indices.
 pub(crate) fn required_feature(
@@ -506,6 +543,37 @@ mod tests {
         let empty = script_list(&[]);
         let empty = ScriptList::parse(&empty).unwrap();
         assert!(!lists_feature(&empty, &features, &[], *b"liga", &latn));
+    }
+
+    #[test]
+    fn listed_lookups_leave_the_required_feature_out() {
+        let f = latin_fixture();
+        let scripts = ScriptList::parse(&f.scripts).unwrap();
+        let features = f.features(None);
+        let latn = [*b"latn"];
+        let listed = |langs: &[[u8; 4]], tag: &[u8; 4]| {
+            listed_feature_lookups(&scripts, &features, langs, *tag, &latn)
+        };
+        // AZE has rlig only as its required feature.
+        assert_eq!(listed(&[*b"AZE "], b"rlig"), Vec::<u16>::new());
+        assert_eq!(listed(&[*b"AZE "], b"liga"), [11]);
+        assert_eq!(listed(&[*b"TRK "], b"liga"), [12]);
+        assert_eq!(listed(&[*b"TRK "], b"rlig"), Vec::<u16>::new());
+
+        // A required liga, feature 1, next to the listed liga, feature
+        // 0: only the listed one's lookup. `vert`, which the language
+        // system does not list, comes from the FeatureList.
+        let f = Fixture {
+            scripts: script_list(&[(*b"latn", Some(lang_sys(1, &[0])), vec![])]),
+            features: feature_list(&[*b"liga", *b"liga", *b"vert"]),
+        };
+        let scripts = ScriptList::parse(&f.scripts).unwrap();
+        let features = f.features(None);
+        let listed = |tag: &[u8; 4]| listed_feature_lookups(&scripts, &features, &[], *tag, &latn);
+        assert_eq!(listed(b"liga"), [10]);
+        assert_eq!(f.lookups(&[], b"liga", &latn), Some(vec![10, 11]));
+        assert_eq!(listed(b"vert"), [12]);
+        assert_eq!(listed(b"kern"), Vec::<u16>::new());
     }
 
     #[test]
