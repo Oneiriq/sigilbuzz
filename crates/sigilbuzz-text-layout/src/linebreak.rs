@@ -66,12 +66,21 @@ pub enum WordBreak {
     /// words in alphabetic scripts break at spaces and punctuation.
     #[default]
     Normal,
-    /// CSS `word-break: keep-all`. No implicit break between two
-    /// typographic letter units: letters and numbers (General_Category
-    /// L* and N*) and characters of class NU, AL, AI, or ID. Korean
-    /// then breaks between words (at spaces) instead of between
-    /// syllables. Everything else, including punctuation and spaces,
-    /// breaks as under [`WordBreak::Normal`].
+    /// CSS `word-break: keep-all`, with the letter units Blink uses:
+    /// there is no implicit break between two letters or numbers
+    /// (General_Category L* or N*) unless one of them is of class SA.
+    /// Korean then breaks between words (at spaces) instead of between
+    /// syllables, and runs of ideographs and kana stay together.
+    /// Everything else, including punctuation, spaces, symbols, and
+    /// emoji, breaks as under [`WordBreak::Normal`].
+    ///
+    /// The Southeast Asian scripts of class SA keep their own breaks,
+    /// so a Thai word followed by Chinese can still break between the
+    /// two. CSS Text also counts the other characters of class NU, AL,
+    /// AI, and ID as letter units, which would keep an emoji of class
+    /// ID with the Hangul around it but not one of class EB. Blink
+    /// counts neither, and neither does this crate: an emoji between
+    /// two syllables allows a break on either side.
     KeepAll,
     /// CSS `word-break: break-all`. The characters of class AL, HL, NU,
     /// AI, SA (but not its combining marks), CJ, SG, and XX are treated
@@ -982,6 +991,31 @@ mod tests {
             offsets(text, WordBreak::BreakAll),
             [3, 6, 9, 12, 15, 18, 22, 28]
         );
+    }
+
+    #[test]
+    fn keep_all_leaves_southeast_asian_scripts_alone() {
+        // "ภาษาไทย中文": "Thai language" in Thai, then "Chinese" in
+        // Chinese. Blink leaves class SA out of keep-all, so the break
+        // between the Thai run and the ideographs stays, and only the
+        // ideographs keep together.
+        let text = "\u{0E20}\u{0E32}\u{0E29}\u{0E32}\u{0E44}\u{0E17}\u{0E22}\u{4E2D}\u{6587}";
+        assert_eq!(offsets(text, WordBreak::Normal), [21, 24, 27]);
+        assert_eq!(offsets(text, WordBreak::KeepAll), [21, 27]);
+    }
+
+    #[test]
+    fn keep_all_breaks_around_emoji() {
+        // An emoji between two Hangul syllables. U+1F600 is class ID and
+        // U+1F44D class EB. Neither is a letter, so as in Blink both
+        // allow a break on either side.
+        for text in ["\u{D55C}\u{1F600}\u{AD6D}", "\u{D55C}\u{1F44D}\u{AD6D}"] {
+            assert_eq!(offsets(text, WordBreak::KeepAll), [3, 7, 10], "{text:?}");
+            assert_eq!(offsets(text, WordBreak::Normal), [3, 7, 10], "{text:?}");
+        }
+        // A skin tone modifier stays with its base (LB30b).
+        let toned = "\u{D55C}\u{1F44D}\u{1F3FB}\u{AD6D}";
+        assert_eq!(offsets(toned, WordBreak::KeepAll), [3, 11, 14]);
     }
 
     #[test]
