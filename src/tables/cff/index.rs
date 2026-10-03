@@ -46,8 +46,8 @@ impl<'a> Index<'a> {
     ///
     /// Fails with [`Error::Malformed`] when `i` is out of range, when
     /// the entry's offsets are zero or descend, or when the entry ends
-    /// past the data region. The first two report the position of
-    /// offset slot `i`, where entry `i`'s offsets start.
+    /// past the data region. Each reports the position of offset slot
+    /// `i`, where entry `i`'s offsets start.
     pub(crate) fn get(&self, i: usize) -> Result<&'a [u8]> {
         if i >= self.len() {
             return Err(Error::Malformed {
@@ -64,10 +64,8 @@ impl<'a> Index<'a> {
         if a == 0 || b < a {
             return Err(non_monotone());
         }
-        let start = a - 1;
-        let end = b - 1;
-        self.objects.get(start..end).ok_or(Error::Malformed {
-            offset: self.data_start.saturating_add(end),
+        self.objects.get(a - 1..b - 1).ok_or(Error::Malformed {
+            offset: self.slot_position(i),
             context: "CFF INDEX entry past end",
         })
     }
@@ -353,6 +351,26 @@ mod tests {
         table.extend_from_slice(&[0, 1, 1, 0, 2, b'a']);
         let index = read_index(&mut Reader::at(&table, 4).unwrap()).unwrap();
         assert_eq!(get_error_offset(&index, 0), 4 + 3);
+    }
+
+    #[test]
+    fn entry_past_the_data_region_reports_its_offset_slot() {
+        // Five unrelated bytes, then an INDEX with count 2, offSize 2,
+        // offsets [1, 9, 3], and two data bytes. Entry 0 ends past the
+        // data region. It used to report position 22, the end its
+        // offsets imply, past the end of the 16-byte table.
+        let mut table = alloc::vec![0xEE; 5];
+        table.extend_from_slice(&[0, 2, 2, 0, 1, 0, 9, 0, 3, b'a', b'b']);
+        let index = read_index(&mut Reader::at(&table, 5).unwrap()).unwrap();
+        match index.get(0) {
+            Err(Error::Malformed { offset, context }) => {
+                assert_eq!(offset, 5 + 3);
+                assert_eq!(context, "CFF INDEX entry past end");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+        // Entry 1 runs backward, from 9 to 3, and reports slot 1.
+        assert_eq!(get_error_offset(&index, 1), 5 + 3 + 2);
     }
 
     #[test]
