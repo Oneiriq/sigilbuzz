@@ -32,9 +32,9 @@
 //!
 //! A malformed layout structure (a GDEF list or entry, a GSUB or GPOS
 //! lookup or subtable, a Device table, an anchor), vertical metrics
-//! table (`vhea`, `vmtx`, `VORG`, `VVAR`), or `BASE` is left out of the
-//! output, the way HarfBuzz's sanitizer neuters it, instead of failing
-//! the subset. Every piece left out this way is reported in
+//! table (`vhea`, `vmtx`, `VORG`, `VVAR`), `BASE`, or `STAT` is left
+//! out of the output, the way HarfBuzz's sanitizer neuters it, instead
+//! of failing the subset. Every piece left out this way is reported in
 //! [`SubsetOutput::warnings`] with its table, byte offset and reason.
 //!
 //! [`instance()`] treats the vertical metrics tables the same way. A
@@ -227,10 +227,11 @@ const VARIATION_TABLES: [[u8; 4]; 7] = [
 ];
 
 /// Tables the subset always keeps unless they are malformed, when it
-/// leaves them out with a warning: the vertical metrics and `BASE`
-/// (which [`SubsetInput::retain_layout`] can drop too). Strict mode
-/// does not reject one that is missing from the output.
-const KEPT_UNLESS_MALFORMED: [[u8; 4]; 4] = [tag::VHEA, tag::VMTX, tag::VORG, tag::BASE];
+/// leaves them out with a warning: the vertical metrics, `BASE` (which
+/// [`SubsetInput::retain_layout`] can drop too), and `STAT`. Strict
+/// mode does not reject one that is missing from the output.
+const KEPT_UNLESS_MALFORMED: [[u8; 4]; 5] =
+    [tag::VHEA, tag::VMTX, tag::VORG, tag::BASE, base::STAT];
 
 /// Subset configuration.
 #[derive(Debug, Clone)]
@@ -561,8 +562,9 @@ fn push_vertical_tables(
 /// Appends `BASE`, with the glyph ids of its format 2 coordinates
 /// renumbered, unless [`SubsetInput::retain_layout`] drops it, and
 /// `STAT`, which names no glyphs and passes through. Shared by the
-/// `glyf`, CFF, and CFF2 paths. A `BASE` that cannot be walked is left
-/// out and recorded in `warnings`; it never fails the subset.
+/// `glyf`, CFF, and CFF2 paths. A `BASE` that cannot be walked, or a
+/// `STAT` that cannot be read, is left out and recorded in `warnings`;
+/// neither fails the subset.
 fn push_base_and_stat(
     face: &Face<'_>,
     gid_map: &[(GlyphId, GlyphId)],
@@ -575,7 +577,7 @@ fn push_base_and_stat(
             tables.push((tag::BASE, b));
         }
     }
-    if let Some(b) = base::subset_stat(face) {
+    if let Some(b) = base::subset_stat(face, warnings) {
         tables.push((base::STAT, b));
     }
 }
@@ -671,8 +673,8 @@ fn push_layout_and_variation_tables(
 /// are exempt: their own flags decide whether they stay, so dropping
 /// them is intended. `MVAR` is the exception: it has no subset
 /// implementation, so it is exempt only when `retain_variations` drops
-/// it. The vertical metrics tables and `BASE` are exempt too: the
-/// subset always keeps them unless they are malformed, and then
+/// it. The vertical metrics tables, `BASE` and `STAT` are exempt too:
+/// the subset always keeps them unless they are malformed, and then
 /// reports them in its warnings. In permissive mode the rest are
 /// dropped, because their glyph id references would be stale.
 fn check_unhandled_tables(
