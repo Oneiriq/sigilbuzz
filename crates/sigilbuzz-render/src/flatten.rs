@@ -5,6 +5,11 @@
 //! transform from font design units into pixel space is applied here
 //! so the rasterizer never has to think in design units.
 //!
+//! A subpath that ends without `Close` is closed implicitly, the way
+//! fill rules treat open subpaths. An open contour would otherwise
+//! leave an unbalanced edge, and a nonzero or even-odd scanline fill
+//! would streak from it to the edge of the glyph box.
+//!
 //! Quadratic and cubic Beziers are flattened with adaptive midpoint
 //! subdivision. The recursion stops when the maximum perpendicular
 //! distance from the curve to the chord falls below a tolerance
@@ -53,8 +58,10 @@ pub const DEFAULT_TOLERANCE: f32 = 0.25;
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlattenedCurve {
     /// One straight edge from a `LineTo`, or the implicit close-line
-    /// emitted by `Close` when the current point hasn't returned to
-    /// the contour start.
+    /// that ends a contour whose current point hasn't returned to the
+    /// contour start. The close-line comes from `Close`, or from the
+    /// next `MoveTo` or the end of the stream when the contour has no
+    /// `Close`.
     Line(Segment),
     /// Chord chain from one quadratic Bézier (`QuadTo`).
     Quad(Vec<Segment>),
@@ -99,6 +106,12 @@ pub struct Segment {
 /// suitable for scanline rasterization, MSDF generation, or any other
 /// edge-list consumer.
 ///
+/// A contour without `Close` is closed implicitly: when the next
+/// `MoveTo` or the end of `ops` arrives while the current point is
+/// away from the contour start, the same terminator segment is
+/// emitted. Every returned contour is therefore a closed loop, which
+/// is what fill rules assume.
+///
 /// Work is bounded for hostile input: a curve with a NaN or infinite
 /// control point is emitted as its chord, and once 2^20 segments exist
 /// every further curve is emitted as its chord too.
@@ -138,12 +151,42 @@ pub(crate) fn flatten_limited<I>(
 where
     I: IntoIterator<Item = PathOp>,
 {
+    flatten_impl(ops, xform, tolerance, limit, true)
+}
+
+/// [`flatten`] that leaves contours without `Close` open. For callers
+/// that walk a path as a curve instead of filling it, such as the
+/// `<textPath>` arc-length walk, where an implicit close would add a
+/// return leg to the path length.
+pub(crate) fn flatten_open<I>(ops: I, xform: &Affine, tolerance: f32) -> Vec<Segment>
+where
+    I: IntoIterator<Item = PathOp>,
+{
+    flatten_impl(ops, xform, tolerance, MAX_SEGMENTS, false)
+}
+
+/// Shared body of [`flatten_limited`] and [`flatten_open`].
+/// `close_open` selects whether a contour without `Close` gets the
+/// implicit terminator segment at the next `MoveTo` and at the end.
+fn flatten_impl<I>(
+    ops: I,
+    xform: &Affine,
+    tolerance: f32,
+    limit: usize,
+    close_open: bool,
+) -> Vec<Segment>
+where
+    I: IntoIterator<Item = PathOp>,
+{
     let mut segs = Vec::new();
     let mut sx = 0.0_f32;
     let mut sy = 0.0_f32;
     let mut cx = 0.0_f32;
     let mut cy = 0.0_f32;
     let mut have_start = false;
+    // True from a `MoveTo` (or a drawing op after one) until `Close`:
+    // the contour still needs closing.
+    let mut open = false;
     let tol = tolerance.max(1e-3);
     let tol_sq = tol * tol;
     let mut budget = limit;
@@ -151,12 +194,18 @@ where
     for op in ops {
         match op {
             PathOp::MoveTo { x, y } => {
+                if close_open {
+                    if let Some(seg) = closing_segment(open, cx, cy, sx, sy) {
+                        push_segment(&mut segs, &mut budget, seg);
+                    }
+                }
                 let (px, py) = xform.apply(x, y);
                 sx = px;
                 sy = py;
                 cx = px;
                 cy = py;
                 have_start = true;
+                open = true;
             }
             PathOp::LineTo { x, y } => {
                 let (px, py) = xform.apply(x, y);
@@ -172,6 +221,7 @@ where
                 );
                 cx = px;
                 cy = py;
+                open = have_start;
             }
             PathOp::QuadTo {
                 cx: ccx,
@@ -195,6 +245,7 @@ where
                 );
                 cx = p2x;
                 cy = p2y;
+                open = have_start;
             }
             PathOp::CubicTo {
                 c1x,
@@ -223,23 +274,21 @@ where
                 );
                 cx = p3x;
                 cy = p3y;
+                open = have_start;
             }
             PathOp::Close => {
-                if have_start && (cx != sx || cy != sy) {
-                    push_segment(
-                        &mut segs,
-                        &mut budget,
-                        Segment {
-                            x0: cx,
-                            y0: cy,
-                            x1: sx,
-                            y1: sy,
-                        },
-                    );
+                if let Some(seg) = closing_segment(have_start, cx, cy, sx, sy) {
+                    push_segment(&mut segs, &mut budget, seg);
                 }
                 cx = sx;
                 cy = sy;
+                open = false;
             }
+        }
+    }
+    if close_open {
+        if let Some(seg) = closing_segment(open, cx, cy, sx, sy) {
+            push_segment(&mut segs, &mut budget, seg);
         }
     }
     segs
@@ -256,8 +305,10 @@ where
 /// subdivision of that quadratic; a `CubicTo` becomes one
 /// [`FlattenedCurve::Cubic`]; a `Close` that needs an explicit
 /// terminator emits a final `FlattenedCurve::Line` back to the
-/// contour start. `MoveTo` and no-op `Close` (already at start)
-/// produce no entries.
+/// contour start. A contour without `Close` gets the same closing
+/// `FlattenedCurve::Line` when the next `MoveTo` or the end of `ops`
+/// arrives away from the contour start. `MoveTo` and no-op `Close`
+/// (already at start) produce no entries of their own.
 ///
 /// This is what MSDF-style generators want: RGB edge coloring picks
 /// channels per *source curve*, not per chord, so the consumer needs
@@ -302,6 +353,9 @@ where
     let mut cx = 0.0_f32;
     let mut cy = 0.0_f32;
     let mut have_start = false;
+    // True from a `MoveTo` (or a drawing op after one) until `Close`:
+    // the contour still needs closing.
+    let mut open = false;
     let tol = tolerance.max(1e-3);
     let tol_sq = tol * tol;
     // Shared with every curve so the chord output matches `flatten`.
@@ -310,12 +364,17 @@ where
     for op in ops {
         match op {
             PathOp::MoveTo { x, y } => {
+                if let Some(seg) = closing_segment(open, cx, cy, sx, sy) {
+                    budget = budget.saturating_sub(1);
+                    out.push(FlattenedCurve::Line(seg));
+                }
                 let (px, py) = xform.apply(x, y);
                 sx = px;
                 sy = py;
                 cx = px;
                 cy = py;
                 have_start = true;
+                open = true;
             }
             PathOp::LineTo { x, y } => {
                 let (px, py) = xform.apply(x, y);
@@ -328,6 +387,7 @@ where
                 }));
                 cx = px;
                 cy = py;
+                open = have_start;
             }
             PathOp::QuadTo {
                 cx: ccx,
@@ -353,6 +413,7 @@ where
                 out.push(FlattenedCurve::Quad(segs));
                 cx = p2x;
                 cy = p2y;
+                open = have_start;
             }
             PathOp::CubicTo {
                 c1x,
@@ -383,23 +444,36 @@ where
                 out.push(FlattenedCurve::Cubic(segs));
                 cx = p3x;
                 cy = p3y;
+                open = have_start;
             }
             PathOp::Close => {
-                if have_start && (cx != sx || cy != sy) {
+                if let Some(seg) = closing_segment(have_start, cx, cy, sx, sy) {
                     budget = budget.saturating_sub(1);
-                    out.push(FlattenedCurve::Line(Segment {
-                        x0: cx,
-                        y0: cy,
-                        x1: sx,
-                        y1: sy,
-                    }));
+                    out.push(FlattenedCurve::Line(seg));
                 }
                 cx = sx;
                 cy = sy;
+                open = false;
             }
         }
     }
+    if let Some(seg) = closing_segment(open, cx, cy, sx, sy) {
+        out.push(FlattenedCurve::Line(seg));
+    }
     out
+}
+
+/// The segment that closes a contour, from the current point
+/// `(cx, cy)` back to the contour start `(sx, sy)`. `None` when
+/// `active` is false (no contour to close) or the current point is
+/// already at the start.
+fn closing_segment(active: bool, cx: f32, cy: f32, sx: f32, sy: f32) -> Option<Segment> {
+    (active && (cx != sx || cy != sy)).then_some(Segment {
+        x0: cx,
+        y0: cy,
+        x1: sx,
+        y1: sy,
+    })
 }
 
 const MAX_DEPTH: u32 = 16;

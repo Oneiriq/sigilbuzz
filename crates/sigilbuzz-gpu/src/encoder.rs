@@ -180,6 +180,11 @@ fn ops_are_finite(ops: &[PathOp]) -> bool {
 /// segment midpoint. Cubics are subdivided per
 /// [`crate::flatten::cubic_to_quads`].
 ///
+/// A subpath without `Close` is closed implicitly at the next `MoveTo`
+/// and at the end of `ops`, the way a fill treats it. The band coverage
+/// test counts crossings, so an open contour would leave its rows with
+/// a nonzero winding all the way to the edge of the glyph box.
+///
 /// Flattening stops early once the list holds more than
 /// [`MAX_SEGMENTS`] segments. The caller rejects such a list.
 fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
@@ -195,6 +200,9 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
         }
         match *op {
             PathOp::MoveTo { x, y } => {
+                if have_subpath {
+                    close_subpath(&mut out, current, start);
+                }
                 start = Vec2::new(x, y);
                 current = start;
                 have_subpath = true;
@@ -255,22 +263,34 @@ fn flatten_to_quads(ops: &[PathOp], tolerance: f32) -> Vec<QuadSegment> {
                 current = p3;
             }
             PathOp::Close => {
-                if have_subpath && (current.x != start.x || current.y != start.y) {
-                    let end = start;
-                    let mid = Vec2::new((current.x + end.x) * 0.5, (current.y + end.y) * 0.5);
-                    out.push(QuadSegment {
-                        p0: current,
-                        p1: mid,
-                        p2: end,
-                    });
-                    current = end;
+                if have_subpath && close_subpath(&mut out, current, start) {
+                    current = start;
                 }
                 have_subpath = false;
             }
         }
     }
+    if have_subpath && out.len() <= MAX_SEGMENTS {
+        close_subpath(&mut out, current, start);
+    }
 
     out
+}
+
+/// Appends the straight segment from `current` back to the subpath
+/// `start`, as a degenerate quadratic, unless `current` is already
+/// there. Returns true when a segment was added.
+fn close_subpath(out: &mut Vec<QuadSegment>, current: Vec2, start: Vec2) -> bool {
+    if current.x == start.x && current.y == start.y {
+        return false;
+    }
+    let mid = Vec2::new((current.x + start.x) * 0.5, (current.y + start.y) * 0.5);
+    out.push(QuadSegment {
+        p0: current,
+        p1: mid,
+        p2: start,
+    });
+    true
 }
 
 /// Tight bbox covering the convex hull (and therefore the curve) of
@@ -694,6 +714,57 @@ mod tests {
             PathOp::LineTo { x: 50.0, y: 100.0 },
             PathOp::Close,
         ]
+    }
+
+    /// A triangle and a square, each with or without `Close`.
+    fn two_contours(close: bool) -> Vec<PathOp> {
+        let mut ops = alloc::vec![
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 100.0, y: 0.0 },
+            PathOp::LineTo { x: 50.0, y: 100.0 },
+        ];
+        if close {
+            ops.push(PathOp::Close);
+        }
+        ops.extend([
+            PathOp::MoveTo { x: 200.0, y: 0.0 },
+            PathOp::LineTo { x: 300.0, y: 0.0 },
+            PathOp::LineTo { x: 300.0, y: 100.0 },
+            PathOp::LineTo { x: 200.0, y: 100.0 },
+        ]);
+        if close {
+            ops.push(PathOp::Close);
+        }
+        ops
+    }
+
+    #[test]
+    fn open_subpath_is_closed_at_the_end() {
+        let open = &two_contours(false)[..3];
+        let segs = flatten_to_quads(open, SlugOptions::DEFAULT_CUBIC_TOLERANCE);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(
+            segs[2],
+            quad((50.0, 100.0), (25.0, 50.0), (0.0, 0.0)),
+            "the close-line is a degenerate quadratic back to the start"
+        );
+    }
+
+    #[test]
+    fn open_subpath_is_closed_at_the_next_moveto() {
+        let open = flatten_to_quads(&two_contours(false), SlugOptions::DEFAULT_CUBIC_TOLERANCE);
+        let closed = flatten_to_quads(&two_contours(true), SlugOptions::DEFAULT_CUBIC_TOLERANCE);
+        assert_eq!(open.len(), 7);
+        assert_eq!(open, closed);
+        // The triangle closes before the square starts.
+        assert_eq!(open[2].p2, Vec2::new(0.0, 0.0));
+        assert_eq!(open[3].p0, Vec2::new(200.0, 0.0));
+        // The whole encoding matches too.
+        let opts = SlugOptions::default();
+        assert_eq!(
+            encode_outline_ops(&two_contours(false), &opts),
+            encode_outline_ops(&two_contours(true), &opts)
+        );
     }
 
     #[test]
