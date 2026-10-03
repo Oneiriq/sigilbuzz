@@ -717,41 +717,36 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // other; `ignorables::zero_width` zeroes it after positioning, as
     // HarfBuzz does, so a kerning pair that involves one cannot leave
     // it with an advance.
+    //
+    // One `FontAdvances` serves the whole call: the origins, the
+    // fallback spaces, and the `stch` stretch below ask it too, and it
+    // keeps each glyph's phantom-point advance once computed.
+    let advances = position::FontAdvances::new(face, font.coords(), vmtx)?;
     if is_vertical {
-        if let Some(ref vmtx) = vmtx {
-            // VVAR carries per-glyph vertical-advance deltas;
-            // applies only when the font is variable and the user
-            // requested non-default coords. Without VVAR, a varied
-            // glyf font takes the advance from the glyph's varied
-            // phantom points.
-            let advances = position::FontAdvances::new(face, font.coords(), Some(*vmtx))?;
-            for glyph in &mut glyphs {
-                // HarfBuzz convention: vertical y_advance is negative
-                // in both TTB and BTT, so the pen moves downward; BTT
-                // only differs by the final reversal.
-                let raw = advances.v_advance(vmtx, glyph.glyph_id)?;
-                glyph.y_advance = raw.saturating_neg();
-                glyph.x_advance = 0;
-            }
-        } else {
-            // No vmtx: fall back to an em-square advance so the run
-            // still stacks deterministically. Use the hhea-reported
-            // line height as a reasonable default.
-            let hhea = face.hhea()?;
-            let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
-            for glyph in &mut glyphs {
-                glyph.y_advance = -fallback;
-                glyph.x_advance = 0;
-            }
+        // VVAR carries per-glyph vertical-advance deltas; applies
+        // only when the font is variable and the user requested
+        // non-default coords. Without VVAR, a varied glyf font takes
+        // the advance from the glyph's varied phantom points. With
+        // no vmtx at all, fall back to an em-square advance so the
+        // run still stacks deterministically, using the hhea-reported
+        // line height as a reasonable default.
+        let hhea = face.hhea()?;
+        let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
+        for glyph in &mut glyphs {
+            // HarfBuzz convention: vertical y_advance is negative in
+            // both TTB and BTT, so the pen moves downward; BTT only
+            // differs by the final reversal.
+            let raw = advances.v_advance(glyph.glyph_id).unwrap_or(fallback);
+            glyph.y_advance = raw.saturating_neg();
+            glyph.x_advance = 0;
         }
         // Offsets are relative to each glyph's horizontal origin.
-        position::subtract_vertical_origins(face, font.coords(), &mut glyphs)?;
+        position::subtract_vertical_origins(face, &advances, &mut glyphs)?;
     } else {
         // Without HVAR, a varied glyf font takes the advance from the
         // glyph's varied phantom points.
-        let advances = position::FontAdvances::new(face, font.coords(), None)?;
         for glyph in &mut glyphs {
-            glyph.x_advance = advances.h_advance(glyph.glyph_id)?;
+            glyph.x_advance = advances.h_advance(glyph.glyph_id);
         }
     }
 
@@ -781,6 +776,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         zero_ignorables: ignorables::zeroes(flags),
         fallback_marks,
         flags: flag_cx,
+        advances: &advances,
     };
     position::position(&inputs, &mut glyphs, &seg_glyph_ranges, &mut budget)?;
 
@@ -799,20 +795,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     ignorables::hide(&mut glyphs, space, flags, level);
     // The Arabic shaper's `postprocess_glyphs`: the `stch` stretch.
     if has_stch {
-        // The stretch asks for the advances of glyphs in the run:
-        // look them up once, so a malformed glyph fails the shape.
-        let advances = position::FontAdvances::new(face, font.coords(), None)?;
-        let mut widths = Vec::with_capacity(glyphs.len());
-        for g in &glyphs {
-            widths.push((g.glyph_id, advances.h_advance(g.glyph_id)?));
-        }
-        widths.sort_unstable();
-        widths.dedup();
-        let advance = |id: u32| {
-            widths
-                .binary_search_by_key(&id, |&(gid, _)| gid)
-                .map_or(0, |i| widths[i].1)
-        };
+        let advance = |id: u32| advances.h_advance(id);
         let stretch = stch::Stretch {
             rtl: direction == Direction::Rtl,
             advance: &advance,

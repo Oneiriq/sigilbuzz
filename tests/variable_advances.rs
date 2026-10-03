@@ -3,19 +3,32 @@
 //!
 //! - A horizontal run never reads `vmtx`, so a malformed one cannot fail
 //!   it, at the default instance or away from it.
+//! - A direction reads `gvar` only when its own variations table (`HVAR`
+//!   or `VVAR`) is missing, so the usual horizontal variable font, with
+//!   `HVAR` and no `VVAR`, shapes horizontal runs without `gvar`.
+//! - When a glyph's varied phantom points cannot be computed, the glyph
+//!   keeps its `hmtx` advance, the font's own default, and the rest of
+//!   the run is unaffected. Drawing the glyph still fails.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 
 const CJK: &[u8] = include_bytes!("fixtures/noto_sans_cjk_jp_uvs_subset.otf");
 const HAHMLET: &[u8] = include_bytes!("fixtures/hahmlet_gvar_subset.ttf");
+const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
+
+fn be16(font: &[u8], at: usize) -> usize {
+    usize::from(u16::from_be_bytes([font[at], font[at + 1]]))
+}
+
+fn be32(font: &[u8], at: usize) -> usize {
+    u32::from_be_bytes([font[at], font[at + 1], font[at + 2], font[at + 3]]) as usize
+}
 
 /// The offset and length of table `tag` in `font`.
 fn table(font: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
-    let be32 = |at: usize| u32::from_be_bytes([font[at], font[at + 1], font[at + 2], font[at + 3]]);
-    let num_tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
-    (0..num_tables).find_map(|i| {
+    (0..be16(font, 4)).find_map(|i| {
         let rec = 12 + 16 * i;
-        (&font[rec..rec + 4] == tag).then(|| (be32(rec + 8) as usize, be32(rec + 12) as usize))
+        (&font[rec..rec + 4] == tag).then(|| (be32(font, rec + 8), be32(font, rec + 12)))
     })
 }
 
@@ -106,5 +119,88 @@ fn varied_extents_ignore_a_broken_vmtx() {
     assert_eq!(
         advances(&face, &coords, text).unwrap(),
         advances(&intact, &coords, text).unwrap()
+    );
+}
+
+/// `font` with its `HVAR` record renamed, so varied advances come from
+/// the phantom points.
+fn without_hvar(font: &[u8]) -> Vec<u8> {
+    let mut bytes = font.to_vec();
+    for i in 0..be16(&bytes, 4) {
+        let rec = 12 + 16 * i;
+        if &bytes[rec..rec + 4] == b"HVAR" {
+            bytes[rec..rec + 4].copy_from_slice(b"HVAX");
+        }
+    }
+    bytes
+}
+
+/// `font` with its `gvar` major version set to 2, which no parser
+/// accepts.
+fn with_gvar_v2(font: &[u8]) -> Vec<u8> {
+    let mut bytes = font.to_vec();
+    let (gvar, _) = table(&bytes, b"gvar").unwrap();
+    bytes[gvar..gvar + 2].copy_from_slice(&2u16.to_be_bytes());
+    bytes
+}
+
+/// The offset in `font` of glyph `gid`'s `GlyphVariationData`.
+fn glyph_variation_data(font: &[u8], gid: usize) -> usize {
+    let (gvar, _) = table(font, b"gvar").unwrap();
+    let data_array = be32(font, gvar + 16);
+    let entry = if be16(font, gvar + 14) & 1 != 0 {
+        be32(font, gvar + 20 + 4 * gid)
+    } else {
+        2 * be16(font, gvar + 20 + 2 * gid)
+    };
+    gvar + data_array + entry
+}
+
+#[test]
+fn a_horizontal_run_with_hvar_never_reads_gvar() {
+    let intact_blob = Blob::new(RUBIK);
+    let intact = Face::parse(&intact_blob, 0).unwrap();
+    let bytes = with_gvar_v2(RUBIK);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    assert!(face.gvar().is_err());
+    let heaviest = [1.0];
+    let got = advances(&face, &heaviest, "Hello").unwrap();
+    assert_eq!(got, advances(&intact, &heaviest, "Hello").unwrap());
+    // HVAR did move them.
+    assert_ne!(got, advances(&intact, &[], "Hello").unwrap());
+}
+
+#[test]
+fn a_gvar_that_does_not_parse_leaves_the_static_advances() {
+    let bytes = with_gvar_v2(&without_hvar(HAHMLET));
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    assert!(face.hvar().unwrap().is_none());
+    let coords = hahmlet_coords(&face, 900.0);
+    // hmtx: A 834, O 891, space 248.
+    assert_eq!(advances(&face, &coords, "AO ").unwrap(), [834, 891, 248]);
+}
+
+#[test]
+fn a_malformed_glyph_keeps_its_static_advance() {
+    let intact_bytes = without_hvar(HAHMLET);
+    let intact_blob = Blob::new(&intact_bytes);
+    let intact = Face::parse(&intact_blob, 0).unwrap();
+    // Point glyph 4's (`O`) serialized data past its end.
+    let mut bytes = intact_bytes.clone();
+    let o = glyph_variation_data(&bytes, 4);
+    bytes[o + 2..o + 4].copy_from_slice(&0xFFFFu16.to_be_bytes());
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let coords = hahmlet_coords(&face, 900.0);
+    assert!(face.glyph_outline_at_coords(4, &coords).is_err());
+
+    let want = advances(&intact, &coords, "AO ").unwrap();
+    // The phantom points widen A and the space at this weight.
+    assert_ne!((want[0], want[2]), (834, 248));
+    assert_eq!(
+        advances(&face, &coords, "AO ").unwrap(),
+        [want[0], 891, want[2]]
     );
 }
