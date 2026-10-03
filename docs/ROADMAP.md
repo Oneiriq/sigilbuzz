@@ -34,8 +34,8 @@ These are smaller pieces that are not scheduled yet.
   of their scripts, where HarfBuzz reads the Script property. Characters of those
   scripts outside the blocks (Latin Extended Additional, Arabic Extended-A, the CJK
   extensions past B, the Mongolian Supplement) shape as `Other`.
-- HarfBuzz's default GSUB stages also hold `rvrn` (in a stage of its own), the automatic
-  fraction features and `rand`. sigilbuzz applies none of them.
+- HarfBuzz's default GSUB stages also hold the automatic fraction features and `rand`.
+  sigilbuzz applies neither.
 
 ## Known bugs
 

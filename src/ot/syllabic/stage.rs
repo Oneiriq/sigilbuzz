@@ -154,10 +154,10 @@ pub(crate) fn has_feature(
 /// Adds the caller's features to a shaper's last stage, where HarfBuzz
 /// puts them (`hb_ot_shape_collect_features`): each enabled feature
 /// the stage does not list already and `excluded` does not rule out,
-/// as a global feature. The direction features are ruled out too, since
-/// the pipeline runs them first. A feature with a value above 1 selects
-/// an alternate. Those are returned instead, to run on their own after
-/// the stage.
+/// as a global feature. `rvrn` and the direction features are ruled
+/// out too, since the pipeline runs them first. A feature with a value
+/// above 1 selects an alternate. Those are returned instead, to run on
+/// their own after the stage.
 pub(crate) fn add_user_features(
     stage: &mut Vec<StageFeature>,
     features: &[Feature],
@@ -168,7 +168,7 @@ pub(crate) fn add_user_features(
         let known = stage.iter().any(|s| s.tag == f.tag)
             || alternates.iter().any(|&(t, _)| t == f.tag)
             || excluded(f.tag)
-            || matches!(&f.tag, b"ltra" | b"ltrm" | b"rtla" | b"rtlm");
+            || matches!(&f.tag, b"rvrn" | b"ltra" | b"ltrm" | b"rtla" | b"rtlm");
         if known || f.value == 0 {
             continue;
         }

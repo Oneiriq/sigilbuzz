@@ -484,11 +484,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // their own, so the direction features join the default ones.
         let plain_default = !shaper_ran_defaults && !seg_arabic;
 
-        // A required feature whose tag no later pass applies runs
-        // first, as HarfBuzz runs it in GSUB stage 0. The direction
-        // features (`ltra` and `ltrm`, or `rtla`, then `rtlm` on
-        // backward runs) follow in a stage of their own, except for the
-        // default shaper, which runs them with its default features.
+        // GSUB stage 0 runs first: `rvrn`, and a required feature
+        // whose tag no later pass applies, merged by lookup index as
+        // HarfBuzz merges a stage. The direction features (`ltra` and
+        // `ltrm`, or `rtla`, then `rtlm` on backward runs) follow in a
+        // stage of their own, except for the default shaper, which runs
+        // them with its default features.
         if let Some(ref gsub) = gsub {
             let plan = required::SegmentPlan {
                 script: seg.script,
@@ -503,7 +504,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             };
             let priority = seg.script_priority;
             let gdef = gdef.as_ref();
-            required::apply_unscheduled(gsub, &mut seg_glyphs, gdef, priority, &plan, &mut budget);
+            required::apply_stage_zero(gsub, &mut seg_glyphs, gdef, priority, &plan, &mut budget);
             let direction_tags = rotate::direction_features(target_direction);
             let table = JoinerTable::for_segment(plan.arabic);
             if !plain_default {

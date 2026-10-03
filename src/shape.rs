@@ -148,7 +148,6 @@ mod vowel_constraints;
 use aat::apply_kerx_format4;
 pub(crate) use cluster::{merge_clusters, merge_grapheme_clusters};
 pub(crate) use features::{apply_gsub_feature_masked, feature_would_substitute};
-use gsub::apply_gsub_lookup;
 use gsub_parsed::filter_for_lookup;
 pub(crate) use joiners::JoinerTable;
 pub use pipeline::shape;

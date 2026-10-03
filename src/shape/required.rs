@@ -1,21 +1,33 @@
-//! Language system required features whose tag the pipeline never
-//! applies.
+//! GSUB stage 0: `rvrn`, and the language system's required feature
+//! when the pipeline never applies its tag.
 //!
-//! HarfBuzz (`hb_ot_map_builder_t::compile` in `hb-ot-map.cc`) runs a
-//! language system's required feature on every glyph. When the shaper
-//! plan enables a feature with the same tag, the required feature's
-//! lookups join that feature's stage; otherwise they run in stage 0,
-//! before any other GSUB lookup. A tag the caller turned off counts as
-//! not enabled, so the required feature still runs, in stage 0.
+//! HarfBuzz (`hb_ot_shape_collect_features` in `hb-ot-shape.cc`)
+//! enables `rvrn` for every shaper, in a stage of its own before the
+//! direction features. `rvrn` is how a variable font swaps glyphs by
+//! region of the design space: the feature usually has no lookups of
+//! its own, and a FeatureVariations record gives it some (see
+//! [`crate::tables::layout::feature_variations`]).
+//!
+//! HarfBuzz (`hb_ot_map_builder_t::compile` in `hb-ot-map.cc`) also
+//! runs a language system's required feature on every glyph. When the
+//! shaper plan enables a feature with the same tag, the required
+//! feature's lookups join that feature's stage; otherwise they run in
+//! stage 0, with `rvrn`. A tag the caller turned off counts as not
+//! enabled, so the required feature still runs, in stage 0.
 //!
 //! sigilbuzz merges a required feature into its tag's lookups in
-//! [`crate::ot::layout_select`], which covers the first case. This
-//! module covers the second: before a segment's first GSUB lookup,
-//! [`apply_unscheduled`] runs the required feature when no pass of
-//! the segment's pipeline will apply its tag.
+//! [`crate::ot::layout_select`], which covers the first case, and a
+//! required `rvrn` with it. Before a segment's first GSUB lookup,
+//! [`apply_stage_zero`] runs `rvrn` unless the caller turned it off,
+//! and the required feature when no pass of the segment's pipeline
+//! will apply its tag, as one stage: each lookup once, in lookup-index
+//! order.
 
+use alloc::vec::Vec;
+
+use super::gsub::{apply_gsub_stage, StageLookup};
 use super::joiners::FeatureFlags;
-use super::{apply_gsub_lookup, feature_disabled, Feature, LookupBudget};
+use super::{feature_disabled, Feature, LookupBudget};
 use crate::buffer::Glyph;
 use crate::ot::indic::indic_config_for;
 use crate::ot::indic::shaper::INDIC_FEATURES;
@@ -24,6 +36,9 @@ use crate::ot::use_shaper::{HANGUL_FEATURES, USE_BASIC_FEATURES, USE_TOPOGRAPHIC
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 use crate::unicode::Script;
+
+/// The feature of GSUB stage 0, which every segment runs first.
+pub(super) const RVRN: [u8; 4] = *b"rvrn";
 
 /// The default GSUB chain every segment runs (`run_default_gsub`).
 const DEFAULT_CHAIN: &[[u8; 4]] = &[
@@ -108,6 +123,7 @@ impl SegmentPlan<'_> {
             return true;
         }
         let default = DEFAULT_CHAIN.contains(&tag)
+            || tag == RVRN
             || (self.vertical && VERTICAL_CHAIN.contains(&tag))
             || (self.backward && tag == *b"rtlm")
             || self.direction_features.contains(&tag);
@@ -123,13 +139,14 @@ impl SegmentPlan<'_> {
     }
 }
 
-/// Runs the required feature of the language system the segment
-/// selects, when its tag is one `plan` never applies. Call before the
+/// Runs GSUB stage 0 of the segment: `rvrn` unless the caller turned
+/// it off, and the required feature of the language system the segment
+/// selects when its tag is one `plan` never applies. Call before the
 /// segment's first GSUB lookup. The lookups spend `budget`, the one
 /// the whole [`super::shape`] call shares.
-pub(super) fn apply_unscheduled(
+pub(super) fn apply_stage_zero(
     gsub: &Gsub<'_>,
-    glyphs: &mut alloc::vec::Vec<Glyph>,
+    glyphs: &mut Vec<Glyph>,
     gdef: Option<&Gdef<'_>>,
     script_priority: &[[u8; 4]],
     plan: &SegmentPlan<'_>,
@@ -138,20 +155,44 @@ pub(super) fn apply_unscheduled(
     if glyphs.is_empty() {
         return;
     }
-    let Some((tag, lookups)) = crate::ot::layout_select::required_feature(
+    let features = gsub.features();
+    let required = crate::ot::layout_select::required_feature(
         gsub.script_list(),
-        &gsub.features(),
+        &features,
         gsub.language_tags(),
         script_priority,
-    ) else {
-        return;
+    )
+    .filter(|&(tag, _)| !plan.applies(tag))
+    .map(|(_, lookups)| lookups)
+    .unwrap_or_default();
+    let rvrn = if feature_disabled(plan.features, RVRN) {
+        Vec::new()
+    } else {
+        crate::ot::layout_select::feature_lookup_indices(
+            gsub.script_list(),
+            &features,
+            gsub.language_tags(),
+            RVRN,
+            script_priority,
+        )
+        .unwrap_or_default()
     };
-    if plan.applies(tag) {
+    let mut indices: Vec<u16> = required.into_iter().chain(rvrn).collect();
+    if indices.is_empty() {
         return;
     }
-    for lookup in lookups {
-        apply_gsub_lookup(gsub, lookup, glyphs, gdef, 0, FeatureFlags::AUTO, budget);
-    }
+    indices.sort_unstable();
+    indices.dedup();
+    let stage: Vec<StageLookup> = indices
+        .into_iter()
+        .map(|index| StageLookup {
+            index,
+            flags: FeatureFlags::AUTO,
+            alternate: 0,
+            masked: false,
+        })
+        .collect();
+    apply_gsub_stage(gsub, &stage, glyphs, gdef, None, budget);
 }
 
 #[cfg(test)]
@@ -197,6 +238,17 @@ mod tests {
             value: 1,
         }];
         assert!(plan(Script::Latin, &on, &[]).applies(*b"onum"));
+    }
+
+    #[test]
+    fn rvrn_counts_as_applied_unless_disabled() {
+        assert!(plan(Script::Latin, &[], &[]).applies(RVRN));
+        assert!(plan(Script::Devanagari, &[], &[]).applies(RVRN));
+        let off = [Feature {
+            tag: RVRN,
+            value: 0,
+        }];
+        assert!(!plan(Script::Latin, &off, &[]).applies(RVRN));
     }
 
     #[test]

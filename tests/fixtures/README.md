@@ -12,6 +12,8 @@ Fonts used by the integration tests.
   Fischer, OFL 1.1, from the `googlefonts/rubik` repository. `tests/variable_fonts.rs`
   uses it to exercise the `fvar`, `avar`, and `HVAR` advance-delta pipeline and `gvar`
   outline deltas against rustybuzz's output at the same axis coordinate.
+  `tests/feature_variations_gsub_parity.rs` uses its GSUB 1.1 FeatureVariations, which
+  give `rvrn` heavier currency signs from `wght` 500 on.
 - `var_kern.ttf`: a synthetic 768-byte variable font with three glyphs ("A", "V", and an
   unkerned "B" that lets a subset drop a glyph), one `wght` axis (400 to 900), and a GPOS
   kern pair whose `x_advance` delta is -100 at wght=900 and 0 at wght=400, through a

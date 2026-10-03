@@ -240,11 +240,21 @@ pub(super) fn apply_gsub_features_merged_budgeted(
 
 /// GSUB feature tags that `shape()` already dispatches by name,
 /// so the user-override walk should skip them rather than
-/// double-apply.
+/// double-apply. `rvrn` runs in GSUB stage 0 (see
+/// [`super::required::apply_stage_zero`]).
 fn is_handled_gsub_tag(tag: [u8; 4]) -> bool {
     matches!(
         &tag,
-        b"liga" | b"kern" | b"ccmp" | b"locl" | b"rlig" | b"clig" | b"calt" | b"rclt" | b"vert"
+        b"liga"
+            | b"kern"
+            | b"ccmp"
+            | b"locl"
+            | b"rlig"
+            | b"clig"
+            | b"calt"
+            | b"rclt"
+            | b"vert"
+            | b"rvrn"
     )
 }
 
