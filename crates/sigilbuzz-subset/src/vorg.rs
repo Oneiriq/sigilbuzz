@@ -1,15 +1,18 @@
-//! `VORG` subsetting.
+//! `VORG` subsetting and instancing.
 //!
 //! `VORG` gives the y coordinate of the vertical origin: a font-wide
 //! `defaultVertOriginY`, plus a sorted list of per-glyph overrides.
 //! The core parser can only answer "what is the origin of this glyph",
 //! which cannot tell a glyph without an override from one whose
-//! override equals the default, so the rewrite here reads the raw
+//! override equals the default, so both rewrites here read the raw
 //! entries.
 //!
 //! A subset keeps the default and the overrides of the kept glyphs,
-//! renumbered and sorted by new glyph id.
+//! renumbered and sorted by new glyph id. An instance adds the `VVAR`
+//! vertical origin deltas at the chosen coordinates, the way HarfBuzz
+//! adds them when it reads `VORG` from a variable font.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
@@ -133,6 +136,42 @@ fn remap(bytes: &[u8], gid_map: &[(GlyphId, GlyphId)]) -> Result<Vec<u8>, Error>
     Ok(vorg.emit(&entries))
 }
 
+/// Adds the vertical origin `delta` of each glyph `0..num_glyphs` to
+/// the `VORG` in `bytes` and rounds the sum to the nearest unit. The
+/// default stays: a glyph whose origin moves away from it gains an
+/// entry, and every source entry for a real glyph stays, with its new
+/// value. Entries for glyph ids past `num_glyphs` are dropped.
+pub(crate) fn bake_vorg(
+    bytes: &[u8],
+    num_glyphs: u16,
+    delta: impl Fn(GlyphId) -> f32,
+) -> Result<Vec<u8>, Error> {
+    let vorg = Vorg::parse(bytes)?;
+    let mut origins: BTreeMap<u16, i16> = BTreeMap::new();
+    for (gid, y) in vorg.entries() {
+        if gid < num_glyphs {
+            origins.entry(gid).or_insert(y);
+        }
+    }
+    for gid in 0..num_glyphs {
+        // A zero delta leaves an entry as it is and a glyph without
+        // one on the default, so it needs no special case.
+        let base = origins.get(&gid).copied().unwrap_or(vorg.default_y);
+        let baked = (f32::from(base) + delta(gid))
+            .round()
+            .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+        match origins.get_mut(&gid) {
+            Some(y) => *y = baked,
+            None if baked != vorg.default_y => {
+                origins.insert(gid, baked);
+            }
+            None => {}
+        }
+    }
+    let entries: Vec<(u16, i16)> = origins.into_iter().collect();
+    Ok(vorg.emit(&entries))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +266,29 @@ mod tests {
         let sink = Warnings::default();
         assert!(subset_vorg(&face, &[(0, 0)], &sink).is_none());
         assert!(sink.into_sorted().is_empty());
+    }
+
+    #[test]
+    fn bake_adds_rounded_deltas_and_keeps_the_default() {
+        let src = vorg_bytes(880, &[(1, 900), (2, 910), (7, 1)]);
+        // Glyph 0 moves off the default and gains an entry, glyph 1
+        // keeps its entry with a new value, glyph 2 keeps its entry
+        // unchanged, and glyph 3 rounds back onto the default. Glyph
+        // 7 is past the glyph count and goes.
+        let delta = |gid: u16| match gid {
+            0 => 12.4,
+            1 => -0.6,
+            3 => 0.4,
+            _ => 0.0,
+        };
+        let out = bake_vorg(&src, 4, delta).unwrap();
+        assert_eq!(decode(&out), (880, vec![(0, 892), (1, 899), (2, 910)]));
+    }
+
+    #[test]
+    fn bake_saturates_at_the_field_range() {
+        let src = vorg_bytes(i16::MAX - 1, &[]);
+        let out = bake_vorg(&src, 1, |_| 1e6).unwrap();
+        assert_eq!(decode(&out).1, [(0, i16::MAX)]);
     }
 }
