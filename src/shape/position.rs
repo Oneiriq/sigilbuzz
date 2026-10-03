@@ -518,7 +518,7 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             vmtx: if vertical { self.vmtx.as_ref() } else { None },
         };
         let pp = glyf
-            .phantom_points_at_coords(&loca, id, &metrics, Some(&gvar), self.coords)
+            .phantom_points_at_coords(&loca, id, Some(&gvar), self.coords, &metrics)
             .ok()?;
         let advance = if vertical {
             pp[2].1 - pp[3].1

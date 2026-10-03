@@ -264,7 +264,7 @@ fn a_crafted_use_my_metrics_tree_stops_at_the_shared_budget() {
         vmtx: None,
     };
     assert_over_budget(timed("phantom points", || {
-        glyf.phantom_points_at_coords(&loca, c.root, &metrics, Some(&gvar), &[1.0])
+        glyf.phantom_points_at_coords(&loca, c.root, Some(&gvar), &[1.0], &metrics)
     }));
 }
 
