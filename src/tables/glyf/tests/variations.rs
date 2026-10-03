@@ -319,3 +319,126 @@ fn phantom_points_stop_at_a_self_referencing_composite() {
         .unwrap();
     assert_points(&pp[..2], &[(0.0, 0.0), (600.0, 0.0)]);
 }
+
+/// A composite tree over the square: glyph 0 is the square and glyph
+/// `k` names glyph `k - 1` `fanout` times, with `flags` on every
+/// component, up to the root, glyph `levels`. Every glyph has `tuples`
+/// tuples at peak 1.0 over all of its points, with zero deltas.
+fn composite_tree(levels: u16, fanout: u16, tuples: usize, flags: u16) -> [Vec<u8>; 3] {
+    let mut glyphs = vec![square()];
+    let mut variations = Vec::new();
+    for level in 1..=levels {
+        let comps: Vec<Comp> = (0..fanout)
+            .map(|_| Comp {
+                flags: COMP_ARGS_ARE_XY_VALUES | flags,
+                glyph: level - 1,
+                args: (0, 0),
+                scale: None,
+            })
+            .collect();
+        glyphs.push(build_composite(&comps));
+    }
+    for glyph in 0..=levels {
+        let count = if glyph == 0 {
+            8
+        } else {
+            usize::from(fanout) + 4
+        };
+        let tuple = || Tuple {
+            peak: vec![1.0],
+            points: None,
+            deltas: vec![(0, 0); count],
+        };
+        variations.push((0..tuples).map(|_| tuple()).collect());
+    }
+    let (glyf, loca) = build_tables(&glyphs);
+    [glyf, loca, build_gvar(1, &variations)]
+}
+
+#[test]
+fn an_outline_walk_charges_every_visit_to_one_budget() {
+    // Two levels of three components over the square, two tuples per
+    // glyph. A tuple costs one unit for its header and one per point
+    // (its own points plus the four phantom points): the root and the
+    // three middle composites 2 + 2 * 7 each, the nine squares 2 + 2 * 8.
+    let [glyf_bytes, loca_bytes, gvar_bytes] = composite_tree(2, 3, 2, 0);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    let cx = FlattenCtx {
+        loca: &loca,
+        metrics: None,
+        var: Variation::new(Some(&gvar), &[1.0]),
+    };
+    let mut budget = FlattenBudget::new();
+    let mut flat = FlatGlyph::default();
+    glyf.flatten(
+        &cx,
+        2,
+        None,
+        &Transform::identity(),
+        &mut flat,
+        0,
+        &mut budget,
+    )
+    .unwrap();
+    assert_eq!(flat.points.len(), 9 * 4);
+    assert_eq!(MAX_TUPLE_WORK - budget.work, 4 * 16 + 9 * 18);
+}
+
+#[test]
+fn a_composite_tree_shares_its_gvar_budget() {
+    // 225 squares and 16 composites, 64 tuples each: 64 + 64 * 8 units
+    // per square and 64 + 64 * 19 per composite, about 150,000 in all.
+    // Each glyph's own tuples fit a budget of 100,000; the tree's do
+    // not, whether drawn or walked for its USE_MY_METRICS phantoms.
+    let [glyf_bytes, loca_bytes, gvar_bytes] = composite_tree(2, 15, 64, COMP_USE_MY_METRICS);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 3).unwrap();
+    let glyf = Glyf::new(&glyf_bytes);
+    let gvar = Gvar::parse(&gvar_bytes).unwrap();
+    for (glyph, points) in [(0, 4), (1, 15), (2, 15)] {
+        let mut work = 100_000;
+        assert!(gvar
+            .phantom_deltas(glyph, &[1.0], points, &mut work)
+            .is_ok());
+    }
+    let hmtx_bytes = build_hmtx(&[(600, 0), (600, 0), (600, 0)]);
+    let hmtx = Hmtx::parse(&hmtx_bytes, 3, 3).unwrap();
+    let metrics = PhantomMetrics {
+        hmtx: &hmtx,
+        vmtx: None,
+    };
+    let cx = FlattenCtx {
+        loca: &loca,
+        metrics: Some(&metrics),
+        var: Variation::new(Some(&gvar), &[1.0]),
+    };
+    let small = || FlattenBudget {
+        work: 100_000,
+        ..FlattenBudget::new()
+    };
+    let assert_cap = |r: Result<()>| {
+        assert!(
+            matches!(
+                r,
+                Err(Error::Malformed {
+                    context: "gvar variation work exceeds the cap",
+                    ..
+                })
+            ),
+            "{r:?}"
+        );
+    };
+    let identity = Transform::identity();
+    let mut flat = FlatGlyph::default();
+    let drawn = glyf.flatten(&cx, 2, None, &identity, &mut flat, 0, &mut small());
+    assert_cap(drawn.map(drop));
+    let phantoms = glyf.varied_phantoms(&cx, &metrics, 2, 0, &mut small());
+    assert_cap(phantoms.map(drop));
+    // The full cap covers the tree.
+    let mut flat = FlatGlyph::default();
+    let mut budget = FlattenBudget::new();
+    assert!(glyf
+        .flatten(&cx, 2, None, &identity, &mut flat, 0, &mut budget)
+        .is_ok());
+}

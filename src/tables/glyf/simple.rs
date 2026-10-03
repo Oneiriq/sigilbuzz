@@ -118,9 +118,13 @@ pub(super) fn flatten_simple_glyph(
     let deltas = match var {
         Some((v, glyph_id)) => {
             let points: Vec<(i32, i32)> = xs.iter().copied().zip(ys.iter().copied()).collect();
-            varied = v
-                .gvar
-                .glyph_point_deltas(glyph_id, v.coords, &points, &end_pts)?;
+            varied = v.gvar.glyph_point_deltas_with(
+                glyph_id,
+                v.coords,
+                &points,
+                &end_pts,
+                &mut budget.work,
+            )?;
             Some(varied.as_slice())
         }
         None => deltas,
