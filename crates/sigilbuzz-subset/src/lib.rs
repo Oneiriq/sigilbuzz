@@ -62,6 +62,9 @@
 //!   `BaseCoord` renumbered. A coordinate whose reference glyph is not
 //!   kept becomes format 1 with the same value. A `BASE` that cannot be
 //!   walked is left out and reported in [`SubsetOutput::warnings`].
+//!   `BASE` is an OpenType layout table, so
+//!   [`SubsetInput::retain_layout`] set to `false` drops it with the
+//!   others.
 //! - Layout (`GSUB`, `GPOS`, `GDEF`): kept verbatim when every glyph
 //!   survives, rewritten at the byte level when glyph IDs change. Set
 //!   [`SubsetInput::retain_layout`] to `false` to drop them. A rebuilt
@@ -205,8 +208,9 @@ pub type GlyphId = u16;
 /// drops along with the glyph instructions.
 const HINTING_TABLES: [[u8; 4]; 3] = [*b"cvt ", *b"fpgm", *b"prep"];
 
-/// Layout tables that [`SubsetInput::retain_layout`] keeps or drops.
-const LAYOUT_TABLES: [[u8; 4]; 3] = [tag::GSUB, tag::GPOS, tag::GDEF];
+/// Layout tables that [`SubsetInput::retain_layout`] keeps or drops:
+/// the OpenType layout tables `GSUB`, `GPOS`, `GDEF` and `BASE`.
+const LAYOUT_TABLES: [[u8; 4]; 4] = [tag::GSUB, tag::GPOS, tag::GDEF, tag::BASE];
 
 /// Variable-font tables that [`SubsetInput::retain_variations`] keeps
 /// or drops. `MVAR` has no subset implementation: only the CFF identity
@@ -223,8 +227,9 @@ const VARIATION_TABLES: [[u8; 4]; 7] = [
 ];
 
 /// Tables the subset always keeps unless they are malformed, when it
-/// leaves them out with a warning: the vertical metrics and `BASE`.
-/// Strict mode does not reject one that is missing from the output.
+/// leaves them out with a warning: the vertical metrics and `BASE`
+/// (which [`SubsetInput::retain_layout`] can drop too). Strict mode
+/// does not reject one that is missing from the output.
 const KEPT_UNLESS_MALFORMED: [[u8; 4]; 4] = [tag::VHEA, tag::VMTX, tag::VORG, tag::BASE];
 
 /// Subset configuration.
@@ -244,13 +249,15 @@ pub struct SubsetInput {
     /// (the default). If false, encountering an unsupported table
     /// surfaces [`SubsetError::Unsupported`].
     pub drop_unhandled: bool,
-    /// If true (the default), retain layout tables (`GSUB`, `GPOS`,
-    /// `GDEF`), for `glyf`, CFF, and CFF2 fonts alike. They pass
-    /// through verbatim when every glyph survives and are rewritten for
-    /// the new glyph ids otherwise. When false, layout tables are
-    /// dropped. Callers that
-    /// explicitly want a hint-free, layout-free subset (e.g. embedded
-    /// PDF font streams) should set this to false.
+    /// If true (the default), retain the OpenType layout tables
+    /// (`GSUB`, `GPOS`, `GDEF`, and `BASE`), for `glyf`, CFF, and CFF2
+    /// fonts alike. They pass through verbatim when every glyph
+    /// survives and are rewritten for the new glyph ids otherwise. When
+    /// false, the layout tables are dropped. `STAT` and the vertical
+    /// metrics tables (`vhea`, `vmtx`, `VORG`) are not layout tables
+    /// and stay either way. Callers that explicitly want a hint-free,
+    /// layout-free subset (e.g. embedded PDF font streams) should set
+    /// this to false.
     pub retain_layout: bool,
     /// If true (the default), retain variable-font tables (`fvar`,
     /// `avar`, `gvar`, `HVAR`, `VVAR`, `VARC`) so the resulting subset
@@ -502,7 +509,7 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
 
     let warnings = Warnings::default();
     push_vertical_tables(face, &kept, &gid_map, &warnings, &mut tables);
-    push_base_and_stat(face, &gid_map, &warnings, &mut tables);
+    push_base_and_stat(face, &gid_map, input, &warnings, &mut tables);
     push_layout_and_variation_tables(face, &kept, &gid_map, input, &warnings, &mut tables)?;
 
     // TrueType hinting tables. Kept glyph instructions call functions
@@ -552,18 +559,21 @@ fn push_vertical_tables(
 }
 
 /// Appends `BASE`, with the glyph ids of its format 2 coordinates
-/// renumbered, and `STAT`, which names no glyphs and passes through.
-/// Shared by the `glyf`, CFF, and CFF2 paths. A `BASE` that cannot be
-/// walked is left out and recorded in `warnings`; it never fails the
-/// subset.
+/// renumbered, unless [`SubsetInput::retain_layout`] drops it, and
+/// `STAT`, which names no glyphs and passes through. Shared by the
+/// `glyf`, CFF, and CFF2 paths. A `BASE` that cannot be walked is left
+/// out and recorded in `warnings`; it never fails the subset.
 fn push_base_and_stat(
     face: &Face<'_>,
     gid_map: &[(GlyphId, GlyphId)],
+    input: &SubsetInput,
     warnings: &Warnings,
     tables: &mut Vec<([u8; 4], Vec<u8>)>,
 ) {
-    if let Some(b) = base::subset_base(face, gid_map, warnings) {
-        tables.push((tag::BASE, b));
+    if input.retain_layout {
+        if let Some(b) = base::subset_base(face, gid_map, warnings) {
+            tables.push((tag::BASE, b));
+        }
     }
     if let Some(b) = base::subset_stat(face) {
         tables.push((base::STAT, b));
@@ -765,7 +775,7 @@ fn cff_non_identity(
 
     let warnings = Warnings::default();
     push_vertical_tables(face, kept, &gid_map, &warnings, &mut tables);
-    push_base_and_stat(face, &gid_map, &warnings, &mut tables);
+    push_base_and_stat(face, &gid_map, input, &warnings, &mut tables);
     push_layout_and_variation_tables(face, kept, &gid_map, input, &warnings, &mut tables)?;
     check_unhandled_tables(face, &tables, input)?;
 

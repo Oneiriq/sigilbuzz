@@ -367,6 +367,35 @@ fn dropping_variations_drops_vvar_and_keeps_the_metrics() {
 }
 
 #[test]
+fn dropping_layout_drops_base_and_keeps_stat_and_the_vertical_tables() {
+    // BASE is an OpenType layout table, so it goes with GSUB, GPOS and
+    // GDEF, on the rebuilding path and when every glyph is kept, in
+    // strict mode too. STAT and the vertical metrics are not layout
+    // tables.
+    let src = Face::parse_bytes(NOTO_KR, 0).unwrap();
+    let all: Vec<u16> = (0..src.maxp().unwrap().num_glyphs).collect();
+    let some = subset_text(NOTO_KR, "\u{300C}", |_| {}).gid_map;
+    let some: Vec<u16> = some.iter().map(|&(old, _)| old).collect();
+    for gids in [all, some] {
+        for drop_unhandled in [true, false] {
+            let input = SubsetInput {
+                gids: gids.clone(),
+                retain_layout: false,
+                drop_unhandled,
+                ..SubsetInput::default()
+            };
+            let out = subset(&src, &input).expect("subset succeeds");
+            for table in [tag::BASE, tag::GSUB, tag::GPOS, tag::GDEF] {
+                assert!(!has(&out.bytes, table));
+            }
+            for table in [STAT, tag::VHEA, tag::VMTX, tag::VORG] {
+                assert!(has(&out.bytes, table));
+            }
+        }
+    }
+}
+
+#[test]
 fn malformed_vertical_tables_are_left_out_with_warnings() {
     let src = Face::parse_bytes(NOTO_KR, 0).unwrap();
     let cut = |table: [u8; 4], len: usize| {

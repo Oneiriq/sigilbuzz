@@ -64,8 +64,8 @@ pub struct Args {
     /// Retain instructions / hints (default: drop).
     #[arg(long)]
     pub retain_hints: bool,
-    /// Drop layout tables (`GSUB` / `GPOS` / `GDEF`). Defaults to
-    /// keeping them where the closure permits.
+    /// Drop the OpenType layout tables (`GSUB` / `GPOS` / `GDEF` /
+    /// `BASE`). Defaults to keeping them where the closure permits.
     #[arg(long)]
     pub drop_layout: bool,
     /// Drop variable-font tables (`fvar`/`avar`/`gvar`/`HVAR`/`VVAR`/
