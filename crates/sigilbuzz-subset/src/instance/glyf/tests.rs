@@ -147,3 +147,237 @@ fn round_half_up_rounds_toward_positive_infinity_on_ties() {
     assert_eq!(round_half_up(1.0e12), i32::MAX);
     assert_eq!(round_half_up(-1.0e12), i32::MIN);
 }
+
+// ---------------------------------------------------------------------------
+// Whole bakes of hand-built fonts.
+// ---------------------------------------------------------------------------
+
+fn be16(out: &mut Vec<u8>, v: u16) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+/// One component record: `flags` (`MORE_COMPONENTS` added unless
+/// `last`), `glyph`, word arguments, then `transform` as F2DOT14s.
+fn record(flags: u16, glyph: u16, a: i16, b: i16, transform: &[f32], last: bool) -> Vec<u8> {
+    let mut r = Vec::new();
+    let more = if last { 0 } else { COMP_MORE_COMPONENTS };
+    be16(&mut r, flags | COMP_ARG_1_AND_2_ARE_WORDS | more);
+    be16(&mut r, glyph);
+    r.extend_from_slice(&a.to_be_bytes());
+    r.extend_from_slice(&b.to_be_bytes());
+    for &v in transform {
+        r.extend_from_slice(&((v * 16384.0) as i16).to_be_bytes());
+    }
+    r
+}
+
+/// A composite glyph body of `records`.
+fn composite_of(records: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = vec![0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0];
+    for r in records {
+        body.extend_from_slice(r);
+    }
+    body
+}
+
+/// A one-axis (`wght`) TrueType font of `glyphs`, glyph 1 a triangle
+/// (0, 0), (10, 0), (10, 10) that wght 900 moves 3 right and its top
+/// 3 up.
+fn one_axis_font(glyphs: &[Vec<u8>]) -> Vec<u8> {
+    let n = glyphs.len() as u16;
+    let mut glyf = Vec::new();
+    let mut loca = Vec::new();
+    for g in glyphs {
+        loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+        glyf.extend_from_slice(g);
+        while glyf.len() % 4 != 0 {
+            glyf.push(0);
+        }
+    }
+    loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+    // gvar: one tuple for glyph 1, every point, x then y as words.
+    let mut tuple = vec![0x40 | 6];
+    for v in [3i16, 3, 3, 0, 0, 0, 0] {
+        tuple.extend_from_slice(&v.to_be_bytes());
+    }
+    tuple.push(0x40 | 6);
+    for v in [0i16, 0, 3, 0, 0, 0, 0] {
+        tuple.extend_from_slice(&v.to_be_bytes());
+    }
+    let mut data = Vec::new();
+    be16(&mut data, 1); // one tuple, no shared points
+    be16(&mut data, 10); // data offset
+    be16(&mut data, tuple.len() as u16);
+    be16(&mut data, 0x8000); // embedded peak
+    be16(&mut data, 0x4000); // wght 1
+    data.extend_from_slice(&tuple);
+    let mut gvar = Vec::new();
+    for v in [1u16, 0, 1, 0] {
+        be16(&mut gvar, v);
+    }
+    let offsets_end = 20 + 4 * (u32::from(n) + 1);
+    gvar.extend_from_slice(&offsets_end.to_be_bytes());
+    be16(&mut gvar, n);
+    be16(&mut gvar, 1); // long offsets
+    gvar.extend_from_slice(&offsets_end.to_be_bytes());
+    for gid in 0..=u32::from(n) {
+        let at = if gid >= 2 { data.len() as u32 } else { 0 };
+        gvar.extend_from_slice(&at.to_be_bytes());
+    }
+    gvar.extend_from_slice(&data);
+    let mut fvar = Vec::new();
+    for v in [1u16, 0, 16, 2, 1, 20, 0, 0] {
+        be16(&mut fvar, v);
+    }
+    fvar.extend_from_slice(b"wght");
+    for v in [100i32, 400, 900] {
+        fvar.extend_from_slice(&(v << 16).to_be_bytes());
+    }
+    be16(&mut fvar, 0);
+    be16(&mut fvar, 256);
+    let mut head = vec![0u8; 54];
+    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    head[50..52].copy_from_slice(&1u16.to_be_bytes());
+    let mut hhea = vec![0u8; 36];
+    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hhea[34..36].copy_from_slice(&n.to_be_bytes());
+    let mut maxp = 0x0000_5000u32.to_be_bytes().to_vec();
+    be16(&mut maxp, n);
+    let mut hmtx = Vec::new();
+    for _ in 0..n {
+        be16(&mut hmtx, 500);
+        be16(&mut hmtx, 0);
+    }
+    crate::sfnt::build(
+        0x0001_0000,
+        &[
+            (tag::HEAD, head),
+            (tag::HHEA, hhea),
+            (tag::MAXP, maxp),
+            (tag::HMTX, hmtx),
+            (tag::LOCA, loca),
+            (tag::GLYF, glyf),
+            (tag::FVAR, fvar),
+            (tag::GVAR, gvar),
+        ],
+    )
+}
+
+/// The triangle at glyph 1, with an `instructions` byte stream.
+fn triangle(instructions: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    for v in [1u16, 0, 0, 10, 10, 2] {
+        be16(&mut b, v);
+    }
+    be16(&mut b, instructions.len() as u16);
+    b.extend_from_slice(instructions);
+    b.extend_from_slice(&[0x01, 0x01, 0x01]); // on curve, word deltas
+    for v in [0i16, 10, 0, 0, 0, 10] {
+        b.extend_from_slice(&v.to_be_bytes());
+    }
+    b
+}
+
+/// The header box of glyph `gid` in a bake.
+fn baked_box(bake: &GlyfLocaBake, gid: u16) -> [i16; 4] {
+    let b = bake.body(gid);
+    let at = |i: usize| i16::from_be_bytes([b[i], b[i + 1]]);
+    [at(2), at(4), at(6), at(8)]
+}
+
+/// Bakes `font` at wght 900 and returns the bake and its warnings.
+fn bake_at_900(font: &[u8]) -> (GlyfLocaBake, Vec<crate::SubsetWarning>) {
+    let face = Face::parse_bytes(font, 0).unwrap();
+    let n = face.maxp().unwrap().num_glyphs;
+    let warnings = Warnings::default();
+    let bake = bake_glyf_loca(&face, &[1.0], n, &warnings).unwrap();
+    (bake, warnings.into_sorted())
+}
+
+#[test]
+fn a_huge_component_tree_bakes_each_glyph_once() {
+    // Glyph 2 + i draws the glyph before it twice, 5 units apart, for
+    // 24 levels, then 50 glyphs each draw the last level twice: a draw
+    // of one of those visits 2^25 triangles. Each extent is worked out
+    // once, and nothing is drawn through the core walk.
+    const LEVELS: u16 = 24;
+    const TOPS: u16 = 50;
+    let mut glyphs = vec![Vec::new(), triangle(&[])];
+    for i in 0..LEVELS + TOPS {
+        let child = 1 + i.min(LEVELS);
+        glyphs.push(composite_of(&[
+            record(XY, child, 0, 0, &[], false),
+            record(XY, child, 5, 0, &[], true),
+        ]));
+    }
+    let (bake, warnings) = bake_at_900(&one_axis_font(&glyphs));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (computed, drawn) = bake.extent_work;
+    // The triangle, every level, and every top glyph, once each.
+    assert_eq!(computed, u64::from(1 + LEVELS + TOPS));
+    assert_eq!(drawn, 0);
+    // The moved triangle spans (3, 0) to (13, 13); each level adds 5.
+    let top = 2 + LEVELS;
+    assert_eq!(
+        baked_box(&bake, top),
+        [3, 0, 13 + 5 * (LEVELS as i16 + 1), 13]
+    );
+}
+
+#[test]
+fn skewed_and_matched_composites_draw_within_one_budget() {
+    // Glyph 2 skews the triangle: drawn through the core walk, exactly.
+    // Glyphs 3 to 26 build a tree of 2^24 triangles; glyph 27 skews it,
+    // too costly to draw, so it takes the box around the skewed box;
+    // glyph 28 places it by matching points, so it keeps its source box.
+    let skew = [1.0, 0.0, 0.5, 1.0]; // x' = x + 0.5 y
+    let mut glyphs = vec![
+        Vec::new(),
+        triangle(&[]),
+        composite_of(&[record(XY | COMP_WE_HAVE_A_TWO_BY_TWO, 1, 0, 0, &skew, true)]),
+    ];
+    for i in 0..24u16 {
+        let child = if i == 0 { 1 } else { 2 + i };
+        glyphs.push(composite_of(&[
+            record(XY, child, 0, 0, &[], false),
+            record(XY, child, 5, 0, &[], true),
+        ]));
+    }
+    let big = 26;
+    glyphs.push(composite_of(&[record(
+        XY | COMP_WE_HAVE_A_TWO_BY_TWO,
+        big,
+        0,
+        0,
+        &skew,
+        true,
+    )]));
+    let mut matched = composite_of(&[
+        record(XY, 1, 0, 0, &[], false),
+        record(0, big, 0, 0, &[], true),
+    ]);
+    matched[2..10].copy_from_slice(&[0, 1, 0, 2, 0, 3, 0, 4]);
+    glyphs.push(matched);
+    let (bake, warnings) = bake_at_900(&one_axis_font(&glyphs));
+    let (_, drawn) = bake.extent_work;
+    assert_eq!(
+        drawn, 1,
+        "only the small skewed composite is drawn: {warnings:?}"
+    );
+    // The moved triangle (3, 0), (13, 0), (13, 13) skewed: x + y / 2.
+    assert_eq!(baked_box(&bake, 2), [3, 0, 20, 13]);
+    // The tree spans (3, 0) to (133, 13); its skewed box's corners.
+    assert_eq!(baked_box(&bake, 27), [3, 0, 140, 13]);
+    assert_eq!(baked_box(&bake, 28), [1, 2, 3, 4]);
+    let contexts: Vec<_> = warnings.iter().map(|w| w.context).collect();
+    assert_eq!(
+        contexts,
+        [
+            "glyf composite too costly to draw for its bounds",
+            "glyf composite too costly to draw for its bounds",
+        ],
+        "{warnings:?}"
+    );
+}

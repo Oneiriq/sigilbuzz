@@ -33,14 +33,14 @@
 
 use alloc::vec::Vec;
 
-use sigilbuzz::tables::glyf::PhantomMetrics;
-use sigilbuzz::tables::{tag, Glyf, Gvar, Hmtx, Loca, OutlineSink, Reader, Vmtx};
+use sigilbuzz::tables::{tag, Glyf, Gvar, Hmtx, Loca, Reader, Vmtx};
 use sigilbuzz::Face;
 
 use crate::gvar_partial::GlyphPoints;
 use crate::util::round_half_up;
 use crate::warnings::Warnings;
 use crate::SubsetError;
+use extents::{Extents, NoExtent};
 
 // ---------------------------------------------------------------------------
 // glyf + loca bake
@@ -70,6 +70,10 @@ pub(super) struct GlyfLocaBake {
     /// points. `None` when the source has no `gvar`: nothing moves the
     /// outlines, and the advances come from `HVAR` and `VVAR` instead.
     pub(super) metrics: Option<Vec<GlyphMetrics>>,
+    /// Extents worked out and composites drawn through the core walk,
+    /// for the tests that bound the bake's work.
+    #[cfg(test)]
+    pub(super) extent_work: (u64, u64),
 }
 
 /// The tables one glyph bake reads.
@@ -82,6 +86,8 @@ struct BakeCtx<'a, 'f> {
     hmtx: &'a Hmtx<'f>,
     vmtx: Option<&'a Vmtx<'f>>,
     warnings: &'a Warnings,
+    /// The extents of the glyphs composites draw, each worked out once.
+    extents: Extents,
 }
 
 /// Bakes every glyph of `face` at the post-avar `coords`.
@@ -108,6 +114,7 @@ pub(super) fn bake_glyf_loca(
         hmtx: &hmtx,
         vmtx: vmtx.as_ref(),
         warnings,
+        extents: Extents::new(num_glyphs),
     };
 
     let mut new_bodies: Vec<Vec<u8>> = Vec::with_capacity(num_glyphs as usize);
@@ -124,6 +131,8 @@ pub(super) fn bake_glyf_loca(
         loca: loca_out,
         long_loca,
         metrics: gvar.is_some().then_some(metrics),
+        #[cfg(test)]
+        extent_work: (cx.extents.computed.get(), cx.extents.drawn.get()),
     })
 }
 
@@ -333,26 +342,20 @@ impl BakeCtx<'_, '_> {
     }
 
     /// The bounding box of composite `gid` drawn at the instance
-    /// coordinates, rounded. A composite that cannot be drawn keeps
-    /// the box in its source header `body`, which starts `start` bytes
-    /// into `glyf`, and is reported.
+    /// coordinates, rounded (see [`extents`]). A composite that cannot
+    /// be drawn keeps the box in its source header `body`, which starts
+    /// `start` bytes into `glyf`, and is reported.
     fn composite_bounds(&self, gid: u16, body: &[u8], start: usize) -> Option<[i16; 4]> {
-        let metrics = PhantomMetrics {
-            hmtx: self.hmtx,
-            vmtx: self.vmtx,
-        };
-        let mut sink = BoundsSink::default();
-        let drawn = self.glyf.outline_at_coords(
-            self.loca,
-            gid,
-            self.gvar,
-            self.coords,
-            Some(&metrics),
-            &mut sink,
-        );
-        match drawn {
-            Ok(_) => sink.bounds(),
-            Err(e) => {
+        match self.extents.of(self, gid) {
+            Ok(extent) => extents::rounded(extent.bounds),
+            Err(no) => {
+                let e = match no {
+                    NoExtent::Broken(e) => e,
+                    NoExtent::TooDeep => sigilbuzz::Error::Malformed {
+                        offset: 0,
+                        context: "glyf composite recursion exceeded cap",
+                    },
+                };
                 self.warnings.parse_error(
                     tag::GLYF,
                     start,
@@ -380,49 +383,6 @@ fn metrics_from(pp: &[(f32, f32); 4], bounds: Option<[i16; 4]>) -> GlyphMetrics 
         tsb: clamp_i16(round_half_up(pp[2].1 - f32::from(y_max))),
         bounds,
     }
-}
-
-/// An [`OutlineSink`] that keeps the extremes of every point it is
-/// given. A TrueType outline passes on every contour point, on or off
-/// the curve, and nothing outside them, so these are the extremes of
-/// the glyph's points.
-#[derive(Debug, Default)]
-struct BoundsSink {
-    extremes: Option<[f32; 4]>,
-}
-
-impl BoundsSink {
-    fn add(&mut self, x: f32, y: f32) {
-        let e = self.extremes.get_or_insert([x, y, x, y]);
-        e[0] = e[0].min(x);
-        e[1] = e[1].min(y);
-        e[2] = e[2].max(x);
-        e[3] = e[3].max(y);
-    }
-
-    fn bounds(&self) -> Option<[i16; 4]> {
-        self.extremes
-            .map(|e| e.map(|v| clamp_i16(round_half_up(v))))
-    }
-}
-
-impl OutlineSink for BoundsSink {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
-        self.add(cx, cy);
-        self.add(x, y);
-    }
-    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
-        self.add(c1x, c1y);
-        self.add(c2x, c2y);
-        self.add(x, y);
-    }
-    fn close(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -766,9 +726,11 @@ const COMP_WE_HAVE_A_SCALE: u16 = 0x0008;
 const COMP_MORE_COMPONENTS: u16 = 0x0020;
 const COMP_WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
 const COMP_WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+const COMP_SCALED_COMPONENT_OFFSET: u16 = 0x0800;
+const COMP_UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 
 /// One component record of a composite glyph body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CompRecord {
     /// Offset of the record's flags in the body.
     start: usize,
@@ -776,10 +738,15 @@ pub(crate) struct CompRecord {
     end: usize,
     /// The record's flags.
     flags: u16,
+    /// The glyph the component draws.
+    glyph: u16,
     /// `arg1`: the x offset, or in anchor mode the parent's point.
     arg1: i32,
     /// `arg2`: the y offset, or in anchor mode the component's point.
     arg2: i32,
+    /// The 2x2 as the core walk reads it: `[xx, yx, xy, yy]`, where
+    /// `x' = xx * x + xy * y` and `y' = yx * x + yy * y`.
+    matrix: [f32; 4],
 }
 
 impl CompRecord {
@@ -798,6 +765,14 @@ impl CompRecord {
             (self.arg1, self.arg2)
         }
     }
+
+    /// True when the offset goes through the 2x2
+    /// (`SCALED_COMPONENT_OFFSET` set and `UNSCALED_COMPONENT_OFFSET`
+    /// clear), as the core walk reads it.
+    const fn scales_offset(&self) -> bool {
+        self.flags & (COMP_SCALED_COMPONENT_OFFSET | COMP_UNSCALED_COMPONENT_OFFSET)
+            == COMP_SCALED_COMPONENT_OFFSET
+    }
 }
 
 /// Reads every component record of the composite glyph `body`.
@@ -809,7 +784,7 @@ pub(crate) fn read_component_records(body: &[u8]) -> Result<Vec<CompRecord>, Sub
     loop {
         let start = r.position();
         let flags = r.read_u16().map_err(|_| CTX)?;
-        let _glyph = r.read_u16().map_err(|_| CTX)?;
+        let glyph = r.read_u16().map_err(|_| CTX)?;
         let xy = flags & COMP_ARGS_ARE_XY_VALUES != 0;
         let (arg1, arg2) = if flags & COMP_ARG_1_AND_2_ARE_WORDS != 0 {
             if xy {
@@ -830,22 +805,26 @@ pub(crate) fn read_component_records(body: &[u8]) -> Result<Vec<CompRecord>, Sub
             let b = r.read_u8().map_err(|_| CTX)?;
             (i32::from(a), i32::from(b))
         };
-        let transform_len = if flags & COMP_WE_HAVE_A_SCALE != 0 {
-            2
+        let mut f2dot14 = || r.read_f2dot14().map_err(|_| CTX);
+        let matrix = if flags & COMP_WE_HAVE_A_SCALE != 0 {
+            let s = f2dot14()?;
+            [s, 0.0, 0.0, s]
         } else if flags & COMP_WE_HAVE_AN_X_AND_Y_SCALE != 0 {
-            4
+            let (xx, yy) = (f2dot14()?, f2dot14()?);
+            [xx, 0.0, 0.0, yy]
         } else if flags & COMP_WE_HAVE_A_TWO_BY_TWO != 0 {
-            8
+            [f2dot14()?, f2dot14()?, f2dot14()?, f2dot14()?]
         } else {
-            0
+            [1.0, 0.0, 0.0, 1.0]
         };
-        r.skip(transform_len).map_err(|_| CTX)?;
         out.push(CompRecord {
             start,
             end: r.position(),
             flags,
+            glyph,
             arg1,
             arg2,
+            matrix,
         });
         if flags & COMP_MORE_COMPONENTS == 0 {
             break;
@@ -905,6 +884,8 @@ fn rewrite_components(body: &[u8], components: &[CompRecord], deltas: &[(f32, f3
 pub(crate) fn clamp_i16(v: i32) -> i16 {
     v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
+
+mod extents;
 
 #[cfg(test)]
 mod tests;
