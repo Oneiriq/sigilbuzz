@@ -161,17 +161,18 @@ impl GlyfLocaBake {
     /// for a simple glyph whose points this bake moved, the moved
     /// points. `None` when the glyph cannot be read.
     pub(super) fn glyph_points(&self, src_body: &[u8], gid: u16) -> Option<GlyphPoints> {
-        if src_body.is_empty() {
+        let nc = src_body
+            .first_chunk::<10>()
+            .map_or(0, |h| i16::from_be_bytes([h[0], h[1]]));
+        if nc == 0 {
+            // No outline (see `bake_glyph`): the phantom points only.
             return Some(GlyphPoints {
                 end_pts: Vec::new(),
                 before: Vec::new(),
                 after: None,
             });
         }
-        if src_body.len() < 10 {
-            return None;
-        }
-        if i16::from_be_bytes([src_body[0], src_body[1]]) < 0 {
+        if nc < 0 {
             let components = read_component_records(src_body).ok()?;
             return Some(GlyphPoints {
                 end_pts: Vec::new(),
@@ -246,22 +247,23 @@ fn bake_glyph(cx: &BakeCtx<'_, '_>, gid: u16) -> Result<(Vec<u8>, GlyphMetrics),
         }
         _ => &[][..],
     };
-    if body.is_empty() {
-        // No outline: only the phantom points move. HarfBuzz reads a
-        // zero header for such a glyph.
+    // A body too short for a header is no outline, and HarfBuzz reads
+    // a zero header for it; a header with no contours is no outline
+    // either. Only the phantom points move, from the header's box.
+    let (nc, header_x_min, header_y_max) = match body.first_chunk::<10>() {
+        Some(h) => (
+            i16::from_be_bytes([h[0], h[1]]),
+            i16::from_be_bytes([h[2], h[3]]),
+            i16::from_be_bytes([h[8], h[9]]),
+        ),
+        None => (0, 0, 0),
+    };
+    if nc == 0 {
         let deltas = cx.deltas(gid, &[], &[]);
-        let pp = cx.phantoms(gid, 0, 0, &deltas);
+        let pp = cx.phantoms(gid, header_x_min, header_y_max, &deltas);
         return Ok((Vec::new(), metrics_from(&pp, None)));
     }
-    if body.len() < 10 {
-        return Err(SubsetError::Unsupported(
-            "instance: glyf body shorter than 10 bytes",
-        ));
-    }
-    let header_x_min = i16::from_be_bytes([body[2], body[3]]);
-    let header_y_max = i16::from_be_bytes([body[8], body[9]]);
-    let nc = i16::from_be_bytes([body[0], body[1]]);
-    if nc >= 0 {
+    if nc > 0 {
         let glyph = SimpleGlyph::decode(body)?;
         let points = glyph.points();
         let deltas = cx.deltas(gid, &points, &glyph.end_pts);
@@ -413,11 +415,12 @@ pub(crate) struct SimpleGlyph {
     pub(crate) xs: Vec<i32>,
     /// Absolute y of every point.
     pub(crate) ys: Vec<i32>,
+    /// The hinting instructions.
+    pub(crate) instructions: Vec<u8>,
 }
 
 impl SimpleGlyph {
-    /// Decodes the simple glyph `body`, header included. Instructions
-    /// are skipped.
+    /// Decodes the simple glyph `body`, header included.
     pub(crate) fn decode(body: &[u8]) -> Result<Self, SubsetError> {
         let mut r = Reader::new(body);
         let nc = r
@@ -441,17 +444,17 @@ impl SimpleGlyph {
             .map(|e| usize::from(e) + 1)
             .unwrap_or(0);
 
-        // Instructions: read past them. The instance leaves hints out.
-        // They reference the source's `cvt` / `prep` / `fpgm`, which
-        // ride through verbatim, but the variable-font deltas mean the
-        // hinted grid no longer matches the outline. Stripping is the
-        // safest default.
+        // Instructions: kept, as HarfBuzz's instancer keeps them unless
+        // asked to drop hinting, with the `cvt`, `fpgm` and `prep` they
+        // run against.
         let instr_len = r
             .read_u16()
             .map_err(|_| SubsetError::Unsupported("instance: instructionLength"))?
             as usize;
-        r.skip(instr_len)
-            .map_err(|_| SubsetError::Unsupported("instance: instructions"))?;
+        let instructions = r
+            .read_bytes(instr_len)
+            .map_err(|_| SubsetError::Unsupported("instance: instructions"))?
+            .to_vec();
 
         // Flags with REPEAT expansion.
         let mut flags = Vec::with_capacity(total_points);
@@ -493,6 +496,7 @@ impl SimpleGlyph {
             flags,
             xs,
             ys,
+            instructions,
         })
     }
 
@@ -538,7 +542,7 @@ fn read_coords(
 
 /// Re-encodes `glyph` with `deltas` (one per point, in point order;
 /// extra entries are ignored, missing ones count as zero) added and
-/// rounded. Returns the body, without instructions, and its bounding
+/// rounded. Returns the body, instructions included, and its bounding
 /// box, `None` when it has no points.
 fn encode_baked_simple(glyph: &SimpleGlyph, deltas: &[(f32, f32)]) -> (Vec<u8>, Option<[i16; 4]>) {
     let mut xs: Vec<i32> = Vec::with_capacity(glyph.xs.len());
@@ -568,16 +572,17 @@ fn points_bounds(xs: &[i32], ys: &[i32]) -> Option<[i16; 4]> {
     ])
 }
 
-/// Encodes a simple glyph with `glyph`'s contours and flags at the
-/// points `xs` / `ys`, with header bounds `bounds` (zero when `None`)
-/// and no instructions.
+/// Encodes a simple glyph with `glyph`'s contours, instructions and
+/// flags at the points `xs` / `ys`, with header bounds `bounds` (zero
+/// when `None`).
 pub(crate) fn encode_simple(
     glyph: &SimpleGlyph,
     xs: &[i32],
     ys: &[i32],
     bounds: Option<[i16; 4]>,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + glyph.end_pts.len() * 2 + xs.len() * 5);
+    let mut out =
+        Vec::with_capacity(12 + glyph.end_pts.len() * 2 + glyph.instructions.len() + xs.len() * 5);
     out.extend_from_slice(&glyph.num_contours.to_be_bytes());
     for v in bounds.unwrap_or([0; 4]) {
         out.extend_from_slice(&v.to_be_bytes());
@@ -585,8 +590,9 @@ pub(crate) fn encode_simple(
     for &e in &glyph.end_pts {
         out.extend_from_slice(&e.to_be_bytes());
     }
-    // No instructions.
-    out.extend_from_slice(&0u16.to_be_bytes());
+    // Instructions longer than 65,535 bytes cannot have been read.
+    out.extend_from_slice(&(glyph.instructions.len() as u16).to_be_bytes());
+    out.extend_from_slice(&glyph.instructions);
     encode_simple_coords(xs, ys, &glyph.flags, &mut out);
     out
 }

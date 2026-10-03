@@ -107,7 +107,7 @@ fn metrics_come_from_the_phantom_points_and_the_new_bounds() {
 }
 
 #[test]
-fn simple_glyphs_keep_on_curve_and_overlap_bits_and_drop_hints() {
+fn simple_glyphs_keep_on_curve_and_overlap_bits_and_hints() {
     // Two points, the first flagged on curve and OVERLAP_SIMPLE, with a
     // one-byte instruction stream.
     let mut body = Vec::new();
@@ -132,8 +132,9 @@ fn simple_glyphs_keep_on_curve_and_overlap_bits_and_drop_hints() {
     assert_eq!(again.points(), vec![(11, 20), (310, -20)]);
     assert_eq!(again.flags[0] & 0xC1, 0x41);
     assert_eq!(again.flags[1] & 0xC1, 0x00);
-    // No instructions survive.
-    assert_eq!(&baked[12..14], &[0, 0]);
+    // The instructions ride through, as HarfBuzz keeps them.
+    assert_eq!(&baked[12..15], &[0, 1, 0xB0]);
+    assert_eq!(again.instructions, vec![0xB0]);
 }
 
 #[test]
@@ -379,5 +380,29 @@ fn skewed_and_matched_composites_draw_within_one_budget() {
             "glyf composite too costly to draw for its bounds",
         ],
         "{warnings:?}"
+    );
+}
+
+#[test]
+fn instructions_ride_through_and_a_glyph_without_contours_is_empty() {
+    // Glyph 1 has instructions; glyph 2 is a bare 10-byte header with
+    // no contours, which HarfBuzz reads as an empty glyph.
+    let mut header_only = vec![0, 0];
+    for v in [7i16, 0, 7, 0] {
+        header_only.extend_from_slice(&v.to_be_bytes());
+    }
+    let glyphs = vec![Vec::new(), triangle(&[0xB0, 0x01]), header_only];
+    let (bake, warnings) = bake_at_900(&one_axis_font(&glyphs));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let glyph = SimpleGlyph::decode(bake.body(1)).unwrap();
+    assert_eq!(glyph.instructions, vec![0xB0, 0x01]);
+    assert_eq!(glyph.points(), vec![(3, 0), (13, 0), (13, 13)]);
+    assert!(bake.body(2).is_empty());
+    let metrics = bake.metrics.unwrap();
+    // The empty glyph's phantom points start from its header's xMin:
+    // its left side bearing origin is 7 - 0, so its bearing is -7.
+    assert_eq!(
+        (metrics[2].advance, metrics[2].lsb, metrics[2].bounds),
+        (500, -7, None)
     );
 }

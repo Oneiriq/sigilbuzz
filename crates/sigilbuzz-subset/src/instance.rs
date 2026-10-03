@@ -21,8 +21,9 @@
 //! - A simple glyph's points move by their gvar deltas at the
 //!   coordinates, the points a tuple skips inferred from those it lists
 //!   (IUP). The coordinate streams are re-encoded with the spec's
-//!   flag-driven SHORT / SAME compression; hinting instructions are left
-//!   out.
+//!   flag-driven SHORT / SAME compression. Hinting instructions ride
+//!   through unchanged, with the `cvt `, `fpgm` and `prep` they use, as
+//!   HarfBuzz keeps them unless asked to drop hinting.
 //! - A composite glyph's components placed by offset move by their
 //!   deltas, and their arguments widen to words when the moved offset
 //!   no longer fits a byte. Components placed by matching points keep
