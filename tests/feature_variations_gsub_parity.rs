@@ -590,3 +590,54 @@ fn a_gsub_whose_feature_variations_do_not_parse_is_left_out() {
     let gsub = face.gsub().unwrap().expect("GSUB");
     assert!(gsub.feature_variations().is_err());
 }
+
+/// A copy of `font` with the tables of `overrides` in place of its own
+/// or added to it.
+fn with_tables(font: &[u8], overrides: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let face = Face::parse_bytes(font, 0).unwrap();
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = face
+        .records()
+        .iter()
+        .filter(|r| overrides.iter().all(|(tag, _)| *tag != r.tag))
+        .map(|r| (r.tag, face.table_bytes(r.tag).unwrap().to_vec()))
+        .collect();
+    tables.extend(overrides.iter().cloned());
+    tables.sort_by_key(|(tag, _)| *tag);
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + 16 * tables.len();
+    for (tag, body) in &tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        offset += body.len().next_multiple_of(4);
+    }
+    for (_, body) in &tables {
+        out.extend_from_slice(body);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    out
+}
+
+/// A 12-byte GSUB 1.1 whose ScriptList, FeatureList, and LookupList
+/// share the empty list at byte 10, where `featureVariationsOffset`
+/// would start, with no room for that field.
+const SHORT_1_1_HEADER: [u8; 12] = [0, 1, 0, 1, 0, 10, 0, 10, 0, 10, 0, 0];
+
+#[test]
+fn a_gsub_whose_1_1_header_is_cut_short_is_left_out() {
+    // HarfBuzz 14.5.0 rejects the table and shapes without it, as
+    // sigilbuzz did before it read FeatureVariations.
+    let font = with_tables(RUBIK, &[(*b"GSUB", SHORT_1_1_HEADER.to_vec())]);
+    let numr = [Feature {
+        tag: *b"numr",
+        value: 1,
+    }];
+    assert_eq!(
+        font_rows(&font, None, Some(900.0), "5\u{20AC}", &numr),
+        [(861, 0, 690, 0, 0), (1022, 1, 820, 0, 0)]
+    );
+}
