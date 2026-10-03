@@ -144,14 +144,15 @@ pub(super) fn adjust_spaces(
 /// phantom points of a `glyf` font standing in for a missing `HVAR` or
 /// `VVAR` (see `position::FontAdvances`). Always positive.
 fn advance(face: &Face<'_>, coords: &[f32], gid: u16, horizontal: bool) -> Result<i32> {
-    let advances = super::position::FontAdvances::new(face, coords)?;
     if horizontal {
+        let advances = super::position::FontAdvances::new(face, coords, None)?;
         return advances.h_advance(u32::from(gid));
     }
     let Some(vmtx) = face.vmtx()? else {
         let hhea = face.hhea()?;
         return Ok(i32::from(hhea.ascent) - i32::from(hhea.descent));
     };
+    let advances = super::position::FontAdvances::new(face, coords, Some(vmtx))?;
     advances.v_advance(&vmtx, u32::from(gid))
 }
 

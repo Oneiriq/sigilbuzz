@@ -277,7 +277,7 @@ pub(super) fn subtract_vertical_origins(
     coords: &[f32],
     glyphs: &mut [Glyph],
 ) -> Result<()> {
-    let advances = FontAdvances::new(face, coords)?;
+    let advances = FontAdvances::new(face, coords, face.vmtx()?)?;
     let vorg = face.vorg()?;
     let vmtx = face.vmtx()?;
     let hhea = face.hhea()?;
@@ -394,8 +394,13 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
 ///   [`Glyf::phantom_points_at_coords`]): the first two in x
 ///   horizontally, the last two in y vertically, rounded and at least
 ///   zero.
+///
+/// Horizontal advances never need `vmtx`: it only places the vertical
+/// phantom points. A horizontal run passes none, so a malformed
+/// `vmtx` cannot fail it.
 pub(super) struct FontAdvances<'a, 'c> {
     hmtx: Hmtx<'a>,
+    /// The vertical metrics of a vertical run.
     vmtx: Option<Vmtx<'a>>,
     coords: &'c [f32],
     /// `None` at the default instance.
@@ -415,10 +420,12 @@ struct PhantomTables<'a> {
 
 impl<'a, 'c> FontAdvances<'a, 'c> {
     /// Reads the tables the advances of `face` at `coords` come from.
-    pub(super) fn new(face: &Face<'a>, coords: &'c [f32]) -> Result<Self> {
+    /// `vmtx` is the font's `vmtx` for a vertical run, and `None` for a
+    /// horizontal one.
+    pub(super) fn new(face: &Face<'a>, coords: &'c [f32], vmtx: Option<Vmtx<'a>>) -> Result<Self> {
         let mut advances = Self {
             hmtx: face.hmtx()?,
-            vmtx: face.vmtx()?,
+            vmtx,
             coords,
             hvar: None,
             vvar: None,
