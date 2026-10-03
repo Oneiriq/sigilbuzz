@@ -10,6 +10,7 @@ use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use super::glyf::clamp_i16;
+use crate::hmtx::emit_long_metrics;
 use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
 use crate::warnings::Warnings;
 use crate::SubsetError;
@@ -49,30 +50,10 @@ pub(super) fn bake_hmtx(
     }
 
     // Compress trailing identical advances into the LSB-only tail.
-    let mut long_count = advances.len();
-    if long_count > 1 {
-        let last = advances[long_count - 1];
-        while long_count > 1 && advances[long_count - 1] == last {
-            long_count -= 1;
-        }
-        long_count += 1;
-    }
-    if long_count == 0 {
-        long_count = 1;
-    }
-
-    let mut out = Vec::with_capacity(advances.len() * 4);
-    for (advance, lsb) in advances.iter().zip(lsbs.iter()).take(long_count) {
-        out.extend_from_slice(&advance.to_be_bytes());
-        out.extend_from_slice(&lsb.to_be_bytes());
-    }
-    for lsb in lsbs.iter().skip(long_count) {
-        out.extend_from_slice(&lsb.to_be_bytes());
-    }
-
+    let (bytes, number_of_h_metrics) = emit_long_metrics(&advances, &lsbs);
     Ok(HmtxBake {
-        bytes: out,
-        number_of_h_metrics: long_count as u16,
+        bytes,
+        number_of_h_metrics,
     })
 }
 
@@ -171,42 +152,16 @@ pub(super) fn bake_vmtx(
         tsbs.push(clamp_i16(new_tsb));
     }
 
-    let (out, long_count) = emit_vmtx_bytes(&advances, &tsbs);
+    // The long count is recomputed, so trailing glyphs that now share
+    // an advance fold into the tsb-only tail, and a VVAR delta that
+    // sets a trailing glyph's advance apart extends the long range.
+    let (out, long_count) = emit_long_metrics(&advances, &tsbs);
 
     VmtxBake {
         vmtx_bytes: Some(out),
         number_of_long_ver_metrics: long_count,
         left_out,
     }
-}
-
-/// Emits a vmtx body from per-gid `advances` + `tsbs`, recomputing the
-/// `numberOfLongVerMetrics` count so trailing glyphs that now share an
-/// advance compress into the tsb-only tail. Mirrors `bake_hmtx`'s long-
-/// count compression so VVAR-induced advance deltas at trailing gids
-/// extend the long range below.
-pub(super) fn emit_vmtx_bytes(advances: &[u16], tsbs: &[i16]) -> (Vec<u8>, u16) {
-    debug_assert_eq!(advances.len(), tsbs.len());
-    let mut long_count = advances.len();
-    if long_count > 1 {
-        let last = advances[long_count - 1];
-        while long_count > 1 && advances[long_count - 1] == last {
-            long_count -= 1;
-        }
-        long_count += 1;
-    }
-    if long_count == 0 {
-        long_count = 1;
-    }
-    let mut out = Vec::with_capacity(advances.len() * 4);
-    for (advance, tsb) in advances.iter().zip(tsbs.iter()).take(long_count) {
-        out.extend_from_slice(&advance.to_be_bytes());
-        out.extend_from_slice(&tsb.to_be_bytes());
-    }
-    for tsb in tsbs.iter().skip(long_count) {
-        out.extend_from_slice(&tsb.to_be_bytes());
-    }
-    (out, long_count as u16)
 }
 
 // ---------------------------------------------------------------------------
