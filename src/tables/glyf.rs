@@ -489,14 +489,15 @@ impl<'a> Glyf<'a> {
 
     /// Returns the four phantom points of `glyph_id` (left side
     /// bearing origin, advance origin, top origin, bottom origin) at
-    /// the normalized variation `coords`, in the glyph's own frame.
+    /// the normalized variation `coords`, in the glyph's own frame. The
+    /// parameters run in the order of [`Glyf::outline_at_coords`].
     ///
-    /// The default points come from `hmtx` and, when present, `vmtx`,
-    /// as for composite anchors. `gvar` then moves them by the glyph's
-    /// phantom deltas. A composite glyph takes the phantom points of
-    /// its last component flagged `USE_MY_METRICS`, at the same
-    /// coords, as HarfBuzz does, at the default instance too. With no
-    /// `gvar`, or coords that are all zero, nothing moves.
+    /// The default points come from `metrics` (`hmtx` and, when
+    /// present, `vmtx`), as for composite anchors. `gvar` then moves
+    /// them by the glyph's phantom deltas. A composite glyph takes the
+    /// phantom points of its last component flagged `USE_MY_METRICS`,
+    /// at the same coords, as HarfBuzz does, at the default instance
+    /// too. With no `gvar`, or coords that are all zero, nothing moves.
     ///
     /// A `USE_MY_METRICS` component that leads back to a composite
     /// being walked is skipped where HarfBuzz's cycle detector skips
@@ -526,7 +527,7 @@ impl<'a> Glyf<'a> {
     /// let metrics = PhantomMetrics { hmtx: &hmtx, vmtx: None };
     /// let space = 9;
     /// // The space advances 248 units at the default weight, 265 at 900.
-    /// let pp = glyf.phantom_points_at_coords(&loca, space, &metrics, gvar.as_ref(), &[1.0])?;
+    /// let pp = glyf.phantom_points_at_coords(&loca, space, gvar.as_ref(), &[1.0], &metrics)?;
     /// assert_eq!((pp[1].0 - pp[0].0).round(), 265.0);
     /// # Ok::<(), sigilbuzz::Error>(())
     /// ```
@@ -534,9 +535,9 @@ impl<'a> Glyf<'a> {
         &self,
         loca: &Loca<'_>,
         glyph_id: u16,
-        metrics: &PhantomMetrics<'_>,
         gvar: Option<&Gvar<'_>>,
         coords: &[f32],
+        metrics: &PhantomMetrics<'_>,
     ) -> Result<[(f32, f32); 4]> {
         let cx = FlattenCtx {
             loca,

@@ -277,7 +277,7 @@ fn composite_phantoms(flags: u16, coord: f32) -> Result<[(f32, f32); 4]> {
         hmtx: &hmtx,
         vmtx: None,
     };
-    glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[coord])
+    glyf.phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn cyclic_phantoms(uses: &[u16], coord: f32) -> Result<[(f32, f32); 4]> {
         hmtx: &hmtx,
         vmtx: None,
     };
-    glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[coord])
+    glyf.phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
 }
 
 #[test]
