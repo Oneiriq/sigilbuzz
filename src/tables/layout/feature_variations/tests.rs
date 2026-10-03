@@ -778,3 +778,71 @@ fn locate_reads_the_offset_from_the_table() {
     assert_eq!(select(found, &[], None).map(|(_, r)| r), Some(0));
     assert!(select(None, &[], None).is_none());
 }
+
+#[test]
+fn value_conditions_cache_their_deltas_by_index() {
+    // Index 0 three times, and index 1, which the store does not have
+    // and so has no delta.
+    let store_data = store_bytes(-200);
+    let store = ItemVariationStore::parse(&store_data).unwrap();
+    let conds = [
+        Value(100, 0),
+        Or(vec![Value(-1, 1), Value(100, 0)]),
+        Not(Box::new(Value(-1, 1))),
+        And(vec![Value(100, 0), Value(1, 1)]),
+    ];
+    let bytes = fv_bytes(&[record(&conds, subst(&[]))]);
+    let fv = FeatureVariations::parse(&bytes).unwrap();
+    assert_eq!(fv.find_index(&[0.25], Some(&store)), Some(0));
+    assert_eq!(fv.find_index(&[0.75], Some(&store)), None);
+}
+
+/// A one-record table whose ConditionSet names an "and" of two entries
+/// that both name the next "and", `levels` deep, over one value
+/// condition that holds: `2^levels` paths to it, and `2^(levels + 1)`
+/// checks counting the ConditionSet. The record substitutes nothing.
+fn shared_ands(levels: usize) -> Vec<u8> {
+    let mut out = fv_bytes(&[Record {
+        conditions: Some(vec![Raw(0, vec![])]),
+        substitution: None,
+    }]);
+    // The set names its one condition at byte 22, right after it.
+    out.truncate(22);
+    for _ in 0..levels {
+        // Two entries, both naming the condition 9 bytes on.
+        out.extend_from_slice(&[0, 3, 2, 0, 0, 9, 0, 0, 9]);
+    }
+    out.extend(cond_bytes(&Value(1, NO_VARIATION_INDEX)));
+    out
+}
+
+#[test]
+fn the_check_budget_grows_with_the_table() {
+    let too_many = |bytes: &[u8]| {
+        FeatureVariations::parse(bytes).err().is_some_and(|e| {
+            matches!(
+                e,
+                Error::Malformed {
+                    context: "FeatureVariations need more checks than sigilbuzz makes",
+                    ..
+                }
+            )
+        })
+    };
+    // Every table gets 16384 checks.
+    let bytes = shared_ands(13);
+    assert_eq!(bytes.len(), 147);
+    let fv = FeatureVariations::parse(&bytes).unwrap();
+    assert_eq!(fv.find_index(&[], None), Some(0));
+    assert!(too_many(&shared_ands(14)));
+    // 2^15 checks take 4096 bytes: 8 per byte. The bytes after the
+    // table stand for the rest of a GSUB or GPOS.
+    let mut bytes = shared_ands(14);
+    bytes.resize(4095, 0);
+    assert!(too_many(&bytes));
+    bytes.push(0);
+    assert!(FeatureVariations::parse(&bytes).is_ok());
+    // A flat limit of 2^18 checks let a 183-byte table cost that much
+    // on every shaping call.
+    assert!(too_many(&shared_ands(17)));
+}
