@@ -96,8 +96,16 @@
 //!
 //! For CFF and CFF2 fonts:
 //!
-//! - If every glyph survives, the CFF or CFF2 table and everything else
-//!   passes through and only the SFNT directory is rebuilt.
+//! - If every glyph survives, the font passes through and only the SFNT
+//!   directory is rebuilt. Every table is copied unchanged except
+//!   `kern`, `kerx`, and `morx`, and the layout tables (`BASE`
+//!   included) and variation tables (`MVAR` included) that
+//!   [`SubsetInput::retain_layout`] and
+//!   [`SubsetInput::retain_variations`] drop. Tables the rest of this
+//!   list drops as unhandled, such as `COLR`, `CPAL`, `MVAR`, and
+//!   `DSIG`, stay, since no glyph id changes, though a `DSIG` signature
+//!   no longer matches the rebuilt file. Nothing is read, so nothing is
+//!   reported in [`SubsetOutput::warnings`].
 //! - Otherwise the CFF or CFF2 table is rebuilt around the kept glyphs.
 //!   That covers non-CID and CID-keyed CFF (FDArray and FDSelect) as well
 //!   as CFF2, with subroutines renumbered and unused ones dropped. `cmap`,
@@ -799,10 +807,11 @@ fn cff_non_identity(
 /// hmtx, hhea, maxp, post, name, OS/2, vhea, vmtx, VORG, COLR, CPAL,
 /// and the layout tables. We copy every table the source carries
 /// except the small set the rest of the pipeline can't round-trip:
-/// legacy `kern` / `morx` / `kerx`. Layout and variable-font tables
-/// (`VVAR` included) stay only when `input` asks for them, and strict
-/// mode (`drop_unhandled` false) rejects the tables that cannot be
-/// kept.
+/// legacy `kern` / `morx` / `kerx`. Layout tables (`BASE` included)
+/// and variable-font tables (`VVAR` and `MVAR` included) stay only when
+/// `input` asks for them, and strict mode (`drop_unhandled` false)
+/// rejects the tables that cannot be kept. A `DSIG` is copied with the
+/// rest, so its signature goes stale.
 ///
 /// Returns the new SFNT bytes plus an identity `gid_map`.
 fn cff_passthrough(
