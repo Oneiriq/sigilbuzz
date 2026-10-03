@@ -69,7 +69,8 @@ impl<'a> Face<'a> {
     /// zero), the box is the extent of the varied outline's points,
     /// off-curve points included, each edge rounded half away from
     /// zero, as HarfBuzz computes glyph extents. A glyph whose varied
-    /// outline has no points gets an all-zero box. Otherwise the box
+    /// outline has no points, or whose box has no width or no height,
+    /// gets an all-zero box, as in HarfBuzz. Otherwise the box
     /// is the static one from [`Face::glyph_bounds`]. `num_contours`
     /// always comes from the glyph header.
     pub fn glyph_bounds_at_coords(
@@ -291,10 +292,11 @@ impl PointBox {
         self.max = (self.max.0.max(x), self.max.1.max(y));
     }
 
-    /// The box rounded half away from zero, or all zeros when no
-    /// point was seen.
+    /// The box rounded half away from zero, or all zeros when it is
+    /// empty: no point was seen, or it has no width or no height, as
+    /// HarfBuzz's `contour_bounds_t::empty` decides before rounding.
     fn bounds(&self, num_contours: i16) -> GlyphBounds {
-        if self.min.0 > self.max.0 {
+        if self.min.0 >= self.max.0 || self.min.1 >= self.max.1 {
             return GlyphBounds {
                 x_min: 0,
                 y_min: 0,
@@ -393,5 +395,49 @@ fn transform_path_op(op: PathOp, m: [f32; 6]) -> PathOp {
             }
         }
         PathOp::Close => PathOp::Close,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(points: &[(f32, f32)]) -> GlyphBounds {
+        let mut b = PointBox::default();
+        for &(x, y) in points {
+            b.add(x, y);
+        }
+        b.bounds(1)
+    }
+
+    fn edges(b: GlyphBounds) -> [i16; 4] {
+        [b.x_min, b.y_min, b.x_max, b.y_max]
+    }
+
+    #[test]
+    fn a_point_box_rounds_its_edges_half_away_from_zero() {
+        let b = bounds(&[(-10.5, 0.4), (99.5, 200.6)]);
+        assert_eq!(edges(b), [-11, 0, 100, 201]);
+        assert_eq!(b.num_contours, 1);
+    }
+
+    #[test]
+    fn a_point_box_without_area_is_empty() {
+        // No points, a single point, and boxes with no width or no
+        // height: HarfBuzz reports zero extents for all of them, even
+        // when the rounded edges would differ.
+        for points in [
+            &[][..],
+            &[(5.0, 5.0)][..],
+            &[(10.0, 0.0), (10.0, 100.0)][..],
+            &[(0.0, 50.0), (100.0, 50.0)][..],
+        ] {
+            assert_eq!(edges(bounds(points)), [0; 4], "{points:?}");
+        }
+        // A sliver keeps its edges.
+        assert_eq!(
+            edges(bounds(&[(10.0, 0.0), (10.25, 100.0)])),
+            [10, 0, 10, 100]
+        );
     }
 }
