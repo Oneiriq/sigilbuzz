@@ -69,8 +69,8 @@
 //!   `VARC` around the kept composites. `VVAR` keeps every map the
 //!   source has (advance height, top and bottom side bearings, and the
 //!   vertical origin) and goes with `vmtx`: a subset without `vmtx`
-//!   has no `VVAR`, and a `VVAR` that cannot be rebuilt is left out with
-//!   a warning. The GDEF `ItemVariationStore` that GPOS kerning,
+//!   has no `VVAR`. A `VVAR` left out that way, or one that cannot be
+//!   rebuilt, is reported in the warnings. The GDEF `ItemVariationStore` that GPOS kerning,
 //!   anchors, and ligature carets vary through is carried verbatim. Set
 //!   [`SubsetInput::retain_variations`] to `false` to drop them and get a
 //!   static subset at the default instance.
@@ -615,6 +615,13 @@ fn push_layout_and_variation_tables(
         if let Some(b) = hvar::subset_vvar(face, kept, warnings) {
             tables.push((tag::VVAR, b));
         }
+    } else if face.record(tag::VVAR).is_some() {
+        warnings.push(
+            tag::VVAR,
+            0,
+            "VVAR without a vmtx table to vary",
+            "the whole table",
+        );
     }
     // VARC: re-emit when the source carries the table. Coverage
     // entries renumber per the new gid map and component records

@@ -383,9 +383,9 @@ fn malformed_vertical_tables_are_left_out_with_warnings() {
     };
 
     // A vmtx shorter than vhea and maxp say: vhea, vmtx and the VVAR
-    // that varies them go; VORG stays.
+    // that varies them go, each reported; VORG stays.
     let (out, warnings) = warned(&cut(tag::VMTX, 10));
-    assert_eq!(warnings, [(tag::VMTX, 10)]);
+    assert_eq!(warnings, [(tag::VVAR, 0), (tag::VMTX, 10)]);
     for table in [tag::VHEA, tag::VMTX, tag::VVAR] {
         assert!(!has(&out.bytes, table));
     }
