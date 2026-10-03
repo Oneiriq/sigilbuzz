@@ -9,8 +9,9 @@
 //! [`super::tests::rubik_vmtx_passthrough_when_source_has_none`]
 //! test on the no-VVAR side.
 
-use super::metrics::{apply_mvar_records, emit_vmtx_bytes, patch_i16, patch_u16};
+use super::metrics::{apply_mvar_records, patch_i16, patch_u16};
 use super::*;
+use crate::hmtx::emit_long_metrics;
 
 #[test]
 fn patch_i16_clamps_at_overflow() {
@@ -37,7 +38,7 @@ fn patch_i16_handles_short_buffer_gracefully() {
 }
 
 #[test]
-fn emit_vmtx_bytes_compresses_trailing_run() {
+fn vmtx_emission_compresses_trailing_run() {
     // 5 glyphs, every glyph shares advance 1000. The compression
     // matches `bake_hmtx`: trailing identical advances collapse
     // into the tsb-only tail. The shared-advance run leaves 2
@@ -45,23 +46,23 @@ fn emit_vmtx_bytes_compresses_trailing_run() {
     // anchor the shared advance, same as hmtx).
     let advances = alloc::vec![1000u16; 5];
     let tsbs = alloc::vec![10i16, 20, 30, 40, 50];
-    let (bytes, n_long) = emit_vmtx_bytes(&advances, &tsbs);
+    let (bytes, n_long) = emit_long_metrics(&advances, &tsbs);
     assert_eq!(n_long, 2);
     // 2 long entries (4 B each) + 3 trailing tsbs (2 B each) = 14.
     assert_eq!(bytes.len(), 4 * 2 + 3 * 2);
 }
 
 #[test]
-fn emit_vmtx_bytes_extends_long_range_when_trailing_advances_diverge() {
+fn vmtx_emission_extends_long_range_when_trailing_advances_diverge() {
     // 5 glyphs. Source vmtx had long_count=1 (every glyph shared
     // advance 1000), but a hypothetical VVAR delta at gid 3 shifted
-    // its advance to 1100. emit_vmtx_bytes must promote gid 3 into
+    // its advance to 1100. The emission must promote gid 3 into
     // the long range so its distinct advance survives the byte
     // emission. Without the long-count recompute fix this trailing
     // delta is silently dropped.
     let advances = alloc::vec![1000u16, 1000, 1000, 1100, 1000];
     let tsbs = alloc::vec![10i16, 20, 30, 40, 50];
-    let (bytes, n_long) = emit_vmtx_bytes(&advances, &tsbs);
+    let (bytes, n_long) = emit_long_metrics(&advances, &tsbs);
     // Same compression rule as hmtx: scan trailing equal-to-last
     // run, plus one anchor entry. Last advance is 1000; gid 3 is
     // 1100 (different) so the run is just gid 4. long_count = 5
