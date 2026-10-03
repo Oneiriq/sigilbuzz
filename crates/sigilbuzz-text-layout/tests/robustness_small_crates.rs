@@ -210,15 +210,11 @@ fn wrap_lines_accepts_any_width_budget() {
     ] {
         for break_at_word_boundaries in [true, false] {
             for word_break in WORD_BREAKS {
-                let lines = wrap_lines(
-                    &glyphs,
-                    &text,
-                    WrapOptions {
-                        max_width,
-                        break_at_word_boundaries,
-                        word_break,
-                    },
-                );
+                let options = WrapOptions::default()
+                    .with_max_width(max_width)
+                    .with_break_at_word_boundaries(break_at_word_boundaries)
+                    .with_word_break(word_break);
+                let lines = wrap_lines(&glyphs, &text, options);
                 assert_tiles(&text, &lines);
             }
         }
