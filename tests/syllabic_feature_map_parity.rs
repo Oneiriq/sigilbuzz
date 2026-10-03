@@ -12,9 +12,10 @@
 //! across syllables, as HarfBuzz adds them with the global mask.
 //!
 //! Which stages run depends on the shaper HarfBuzz picks, not on the
-//! script alone: an Indic or Myanmar script whose font has only `DFLT`,
-//! `dflt` or `latn` lookups (or `mymr` for Myanmar) takes the default
-//! shaper, and a required feature then runs in that shaper's stages.
+//! script alone: an Indic or Myanmar script whose font has only `DFLT`
+//! or `latn` lookups (or `mymr` for Myanmar) takes the default shaper,
+//! and a required feature then runs in that shaper's stages. A font
+//! with only the misspelled `dflt` script keeps the script's shaper.
 //! The Khmer shaper turns `liga` off and `clig` on after the caller's
 //! features, whatever the caller asks.
 //!
@@ -352,6 +353,22 @@ fn with_swap(font: &[u8], script: &[u8; 4], required: &[u8; 4], a: char, b: char
     with_gsub(font, gsub)
 }
 
+/// `font` whose GSUB keeps one script, the one tagged `keep`, retagged
+/// `tag`. The other scripts' tables stay in the bytes, unreferenced.
+fn with_only_script(font: &[u8], keep: &[u8; 4], tag: &[u8; 4]) -> Vec<u8> {
+    let mut gsub = table(font, b"GSUB").to_vec();
+    let list = u16_at(&gsub, 4);
+    let offset = (0..u16_at(&gsub, list))
+        .map(|i| list + 2 + 6 * i)
+        .find(|&at| gsub[at..at + 4] == *keep)
+        .map(|at| u16_at(&gsub, at + 4))
+        .expect("script");
+    put_u16(&mut gsub, list, 1);
+    gsub[list + 2..list + 6].copy_from_slice(tag);
+    put_u16(&mut gsub, list + 6, offset);
+    with_gsub(font, gsub)
+}
+
 #[test]
 fn a_required_rphf_finds_no_reph_and_runs_on_every_glyph() {
     // The language systems no longer list `rphf`, so HarfBuzz's map has
@@ -646,11 +663,12 @@ fn a_required_liga_runs_once_when_devanagari_takes_the_default_shaper() {
     // default shaper. That shaper runs `liga`, so the required `liga`
     // runs once, in the stage of `liga`, or in stage 0 when the caller
     // turns `liga` off. It used to run in both, which swapped ka back.
-    // With a `dev2` script the Indic shaper turns `liga` off, so the
-    // required `liga` runs once, in stage 0.
+    // With a `dev2` script, or the misspelled `dflt`, which keeps the
+    // Indic shaper, that shaper turns `liga` off, so the required `liga`
+    // runs once, in stage 0.
     let off = [feature(b"liga", 0)];
     let on = [feature(b"liga", 1)];
-    for script in [b"DFLT", b"dev2"] {
+    for script in [b"DFLT", b"dev2", b"dflt"] {
         let font = with_swap(DEVANAGARI, script, b"liga", '\u{0915}', '\u{0916}');
         for features in [&[][..], &off, &on] {
             check_with(
@@ -667,6 +685,78 @@ fn a_required_liga_runs_once_when_devanagari_takes_the_default_shaper() {
             );
         }
     }
+}
+
+#[test]
+fn a_dflt_script_keeps_the_indic_and_myanmar_shapers() {
+    // HarfBuzz picks the misspelled `dflt` script tag when a font has
+    // no better one, but only sends Devanagari or Myanmar to the default
+    // shaper for `DFLT` and `latn` (and `mymr`), not for `dflt`. With
+    // `dflt` the Indic shaper still moves the pre-base matra and forms
+    // the reph and the conjuncts, and the Myanmar shaper moves medial ra
+    // and sign e before the consonant and forms the kinzi. Both used to
+    // take the default shaper, as they still do with `DFLT`.
+    check(
+        &with_only_script(DEVANAGARI, b"dev2", b"dflt"),
+        &[
+            (
+                "\u{0915}\u{093F}",
+                &[(545, 0, 259, 0, 0), (56, 0, 768, 0, 0)],
+            ),
+            ("\u{0915}\u{094D}\u{0937}", &[(90, 0, 717, 0, 0)]),
+            (
+                "\u{0930}\u{094D}\u{0915}",
+                &[(56, 0, 768, 0, 0), (506, 0, 0, -221, 0)],
+            ),
+            (
+                "\u{0926}\u{094D}\u{0935}\u{093F}",
+                &[(546, 0, 259, 0, 0), (455, 0, 575, 0, 0)],
+            ),
+        ],
+    );
+    check(
+        &with_only_script(DEVANAGARI, b"dev2", b"DFLT"),
+        &[
+            (
+                "\u{0915}\u{093F}",
+                &[(56, 0, 768, 0, 0), (32, 0, 259, 0, 0)],
+            ),
+            (
+                "\u{0915}\u{094D}\u{0937}",
+                &[(56, 0, 768, 0, 0), (103, 0, 0, -221, 0), (86, 6, 578, 0, 0)],
+            ),
+        ],
+    );
+    check(
+        &with_only_script(MYANMAR, b"mym2", b"dflt"),
+        &[
+            (
+                "\u{1000}\u{103C}",
+                &[(198, 0, 229, 0, 0), (4, 0, 1124, 0, 0)],
+            ),
+            (
+                "\u{1000}\u{1031}",
+                &[(372, 0, 618, 0, 0), (4, 0, 1124, 0, 0)],
+            ),
+            (
+                "\u{1004}\u{103A}\u{1039}\u{1000}",
+                &[(4, 0, 1124, 0, 0), (189, 0, 0, -1, 0)],
+            ),
+        ],
+    );
+    check(
+        &with_only_script(MYANMAR, b"mym2", b"DFLT"),
+        &[
+            (
+                "\u{1000}\u{103C}",
+                &[(4, 0, 1124, 0, 0), (47, 0, 229, 0, 0)],
+            ),
+            (
+                "\u{1000}\u{1031}",
+                &[(4, 0, 1124, 0, 0), (372, 0, 618, 0, 0)],
+            ),
+        ],
+    );
 }
 
 #[test]
@@ -691,10 +781,10 @@ fn a_required_liga_runs_in_stage_zero_in_vertical_text() {
 fn a_required_rphf_runs_in_stage_zero_when_devanagari_takes_the_default_shaper() {
     // HarfBuzz's default shaper has no `rphf`, so with a `DFLT` or
     // `latn` script the required `rphf` runs in stage 0. It used to run
-    // nowhere. With `dev2` it runs in the Indic shaper's `rphf` stage,
-    // or in stage 0 when the caller turns `rphf` off.
+    // nowhere. With `dev2` or `dflt` it runs in the Indic shaper's
+    // `rphf` stage, or in stage 0 when the caller turns `rphf` off.
     let off = [feature(b"rphf", 0)];
-    for script in [b"DFLT", b"latn", b"dev2"] {
+    for script in [b"DFLT", b"latn", b"dev2", b"dflt"] {
         let font = with_swap(DEVANAGARI, script, b"rphf", '\u{0915}', '\u{0916}');
         for features in [&[][..], &off] {
             check_with(
@@ -718,12 +808,12 @@ fn a_required_pref_runs_in_stage_zero_when_myanmar_takes_the_default_shaper() {
     // is `DFLT`, or `mymr`, the tag of fonts made before the Myanmar
     // shaping model. That shaper has no `pref`, so the required `pref`
     // runs in stage 0, before anything moves. It used to run nowhere.
-    // With `mym2` the Myanmar shaper runs it in its `pref` stage, after
-    // medial ra moves before the consonant.
+    // With `mym2`, or the misspelled `dflt`, the Myanmar shaper runs it
+    // in its `pref` stage, after medial ra moves before the consonant.
     let off = [feature(b"pref", 0)];
-    for script in [b"DFLT", b"mymr", b"mym2"] {
+    for script in [b"DFLT", b"mymr", b"mym2", b"dflt"] {
         let font = with_swap(MYANMAR, script, b"pref", '\u{1000}', '\u{1001}');
-        let medial_ra: &[Row] = if script == b"mym2" {
+        let medial_ra: &[Row] = if matches!(script, b"mym2" | b"dflt") {
             &[(47, 0, 229, 0, 0), (5, 0, 676, 0, 0)]
         } else {
             &[(5, 0, 676, 0, 0), (47, 0, 229, 0, 0)]

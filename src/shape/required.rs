@@ -28,8 +28,9 @@
 //! once, in lookup-index order. Which passes run depends on the shaper
 //! the pipeline picked for the segment ([`SegmentShaper`]), not on the
 //! script alone: HarfBuzz sends an Indic or Myanmar script to the
-//! default shaper when the font's GSUB has no script tag of its own for
-//! it (see [`super::shaper::Shaper::for_run`]). A value the
+//! default shaper when the script tag the font's GSUB picks is `DFLT`
+//! or `latn` (or `mymr` for Myanmar), but not `dflt` (see
+//! [`super::shaper::Shaper::for_run`]). A value the
 //! caller gives `rvrn` picks the alternate of an AlternateSubst lookup,
 //! as it would for any other feature, except in a lookup `rvrn` shares
 //! with the required feature. There a value above 1 picks no alternate
@@ -98,8 +99,9 @@ const CLIG: [u8; 4] = *b"clig";
 pub(super) enum SegmentShaper {
     /// The default chain alone: the default, Hebrew and Thai shapers,
     /// and the default shaper HarfBuzz picks for an Indic, Myanmar, or
-    /// Universal Shaping Engine script whose GSUB script is `DFLT`,
-    /// `dflt`, or `latn` (or `mymr` for Myanmar).
+    /// Universal Shaping Engine script whose GSUB script is `DFLT` or
+    /// `latn` (or `mymr` for Myanmar). A `dflt` script keeps the
+    /// script's own shaper.
     Default,
     /// The Arabic shaper's joining forms (Arabic and Syriac), then the
     /// default chain.
@@ -413,8 +415,8 @@ mod tests {
     #[test]
     fn the_default_shaper_applies_no_syllabic_feature() {
         // HarfBuzz sends an Indic, Myanmar, or Universal Shaping Engine
-        // script whose font only has `DFLT`, `dflt`, or `latn` lookups
-        // (or `mymr` for Myanmar) to the default shaper. That shaper
+        // script whose font only has `DFLT` or `latn` lookups (or `mymr`
+        // for Myanmar) to the default shaper. That shaper
         // runs `liga` and none of the syllabic features, so a required
         // `liga` joins the default chain's `liga`, and a required `rphf`
         // or `pref` runs in stage 0.
