@@ -536,6 +536,14 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
     ///   varied as HarfBuzz varies glyph extents, or the ascender for a
     ///   glyph without extents (the font has no `glyf`, `CFF ` or
     ///   `CFF2`, or the outline is malformed).
+    ///
+    /// A malformed outline (a `glyf`, `loca`, `gvar` or charstring that
+    /// does not read) does not fail the shaping call: the glyph gets the
+    /// fallback above, the em or the ascender, which is what HarfBuzz
+    /// gives it, since HarfBuzz drops a table its sanitizer rejects and
+    /// positions the glyph from what is left. The origin is only a
+    /// position, and a horizontal run of the same text, which reads no
+    /// outline, shapes too.
     pub(super) fn v_origin(&self, id: u32) -> i32 {
         let id = id as u16;
         // The cell is only borrowed here and in the insert below, so
