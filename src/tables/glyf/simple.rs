@@ -4,8 +4,8 @@
 use alloc::vec::Vec;
 
 use super::{
-    Contour, FlatGlyph, FlatPoint, FlattenBudget, Transform, Variation, FLAG_ON_CURVE, FLAG_REPEAT,
-    FLAG_X_SAME_OR_POS, FLAG_X_SHORT, FLAG_Y_SAME_OR_POS, FLAG_Y_SHORT,
+    Contour, FlatGlyph, FlatPoint, FlattenBudget, PhantomPoints, Variation, FLAG_ON_CURVE,
+    FLAG_REPEAT, FLAG_X_SAME_OR_POS, FLAG_X_SHORT, FLAG_Y_SAME_OR_POS, FLAG_Y_SHORT,
 };
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
@@ -22,8 +22,10 @@ pub(super) fn simple_point_count(r: &mut Reader<'_>, num_contours: u16) -> Resul
 }
 
 /// Decodes the simple glyph at `glyph`, a reader past the glyph header
-/// and the glyph's byte offset in `glyf`, and appends its points, moved
-/// and transformed, to `out`.
+/// and the glyph's byte offset in `glyf`, and appends its points, moved,
+/// to `out`, in the glyph's own frame: a composite places them after
+/// this returns, as HarfBuzz places each component's points. Returns
+/// the deltas of the glyph's four phantom points.
 ///
 /// The points move by `deltas` (dense, in point order) or, when `var`
 /// is set, by the glyph's own `gvar` deltas with untouched points
@@ -33,13 +35,19 @@ pub(super) fn flatten_simple_glyph(
     num_contours: u16,
     deltas: Option<&[(f32, f32)]>,
     var: Option<(Variation<'_>, u16)>,
-    tf: &Transform,
     out: &mut FlatGlyph,
     budget: &mut FlattenBudget,
-) -> Result<()> {
+) -> Result<PhantomPoints> {
     let (mut r, offset) = glyph;
+    let mut phantom_deltas = [(0.0, 0.0); 4];
     if num_contours == 0 {
-        return Ok(());
+        // No points of its own: the tuples move the phantom points only.
+        if let Some((v, glyph_id)) = var {
+            phantom_deltas = v
+                .gvar
+                .phantom_deltas(glyph_id, v.coords, 0, &mut budget.work)?;
+        }
+        return Ok(phantom_deltas);
     }
     // endPtsOfContours.
     let mut end_pts = Vec::with_capacity(num_contours as usize);
@@ -127,15 +135,17 @@ pub(super) fn flatten_simple_glyph(
                 &end_pts,
                 &mut budget.work,
             )?;
+            // The last four are the phantom points'.
+            for (slot, d) in phantom_deltas.iter_mut().zip(varied.iter().skip(xs.len())) {
+                *slot = *d;
+            }
             Some(varied.as_slice())
         }
         None => deltas,
     };
 
-    // Materialize absolute, transformed points with optional deltas.
-    // Deltas live in design-unit space and apply *before* the
-    // composite transform: gvar feeds them into the simple-glyph
-    // coord stream, so they share the glyph's own frame.
+    // Materialize the points with optional deltas, in the glyph's own
+    // frame, where gvar moves them.
     let base_idx = out.points.len();
     for (i, &f) in flags.iter().enumerate() {
         let mut x = xs[i] as f32;
@@ -146,8 +156,7 @@ pub(super) fn flatten_simple_glyph(
                 y += dy;
             }
         }
-        let (tx, ty) = tf.apply(x, y);
-        out.points.push((tx, ty));
+        out.points.push((x, y));
         out.flags.push(FlatPoint {
             on_curve: f & FLAG_ON_CURVE != 0,
         });
@@ -169,5 +178,5 @@ pub(super) fn flatten_simple_glyph(
         });
         start = end_idx + 1;
     }
-    Ok(())
+    Ok(phantom_deltas)
 }

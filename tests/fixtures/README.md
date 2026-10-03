@@ -73,12 +73,14 @@ Fonts used by the integration tests.
   `tests/math_fixture.rs`. Public domain, no third-party content.
 - `phantom_anchor.ttf`: a synthetic 780-byte font with four glyphs (`.notdef`, `base`,
   `mark`, `combo`). `combo` is a composite with one XY-mode component and one
-  anchor-mode component whose `arg1` points into the parent's phantom-point range (pp2,
-  the advance-width origin). Built by hand because no font in the existing OFL set
-  exercises the phantom-anchor code added in PR #80. Built deterministically by
-  `tests/tools/build_phantom_anchor_fixture.py`. `tests/outline_parity.rs` uses it to
-  drive phantom-point resolution on a real `Face`. Public domain, no third-party
-  content (generated entirely at build time).
+  anchor-mode component whose `arg1`, 5, lies past the 4 points placed before it. The
+  builder meant it as the composite's own advance-width phantom point; HarfBuzz and
+  sigilbuzz read it as point 1 of the mark, which follows those 4 points in
+  the walk's running point list, so the mark moves 50 units right. Built by hand
+  because no font in the existing OFL set anchors a component past the points before
+  it. Built deterministically by `tests/tools/build_phantom_anchor_fixture.py`.
+  `tests/outline_parity.rs` checks it against HarfBuzz 14.5.0's outline. Public domain,
+  no third-party content (generated entirely at build time).
 - `attach_chain.ttf`: a synthetic 1,628-byte font with five bases, the ligature `f_i`,
   and the combining marks U+0300 to U+0303. Its GPOS stacks a mark on a mark before
   that mark attaches, joins `b` cursively with the RightToLeft flag, attaches marks to
