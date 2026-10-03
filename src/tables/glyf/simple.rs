@@ -4,16 +4,34 @@
 use alloc::vec::Vec;
 
 use super::{
-    Contour, FlatGlyph, FlatPoint, FlattenBudget, Transform, FLAG_ON_CURVE, FLAG_REPEAT,
+    Contour, FlatGlyph, FlatPoint, FlattenBudget, Transform, Variation, FLAG_ON_CURVE, FLAG_REPEAT,
     FLAG_X_SAME_OR_POS, FLAG_X_SHORT, FLAG_Y_SAME_OR_POS, FLAG_Y_SHORT,
 };
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
+/// Number of contour points of a simple glyph whose `endPtsOfContours`
+/// starts at `r`: the last end point plus one, or zero for a glyph
+/// with no contours.
+pub(super) fn simple_point_count(r: &mut Reader<'_>, num_contours: u16) -> Result<usize> {
+    if num_contours == 0 {
+        return Ok(0);
+    }
+    r.skip((usize::from(num_contours) - 1) * 2)?;
+    Ok(usize::from(r.read_u16()?) + 1)
+}
+
+/// Decodes the simple glyph at `r` and appends its points, moved and
+/// transformed, to `out`.
+///
+/// The points move by `deltas` (dense, in point order) or, when `var`
+/// is set, by the glyph's own `gvar` deltas with untouched points
+/// inferred. `var` carries the glyph id the deltas belong to.
 pub(super) fn flatten_simple_glyph(
     r: &mut Reader<'_>,
     num_contours: u16,
     deltas: Option<&[(f32, f32)]>,
+    var: Option<(Variation<'_>, u16)>,
     tf: &Transform,
     out: &mut FlatGlyph,
     budget: &mut FlattenBudget,
@@ -93,6 +111,20 @@ pub(super) fn flatten_simple_glyph(
         y_cur += delta;
         ys.push(y_cur);
     }
+
+    // gvar deltas need the default points to infer the deltas of the
+    // points a tuple skips.
+    let varied;
+    let deltas = match var {
+        Some((v, glyph_id)) => {
+            let points: Vec<(i32, i32)> = xs.iter().copied().zip(ys.iter().copied()).collect();
+            varied = v
+                .gvar
+                .glyph_point_deltas(glyph_id, v.coords, &points, &end_pts)?;
+            Some(varied.as_slice())
+        }
+        None => deltas,
+    };
 
     // Materialize absolute, transformed points with optional deltas.
     // Deltas live in design-unit space and apply *before* the
