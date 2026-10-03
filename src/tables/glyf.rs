@@ -240,9 +240,9 @@ fn glyph_offset(loca: &Loca<'_>, glyph_id: u16) -> usize {
     loca.range(glyph_id).map_or(0, |(start, _)| start as usize)
 }
 
-/// Rounds a float to the nearest `i16`, saturating at the type bounds.
-/// Mirrors the helper in [`crate::Face`]; duplicated here so the glyf
-/// module stays self-contained for `no_std` callers.
+/// Rounds a float to the nearest `i16`, halves away from zero,
+/// saturating at the type bounds: the whole-unit points
+/// [`Glyf::glyph_points`] reports.
 fn round_f32_to_i16(v: f32) -> i16 {
     let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
     let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
@@ -374,9 +374,12 @@ impl<'a> Glyf<'a> {
     /// anchored to them.
     ///
     /// Returns `Ok(None)` when the glyph id is out of range or has no
-    /// outline body. Coordinates are rounded to the nearest `i16`
-    /// using sigilbuzz's standard half-away-from-zero policy; this
-    /// matches the FUnit-integer coords kerx fmt 4 type 0 expects.
+    /// outline body. Coordinates are rounded to the nearest `i16`,
+    /// halves away from zero, as kerx format 4 action type 0 reads
+    /// whole font units. Only a scaled or transformed component makes
+    /// a point fractional. (The variation code rounds halves up, as
+    /// HarfBuzz does. HarfBuzz's own font functions give kerx no
+    /// contour points, so it has no rule to follow here.)
     pub fn glyph_points(
         &self,
         loca: &Loca<'_>,

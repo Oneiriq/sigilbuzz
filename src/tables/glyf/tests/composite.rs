@@ -425,11 +425,14 @@ fn anchors_index_the_running_point_list_like_harfbuzz() {
 }
 #[test]
 fn composite_anchor_phantom_without_metrics_falls_back_to_zero() {
-    // Same composite shape as the phantom-resolution test, but
-    // with `metrics=None`. The legacy fallback applies: the
-    // anchor index is out-of-range and the translation collapses
-    // to (0, 0). Pin the behavior so callers that opt out of
-    // phantom resolution still get a stable answer.
+    // Glyph 0 places a square, then anchors glyph 2 (one point) with
+    // arg1 = 5: past the square's 4 points and glyph 2's own point, so
+    // glyph 2's first phantom point in the running list (see
+    // `anchors_index_the_running_point_list_like_harfbuzz`). With
+    // `metrics=None` no phantom point is known, so the anchor is
+    // skipped and the component stays at its (0, 0) offset. Pin the
+    // behavior so callers that opt out of phantom resolution still get
+    // a stable answer.
     let g1 = build_simple_glyph(
         &[3],
         &[(0, 0, true), (10, 0, true), (10, 10, true), (0, 10, true)],

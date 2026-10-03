@@ -12,9 +12,11 @@
 //! Every expectation here is HarfBuzz 14.5.0's output (uharfbuzz
 //! 0.56.2, `hb.shape` with `guess_segment_properties`): glyph id,
 //! cluster, x advance, x offset, y offset. rustybuzz 0.20 is not a
-//! reference here: it maps the unrounded `fvar` coordinate through
-//! `avar`, where HarfBuzz rounds it to 16.16 first and to F2DOT14
-//! after, so at `wght` 700 two of its advances are 1 unit off.
+//! reference here: through ttf-parser 0.25 it truncates the normalized
+//! `fvar` coordinate to F2DOT14 (`(v * 16384.0) as i16`) and maps that
+//! through `avar` in integer arithmetic, where HarfBuzz rounds it to
+//! 16.16, maps it in floating point, and rounds it to F2DOT14 last, so
+//! at `wght` 700 two of its advances are 1 unit off.
 
 use std::time::{Duration, Instant};
 

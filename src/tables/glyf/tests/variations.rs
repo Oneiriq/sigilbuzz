@@ -652,7 +652,8 @@ fn vertical_phantom_points_take_their_deltas() {
     // vmtx: advance height 1200, top side bearing 80, over the square's
     // header yMax of 1000: phantom point 3 at 1080 and point 4 at -120.
     // The tuple moves them by 40 and -25, so the vertical advance grows
-    // to 1265, and half way to 1232.5, rounded away from zero to 1233.
+    // to 1265, and half way to 1232.5, which the shaper rounds up to
+    // 1233, as HarfBuzz's `roundf` (`floor(x + 0.5)`) does.
     let (glyf_bytes, loca_bytes) = build_tables(&[square()]);
     let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
     let glyf = Glyf::new(&glyf_bytes);
@@ -681,8 +682,8 @@ fn vertical_phantom_points_take_their_deltas() {
             .phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
             .unwrap();
         assert_points(&pp[2..], &[(0.0, top), (0.0, bottom)]);
-        // Rounded half away from zero, as the shaper rounds it.
+        // Rounded halves up, as the shaper rounds it.
         let height = pp[2].1 - pp[3].1;
-        assert_eq!((height + 0.5) as i32, advance, "{height}");
+        assert_eq!(crate::tables::parse::hb_round(height), advance, "{height}");
     }
 }

@@ -5,9 +5,12 @@
 //!
 //! `tests/fixtures/rubik_variable_shaping.expected` holds HarfBuzz's
 //! output; `tests/tools/variable_shaping_expected.py` regenerates it.
-//! rustybuzz maps the unrounded `fvar` coordinate through `avar` and
-//! rounds deltas half away from zero, so its varied advances can be a
-//! unit off HarfBuzz's.
+//! rustybuzz, through ttf-parser 0.25, truncates the normalized `fvar`
+//! coordinate to F2DOT14 (`(v * 16384.0) as i16`) and maps that through
+//! `avar` in integer arithmetic, where HarfBuzz rounds it to 16.16,
+//! maps it in floating point, and rounds it to F2DOT14 last; rustybuzz
+//! also rounds deltas half away from zero. So its varied advances can be
+//! a unit off HarfBuzz's.
 
 use rustybuzz::{Face as RbFace, UnicodeBuffer};
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
