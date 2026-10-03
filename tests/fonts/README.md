@@ -132,9 +132,13 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
   `wght` 0.77899 (normalized) on. It keeps the space, U+3001, U+3002, U+300C, U+300D,
   five hiragana, seven katakana, and U+FF01, U+FF08, U+FF09, and U+FF1F. Same upstream
   and license as `NotoSansKR-HangulTone-Subset.ttf`. Built with this repository's
-  subsetter, which keeps and remaps the FeatureVariations:
+  subsetter as of commit 2699a42, which keeps and remaps the FeatureVariations. Later
+  subsetters also keep `BASE`, `STAT`, `vhea`, and `vmtx`, so the same command then
+  writes a larger file with the same GPOS:
 
-      cargo run -p sigilbuzz-cli --release -- subset 'NotoSansKR[wght].ttf'           NotoSansKR-Palt-Subset.ttf           --unicodes="U+0020,U+3001,U+3002,U+300C,U+300D,U+3042,U+3044,U+3046,U+3048,U+304A,U+30AB,U+30BF,U+30CA,U+30C6,U+30B9,U+30C8,U+FF08,U+FF09,U+FF01,U+FF1F"
+      cargo run -p sigilbuzz-cli --release -- subset 'NotoSansKR[wght].ttf' \
+          NotoSansKR-Palt-Subset.ttf \
+          --unicodes="U+0020,U+3001,U+3002,U+300C,U+300D,U+3042,U+3044,U+3046,U+3048,U+304A,U+30AB,U+30BF,U+30CA,U+30C6,U+30B9,U+30C8,U+FF08,U+FF09,U+FF01,U+FF1F"
 
 - `NotoSansDevanagari-NoGDEF-Subset.ttf`. A 2 KB subset of
   `NotoSansDevanagari-Regular.ttf` above without its GDEF table, for
