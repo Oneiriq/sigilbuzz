@@ -74,6 +74,13 @@ pub enum WordBreak {
     /// Everything else, including punctuation, spaces, symbols, and
     /// emoji, breaks as under [`WordBreak::Normal`].
     ///
+    /// So a Korean word is not always kept whole. A particle after a
+    /// closing bracket, a closing quotation mark, or `%` can still wrap
+    /// onto the next line by itself: `(한국어)를` and `50%를` may break
+    /// before `를`. UAX #14 allows a break between such punctuation and
+    /// a Hangul syllable, and keep-all removes only the breaks between
+    /// two letters. Blink breaks there too.
+    ///
     /// The Southeast Asian scripts of class SA keep their own breaks,
     /// so a Thai word followed by Chinese can still break between the
     /// two. CSS Text also counts the other characters of class NU, AL,
@@ -651,10 +658,12 @@ pub fn line_break_opportunities(text: &str) -> LineBreakIter<'_> {
 /// breaking.
 ///
 /// [`WordBreak::Normal`] gives the same breaks as
-/// [`line_break_opportunities`]. [`WordBreak::KeepAll`] keeps Korean
-/// words (and CJK runs) whole and breaks them at spaces and
-/// punctuation. [`WordBreak::BreakAll`] lets any word break between
-/// letters.
+/// [`line_break_opportunities`]. [`WordBreak::KeepAll`] removes the
+/// breaks between letters, so Korean breaks at spaces instead of
+/// between syllables, and runs of ideographs and kana stay together.
+/// Punctuation keeps its default breaks, so a particle after a closing
+/// bracket, a closing quotation mark, or `%` can still start a line.
+/// [`WordBreak::BreakAll`] lets any word break between letters.
 ///
 /// ```
 /// use sigilbuzz_text_layout::{line_break_opportunities_with, WordBreak};
@@ -927,6 +936,47 @@ mod tests {
             [
                 "\u{ADF8}\u{B294} ",
                 "\u{201C}\u{C548}\u{B155}.\u{201D}\u{C774}\u{B77C}\u{ACE0} ",
+                "\u{D588}\u{B2E4}."
+            ]
+        );
+    }
+
+    #[test]
+    fn keep_all_lets_a_particle_wrap_after_punctuation() {
+        // Keep-all removes only the breaks between two letters. After a
+        // closing bracket, a closing quotation mark, or '%', UAX #14
+        // allows a break before a Hangul syllable (LB31; LB19a since
+        // both sides of the quotation mark are East Asian), so the
+        // particle can start a line. Blink breaks at the same places.
+        let keep_all = |text| segments(text, WordBreak::KeepAll);
+        // "(한국어)를"
+        assert_eq!(
+            keep_all("(\u{D55C}\u{AD6D}\u{C5B4})\u{B97C}"),
+            ["(\u{D55C}\u{AD6D}\u{C5B4})", "\u{B97C}"]
+        );
+        // "「세로쓰기」도"
+        assert_eq!(
+            keep_all("\u{300C}\u{C138}\u{B85C}\u{C4F0}\u{AE30}\u{300D}\u{B3C4}"),
+            [
+                "\u{300C}\u{C138}\u{B85C}\u{C4F0}\u{AE30}\u{300D}",
+                "\u{B3C4}"
+            ]
+        );
+        // "50%를 넘었다" ("exceeded 50%")
+        assert_eq!(
+            keep_all("50%\u{B97C} \u{B118}\u{C5C8}\u{B2E4}"),
+            ["50%", "\u{B97C} ", "\u{B118}\u{C5C8}\u{B2E4}"]
+        );
+        // "안녕" in U+201C and U+201D, then "이라고 했다." ("said
+        // 'hello'"). With a period before U+201D, as in
+        // korean_keep_all_with_quotes_and_periods, LB19a keeps the
+        // particle with the quotation mark instead: the period is not
+        // East Asian.
+        assert_eq!(
+            keep_all("\u{201C}\u{C548}\u{B155}\u{201D}\u{C774}\u{B77C}\u{ACE0} \u{D588}\u{B2E4}."),
+            [
+                "\u{201C}\u{C548}\u{B155}\u{201D}",
+                "\u{C774}\u{B77C}\u{ACE0} ",
                 "\u{D588}\u{B2E4}."
             ]
         );
