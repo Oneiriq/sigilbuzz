@@ -117,7 +117,8 @@ pub enum LineBreakClass {
     SG,
     /// Conditional Japanese starter, small kana: resolved to NS (LB1).
     CJ,
-    /// Unknown, including unassigned code points: resolved to AL (LB1).
+    /// Unknown, including most unassigned code points: resolved to AL
+    /// (LB1).
     XX,
 }
 
@@ -154,9 +155,16 @@ pub(crate) fn lookup(c: char) -> (LineBreakClass, u8) {
 /// Returns the UAX #14 `Line_Break` property of `c`, as the Unicode
 /// Character Database (Unicode 17.0.0) assigns it.
 ///
-/// Unassigned code points are [`LineBreakClass::XX`]. The line break
-/// iterators resolve AI, SG, and XX to AL, SA to CM or AL, and CJ to
-/// NS before they apply the rules.
+/// Unassigned code points take the defaults of the Unicode Character
+/// Database: ID in the CJK ideograph blocks, in Planes 2 and 3, and in
+/// the emoji ranges U+1F000..U+1FAFF and U+1FC00..U+1FFFD, PR in the
+/// Currency Symbols block (U+20A0..U+20CF), and
+/// [`LineBreakClass::XX`] everywhere else.
+///
+/// The line break iterators resolve AI, SG, and XX to AL, SA to CM or
+/// AL, and CJ to NS before they apply the rules (LB1).
+/// [`WordBreak::BreakAll`](crate::WordBreak::BreakAll) resolves AI, CJ,
+/// SG, XX, and the SA letters to ID instead.
 ///
 /// ```
 /// use sigilbuzz_text_layout::{line_break_class, LineBreakClass};
@@ -167,6 +175,11 @@ pub(crate) fn lookup(c: char) -> (LineBreakClass, u8) {
 /// assert_eq!(line_break_class('\u{AC00}'), LineBreakClass::H2);
 /// assert_eq!(line_break_class('\u{1100}'), LineBreakClass::JL);
 /// assert_eq!(line_break_class('\u{1161}'), LineBreakClass::JV);
+/// // Unassigned code points in a CJK block, in Currency Symbols, and
+/// // in Greek.
+/// assert_eq!(line_break_class('\u{2A6E0}'), LineBreakClass::ID);
+/// assert_eq!(line_break_class('\u{20CF}'), LineBreakClass::PR);
+/// assert_eq!(line_break_class('\u{0378}'), LineBreakClass::XX);
 /// ```
 #[must_use]
 pub fn line_break_class(c: char) -> LineBreakClass {
@@ -229,6 +242,27 @@ mod tests {
         assert_eq!(line_break_class('\u{1F3FB}'), LineBreakClass::EM);
         assert_eq!(line_break_class('\u{1B05}'), LineBreakClass::AK);
         assert_eq!(line_break_class('\u{10FFFF}'), LineBreakClass::XX);
+    }
+
+    #[test]
+    fn unassigned_code_points_take_the_ucd_defaults() {
+        // ID in the CJK blocks, Planes 2 and 3, and the emoji ranges.
+        for c in [
+            '\u{FA6E}',
+            '\u{2A6E0}',
+            '\u{3FFFD}',
+            '\u{1F02C}',
+            '\u{1FFFD}',
+        ] {
+            assert_eq!(line_break_class(c), LineBreakClass::ID, "{c:?}");
+        }
+        // PR in Currency Symbols.
+        assert_eq!(line_break_class('\u{20C2}'), LineBreakClass::PR);
+        assert_eq!(line_break_class('\u{20CF}'), LineBreakClass::PR);
+        // XX elsewhere. Private use code points are XX too.
+        for c in ['\u{0378}', '\u{E0080}', '\u{E000}', '\u{10FFFF}'] {
+            assert_eq!(line_break_class(c), LineBreakClass::XX, "{c:?}");
+        }
     }
 
     #[test]
