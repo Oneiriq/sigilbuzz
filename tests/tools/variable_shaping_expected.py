@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Writes tests/fixtures/rubik_variable_shaping.expected from HarfBuzz.
 
-The expectations behind `tests/anchor_variations.rs`: HarfBuzz's glyphs and
-positions for short texts shaped with `tests/fixtures/rubik_vf.ttf` at
-several `wght` values, set as design coordinates the way
-`hb_font_set_variations` takes them. HarfBuzz rounds its variation deltas
-with `floor(x + 0.5)`.
+The expectations behind `tests/anchor_variations.rs` and
+`tests/variable_fonts.rs`: HarfBuzz's glyphs and positions for short texts
+shaped with `tests/fixtures/rubik_vf.ttf` at several `wght` values, set as
+design coordinates the way `hb_font_set_variations` takes them. HarfBuzz
+rounds the normalized coordinates to 16.16 before `avar` and to F2DOT14
+after, and rounds its variation deltas with `floor(x + 0.5)`.
 
 One record per line, fields separated by spaces:
 
@@ -44,8 +45,22 @@ ANCHOR_TEXTS = [
 ]
 ANCHOR_WEIGHTS = [300.0, 450.0, 600.0, 750.0, 900.0]
 
+# HVAR advances (`tests/variable_fonts.rs`). Rubik's default is 300; at
+# 493.75 the coordinate needs both of HarfBuzz's roundings, and at 700 the
+# F2DOT14 rounding moves some advances by a unit.
+ADVANCE_TEXTS = [
+    ("A", "ltr"),
+    ("Hello", "ltr"),
+    ("o", "ltr"),
+    ("Hello variable world", "ltr"),
+    ("AV To Yo", "ltr"),
+    ("\u0413\u043E", "ltr"),
+]
+ADVANCE_WEIGHTS = [350.0, 493.75, 500.0, 613.0, 700.0, 777.7, 900.0]
+
 GROUPS = [
     ("anchors", ANCHOR_WEIGHTS, ANCHOR_TEXTS),
+    ("advances", ADVANCE_WEIGHTS, ADVANCE_TEXTS),
 ]
 
 

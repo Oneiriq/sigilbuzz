@@ -207,6 +207,14 @@ pub(crate) fn hb_roundf(x: f32) -> f32 {
     floor_f32(x + 0.5)
 }
 
+/// `x` rounded with [`hb_roundf`] to a multiple of `1 / scale`, for a
+/// power-of-two `scale`: 65536 for HarfBuzz's 16.16 coordinates, 16384
+/// for F2DOT14. Scaling by a power of two is exact, so only the rounding
+/// changes the value.
+pub(crate) fn hb_round_to(x: f32, scale: f32) -> f32 {
+    hb_roundf(x * scale) / scale
+}
+
 /// [`hb_roundf`] as an `i32`, saturating at the type's bounds; NaN gives 0.
 pub(crate) fn hb_round(x: f32) -> i32 {
     // `as` saturates and maps NaN to zero.

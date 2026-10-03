@@ -21,6 +21,7 @@ use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, 
 use crate::error::{Error, Result};
 use crate::font::Font;
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
+use crate::tables::parse::hb_round_to;
 use crate::unicode::joining::{joining_type, JoiningType};
 use crate::unicode::{script_of, Script};
 
@@ -77,6 +78,13 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let is_vertical = !direction.is_horizontal();
 
     let face = font.face();
+    // HarfBuzz keeps normalized coordinates as F2DOT14 integers
+    // (`hb_font_t::coords`), so every variation below reads the
+    // caller's coordinates rounded to multiples of 1/16384, halves up.
+    // Coordinates that all round to zero are the default instance,
+    // where HarfBuzz reads no variations at all.
+    let rounded_coords = f2dot14_coords(font.coords());
+    let coords = rounded_coords.as_slice();
     let cmap = face.cmap()?;
     let hmtx = face.hmtx()?;
     // Vertical metrics and origin overrides are optional; only look
@@ -237,7 +245,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // left out here, as if the font had none.
     let var_store = gdef.as_ref().and_then(|g| g.item_variation_store());
     let select = |variations| {
-        crate::tables::layout::feature_variations::select(variations, font.coords(), var_store)
+        crate::tables::layout::feature_variations::select(variations, coords, var_store)
     };
     let gsub = face.gsub()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
@@ -751,7 +759,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // One `FontAdvances` serves the whole call: the origins, the
     // fallback spaces, and the `stch` stretch below ask it too, and it
     // keeps each glyph's phantom-point advance once computed.
-    let advances = position::FontAdvances::new(face, font.coords(), vmtx)?;
+    let advances = position::FontAdvances::new(face, coords, vmtx)?;
     if is_vertical {
         // VVAR carries per-glyph vertical-advance deltas; applies
         // only when the font is variable and the user requested
@@ -789,7 +797,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // deltas inside a ValueRecord actually respond to the user's
     // axis coords.
     let var = VarCtx {
-        coords: font.coords(),
+        coords,
         store: gdef.as_ref().and_then(|g| g.item_variation_store()),
     };
     let inputs = position::Inputs {
@@ -840,6 +848,30 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     Ok(ShapedRun { glyphs })
 }
 
+/// `coords` rounded to F2DOT14 as HarfBuzz stores them: each a multiple
+/// of 1/16384, rounded halves up, with NaN read as zero. Empty when every
+/// coordinate rounds to zero.
+///
+/// For a coordinate from [`crate::tables::Fvar::normalize_coords`] and
+/// [`crate::tables::Avar::remap_all`], a multiple `k / 65536`, this is
+/// HarfBuzz's `(k + 2) >> 2`.
+fn f2dot14_coords(coords: &[f32]) -> Vec<f32> {
+    let rounded: Vec<f32> = coords
+        .iter()
+        .map(|&c| {
+            if c.is_nan() {
+                0.0
+            } else {
+                hb_round_to(c, 16384.0)
+            }
+        })
+        .collect();
+    if rounded.iter().all(|&c| c == 0.0) {
+        return Vec::new();
+    }
+    rounded
+}
+
 /// The parts `ch` is split into before normalization, each keeping its
 /// cluster, or `None` for a character that is not split.
 ///
@@ -853,5 +885,24 @@ fn split_before_cmap(ch: char) -> Option<&'static [char]> {
         '\u{0E33}' => Some(&['\u{0E4D}', '\u{0E32}']),
         '\u{0EB3}' => Some(&['\u{0ECD}', '\u{0EB2}']),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f2dot14_coords;
+
+    #[test]
+    fn coords_round_to_f2dot14_like_harfbuzz() {
+        // HarfBuzz's `(k + 2) >> 2` for a 16.16 coordinate k / 65536.
+        for k in [-65536i32, -39322, -6, -3, -2, 2, 3, 6, 39322, 65536] {
+            let got = f2dot14_coords(&[k as f32 / 65536.0, 1.0]);
+            assert_eq!(got[0], ((k + 2) >> 2) as f32 / 16384.0, "{k}");
+        }
+        // Coordinates that all round to zero are the default instance.
+        assert!(f2dot14_coords(&[2.0 / 65536.0 - 1e-9, -2.0 / 65536.0]).is_empty());
+        assert!(f2dot14_coords(&[f32::NAN, 0.0]).is_empty());
+        assert!(f2dot14_coords(&[]).is_empty());
+        assert_eq!(f2dot14_coords(&[f32::NAN, 0.5]), [0.0, 0.5]);
     }
 }
