@@ -31,10 +31,10 @@
 //! # Malformed data
 //!
 //! A malformed layout structure (a GDEF list or entry, a GSUB or GPOS
-//! lookup or subtable, a Device table, an anchor) or vertical metrics
-//! table (`vhea`, `vmtx`, `VORG`, `VVAR`) is left out of the output,
-//! the way HarfBuzz's sanitizer neuters it, instead of failing the
-//! subset. Every piece left out this way is reported in
+//! lookup or subtable, a Device table, an anchor), vertical metrics
+//! table (`vhea`, `vmtx`, `VORG`, `VVAR`), or `BASE` is left out of the
+//! output, the way HarfBuzz's sanitizer neuters it, instead of failing
+//! the subset. Every piece left out this way is reported in
 //! [`SubsetOutput::warnings`] with its table, byte offset and reason;
 //! [`InstancedOutput::warnings`] does the same for [`instance()`].
 //!
@@ -49,7 +49,11 @@
 //!   its default and the kept glyphs' entries, renumbered. A malformed
 //!   `vhea`, `vmtx` or `VORG` (or a `vhea` or `vmtx` without its
 //!   partner) is left out and reported in [`SubsetOutput::warnings`].
-//! - Passed through: `name` and `OS/2`.
+//! - Passed through: `name`, `OS/2`, and `STAT`, which names no glyphs.
+//! - `BASE`: kept, with the reference glyph of each format 2
+//!   `BaseCoord` renumbered. A coordinate whose reference glyph is not
+//!   kept becomes format 1 with the same value. A `BASE` that cannot be
+//!   walked is left out and reported in [`SubsetOutput::warnings`].
 //! - Layout (`GSUB`, `GPOS`, `GDEF`): kept verbatim when every glyph
 //!   survives, rewritten at the byte level when glyph IDs change. Set
 //!   [`SubsetInput::retain_layout`] to `false` to drop them. A rebuilt
@@ -71,9 +75,12 @@
 //!   [`SubsetInput::retain_variations`] to `false` to drop them and get a
 //!   static subset at the default instance.
 //! - Dropped when [`SubsetInput::drop_unhandled`] is true (the default):
-//!   `kern`, `COLR`, `CPAL`, `morx`, and `kerx`, and any other table
-//!   without a subset implementation, such as `BASE` and `STAT`. With
-//!   the flag off, any of these returns [`SubsetError::Unsupported`].
+//!   every table without a subset implementation. That is `kern`,
+//!   `kerx`, `morx`, and the other AAT tables; `COLR` and `CPAL`; `MVAR`
+//!   and `cvar`; the bitmap tables (`CBDT`, `CBLC`, `EBDT`, `EBLC`,
+//!   `EBSC`, `sbix`) and `SVG `; `MATH` and `JSTF`; `gasp`, `hdmx`,
+//!   `LTSH`, `VDMX`, and `DSIG`; and any table not named above. With the
+//!   flag off, any of these returns [`SubsetError::Unsupported`].
 //!
 //! For CFF and CFF2 fonts:
 //!
@@ -83,8 +90,9 @@
 //!   That covers non-CID and CID-keyed CFF (FDArray and FDSelect) as well
 //!   as CFF2, with subroutines renumbered and unused ones dropped. `cmap`,
 //!   `hmtx`, `hhea`, `maxp`, and `post` are rebuilt too. Vertical metrics,
-//!   layout and variation tables follow the same rules as for `glyf`
-//!   fonts. A `CFF2` table keeps its own variation data.
+//!   `BASE`, `STAT`, layout and variation tables, and the drop list
+//!   follow the same rules as for `glyf` fonts. A `CFF2` table keeps
+//!   its own variation data.
 //!
 //! The byte-level building blocks ([`encode_index`], [`encode_dict_int`],
 //! [`emit_charset_auto`], [`emit_encoding_auto`], [`emit_fd_select_auto`],
@@ -128,6 +136,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 mod avar;
+mod base;
 mod cff;
 mod cff2;
 mod classdef;
@@ -202,9 +211,9 @@ const VARIATION_TABLES: [[u8; 4]; 6] = [
 ];
 
 /// Tables the subset always keeps unless they are malformed, when it
-/// leaves them out with a warning: the vertical metrics. Strict mode
-/// does not reject one that is missing from the output.
-const KEPT_UNLESS_MALFORMED: [[u8; 4]; 3] = [tag::VHEA, tag::VMTX, tag::VORG];
+/// leaves them out with a warning: the vertical metrics and `BASE`.
+/// Strict mode does not reject one that is missing from the output.
+const KEPT_UNLESS_MALFORMED: [[u8; 4]; 4] = [tag::VHEA, tag::VMTX, tag::VORG, tag::BASE];
 
 /// Subset configuration.
 #[derive(Debug, Clone)]
@@ -479,6 +488,7 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
 
     let warnings = Warnings::default();
     push_vertical_tables(face, &kept, &gid_map, &warnings, &mut tables);
+    push_base_and_stat(face, &gid_map, &warnings, &mut tables);
     push_layout_and_variation_tables(face, &kept, &gid_map, input, &warnings, &mut tables)?;
 
     // TrueType hinting tables. Kept glyph instructions call functions
@@ -524,6 +534,25 @@ fn push_vertical_tables(
     }
     if let Some(vorg) = vorg::subset_vorg(face, gid_map, warnings) {
         tables.push((tag::VORG, vorg));
+    }
+}
+
+/// Appends `BASE`, with the glyph ids of its format 2 coordinates
+/// renumbered, and `STAT`, which names no glyphs and passes through.
+/// Shared by the `glyf`, CFF, and CFF2 paths. A `BASE` that cannot be
+/// walked is left out and recorded in `warnings`; it never fails the
+/// subset.
+fn push_base_and_stat(
+    face: &Face<'_>,
+    gid_map: &[(GlyphId, GlyphId)],
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) {
+    if let Some(b) = base::subset_base(face, gid_map, warnings) {
+        tables.push((tag::BASE, b));
+    }
+    if let Some(b) = base::subset_stat(face) {
+        tables.push((base::STAT, b));
     }
 }
 
@@ -609,10 +638,10 @@ fn push_layout_and_variation_tables(
 /// In strict mode (`drop_unhandled` false), fails on any source table
 /// the subset did not emit. Layout, variable-font, and hinting tables
 /// are exempt: their own flags decide whether they stay, so dropping
-/// them is intended. So are the vertical metrics tables, which the
-/// subset always keeps unless they are malformed, and then reports in
-/// its warnings. In permissive mode the rest are dropped, because their
-/// glyph id references would be stale.
+/// them is intended. So are the vertical metrics tables and `BASE`,
+/// which the subset always keeps unless they are malformed, and then
+/// reports in its warnings. In permissive mode the rest are dropped,
+/// because their glyph id references would be stale.
 fn check_unhandled_tables(
     face: &Face<'_>,
     tables: &[([u8; 4], Vec<u8>)],
@@ -628,8 +657,8 @@ fn check_unhandled_tables(
             || HINTING_TABLES.contains(&rec.tag)
             || KEPT_UNLESS_MALFORMED.contains(&rec.tag);
         if !emitted && !exempt {
-            // kern / COLR / CPAL / morx / kerx / BASE / STAT and
-            // others have no subset implementation.
+            // kern / COLR / CPAL / morx / kerx / MVAR and others have
+            // no subset implementation.
             return Err(SubsetError::Unsupported(
                 "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
             ));
@@ -711,6 +740,7 @@ fn cff_non_identity(
 
     let warnings = Warnings::default();
     push_vertical_tables(face, kept, &gid_map, &warnings, &mut tables);
+    push_base_and_stat(face, &gid_map, &warnings, &mut tables);
     push_layout_and_variation_tables(face, kept, &gid_map, input, &warnings, &mut tables)?;
     check_unhandled_tables(face, &tables, input)?;
 

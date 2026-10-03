@@ -20,10 +20,11 @@ For TrueType fonts:
 | `hmtx`, `hhea`, `maxp`, `head` | Rewritten for the new glyph order. |
 | `vmtx`, `vhea`, `VORG` | Rewritten for the new glyph order, so vertical text keeps its advances and origins. A malformed one is left out with a warning. |
 | `post` | Written as format 3 (no glyph names). |
-| `name`, `OS/2` | Passed through unchanged. |
+| `name`, `OS/2`, `STAT` | Passed through unchanged. |
+| `BASE` | Kept, with the reference glyph of each format 2 coordinate renumbered. A coordinate whose reference glyph is dropped becomes format 1 with the same value. A malformed `BASE` is left out with a warning. |
 | `GSUB`, `GPOS`, `GDEF` | Kept as-is when every glyph survives, rewritten otherwise, FeatureVariations included. Off with `retain_layout: false`. |
 | `fvar`, `avar`, `gvar`, `HVAR`, `VVAR`, `VARC` | Kept. `fvar` and `avar` pass through, the others are rebuilt for the new glyph order. Off with `retain_variations: false`. |
-| `kern`, `COLR`, `CPAL`, `morx`, `kerx`, `BASE`, `STAT`, and other tables | Dropped by default. With `drop_unhandled: false` they return an error instead. |
+| `kern`, `kerx`, `morx` and the other AAT tables, `COLR`, `CPAL`, `MVAR`, `cvar`, `CBDT`, `CBLC`, `EBDT`, `EBLC`, `EBSC`, `sbix`, `SVG `, `MATH`, `JSTF`, `gasp`, `hdmx`, `LTSH`, `VDMX`, `DSIG`, and any table not named above | Dropped by default. With `drop_unhandled: false` they return an error instead. |
 
 CFF and CFF2 fonts are supported too, including CID-keyed CFF. Every other table follows
 the same rules as above. A `CFF2` table keeps its own variation data.
@@ -33,8 +34,8 @@ font, or pins some axes and leaves the rest variable.
 
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
 a Device table, an anchor), or a malformed vertical metrics table (`vhea`, `vmtx`,
-`VORG`, `VVAR`), is left out instead of failing the whole run, the way HarfBuzz
-handles it. Every piece left out is reported in `SubsetOutput::warnings` (or
+`VORG`, `VVAR`) or `BASE`, is left out instead of failing the whole run, the way
+HarfBuzz handles it. Every piece left out is reported in `SubsetOutput::warnings` (or
 `InstancedOutput::warnings`) with its table, byte offset, and reason.
 
 The output is deterministic: the same face and glyph set always give the same bytes.
