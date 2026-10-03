@@ -68,6 +68,9 @@ A requested character the font has no glyph for is an error, unless `--skip-miss
 is given: then it is skipped, and the command reports how many were.
 `--drop-layout` and `--drop-variations` drop tables that are kept by default.
 `--retain-hints` keeps hinting instructions, which are dropped by default.
+A malformed piece of the source font, such as a truncated `vmtx`, is left out of the
+subset, and the command prints a `warning:` line for it on stderr with the table, byte
+offset, reason, and what was left out. Warnings do not change the exit status.
 
 ### `sigilbuzz paint`
 
