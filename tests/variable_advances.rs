@@ -9,6 +9,8 @@
 //! - When a glyph's varied phantom points cannot be computed, the glyph
 //!   keeps its `hmtx` advance, the font's own default, and the rest of
 //!   the run is unaffected. Drawing the glyph still fails.
+//! - A vertical run without `VVAR` takes its advances from the varied
+//!   top and bottom phantom points, which `vmtx` places.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 
@@ -32,7 +34,8 @@ fn table(font: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
     })
 }
 
-/// `font` with `extra` tables appended to its table directory.
+/// `font` with `extra` tables added to its table directory, each
+/// replacing a table of the same tag.
 fn with_tables(font: &[u8], extra: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     let num_tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
     let mut records: Vec<([u8; 4], Vec<u8>)> = (0..num_tables)
@@ -42,6 +45,7 @@ fn with_tables(font: &[u8], extra: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
             let (offset, len) = table(font, &tag).unwrap();
             (tag, font[offset..offset + len].to_vec())
         })
+        .filter(|(tag, _)| extra.iter().all(|(t, _)| *t != tag))
         .collect();
     records.extend(extra.iter().map(|(tag, body)| (**tag, body.clone())));
     records.sort_by_key(|r| r.0);
@@ -202,5 +206,86 @@ fn a_malformed_glyph_keeps_its_static_advance() {
     assert_eq!(
         advances(&face, &coords, "AO ").unwrap(),
         [want[0], 891, want[2]]
+    );
+}
+
+#[test]
+fn a_vertical_run_without_vvar_takes_advances_from_phantom_points() {
+    // Hahmlet with vhea and vmtx (advance height 1000, top side bearing
+    // 50 for every glyph) and a gvar of its own, which at peak wght 1.0
+    // moves the top and bottom phantom points of `O` (glyph 4) by 40 and
+    // -25. Without VVAR the vertical advance comes from those points.
+    let blob = Blob::new(HAHMLET);
+    let face = Face::parse(&blob, 0).unwrap();
+    let o_points = face
+        .glyf()
+        .unwrap()
+        .point_count(&face.loca().unwrap(), 4)
+        .unwrap()
+        .unwrap();
+    let top = o_points - 2;
+    let mut vhea = broken_vhea();
+    vhea[34..36].copy_from_slice(&12u16.to_be_bytes());
+    let vmtx: Vec<u8> = (0..12).flat_map(|_| [0x03, 0xE8, 0, 50]).collect();
+    // One axis, no shared tuples, 12 glyphs with long offsets; only
+    // glyph 4 has data: one tuple with an embedded peak and private
+    // point numbers.
+    let mut gvar = Vec::new();
+    for v in [1u16, 0, 1, 0] {
+        gvar.extend_from_slice(&v.to_be_bytes());
+    }
+    let data_array = 20 + 4 * 13;
+    gvar.extend_from_slice(&(data_array as u32).to_be_bytes());
+    gvar.extend_from_slice(&12u16.to_be_bytes());
+    gvar.extend_from_slice(&1u16.to_be_bytes());
+    gvar.extend_from_slice(&(data_array as u32).to_be_bytes());
+    // One tuple, its data at 10: a header of data size (patched below),
+    // flags, and the peak.
+    let mut data = Vec::new();
+    for v in [1u16, 10, 0, 0xA000, 0x4000] {
+        data.extend_from_slice(&v.to_be_bytes());
+    }
+    let serialized = data.len();
+    data.extend_from_slice(&[2, 0x81]); // two points, as words
+    data.extend_from_slice(&top.to_be_bytes());
+    data.extend_from_slice(&1u16.to_be_bytes());
+    data.push(0x81); // two zero x deltas
+    data.push(0x41); // two y deltas, as words
+    data.extend_from_slice(&40i16.to_be_bytes());
+    data.extend_from_slice(&(-25i16).to_be_bytes());
+    let size = (data.len() - serialized) as u16;
+    data[4..6].copy_from_slice(&size.to_be_bytes());
+    for gid in 0..=12u32 {
+        let offset = if gid > 4 { data.len() as u32 } else { 0 };
+        gvar.extend_from_slice(&offset.to_be_bytes());
+    }
+    gvar.extend(data);
+    let bytes = with_tables(
+        HAHMLET,
+        &[(b"vhea", vhea), (b"vmtx", vmtx), (b"gvar", gvar)],
+    );
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    assert!(face.vvar().unwrap().is_none());
+
+    let y_advance = |wght: f32| {
+        let coords = hahmlet_coords(&face, wght);
+        let font = Font::new(face.clone(), 1000.0).with_coords(&coords);
+        let mut buffer = Buffer::new();
+        buffer.push_str("O");
+        buffer.set_direction(sigilbuzz::Direction::Ttb);
+        let run = shape(&font, &buffer, &[]).unwrap();
+        assert_eq!(run.glyphs[0].glyph_id, 4);
+        run.glyphs[0].y_advance
+    };
+    assert_eq!(y_advance(400.0), -1000);
+    assert_eq!(y_advance(900.0), -1065);
+    // The horizontal advance still comes from HVAR.
+    let coords = hahmlet_coords(&face, 900.0);
+    let intact_blob = Blob::new(HAHMLET);
+    let intact = Face::parse(&intact_blob, 0).unwrap();
+    assert_eq!(
+        advances(&face, &coords, "O").unwrap(),
+        advances(&intact, &coords, "O").unwrap()
     );
 }
