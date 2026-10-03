@@ -5,7 +5,8 @@
 
 use sigilbuzz::Glyph;
 use sigilbuzz_text_layout::{
-    line_break_opportunities, word_breaks, wrap_lines, LineRange, WrapOptions,
+    line_break_opportunities, line_break_opportunities_with, word_breaks, wrap_lines, LineRange,
+    WordBreak, WrapOptions,
 };
 
 fn glyph(cluster: u32, x_advance: i32) -> Glyph {
@@ -94,6 +95,29 @@ fn mixed_text(len: usize) -> String {
         '\u{2028}',
         '\u{FEFF}',
         '\u{10FFFF}',
+        // Hangul jamo (JL, JV, JT) and an LVT syllable (H3).
+        '\u{1100}',
+        '\u{1161}',
+        '\u{11A8}',
+        '\u{D55C}',
+        // Regional indicator, ZWJ, Hebrew (HL), Thai (SA letter and
+        // mark), Balinese aksara and virama (AK, VI), dotted circle.
+        '\u{1F1E6}',
+        '\u{200D}',
+        '\u{05D0}',
+        '\u{0E01}',
+        '\u{0E31}',
+        '\u{1B05}',
+        '\u{1B44}',
+        '\u{25CC}',
+        // BB, IN, CB, CJ, initial and final quotation marks, HH.
+        '\u{00B4}',
+        '\u{2024}',
+        '\u{FFFC}',
+        '\u{3041}',
+        '\u{201C}',
+        '\u{201D}',
+        '\u{2010}',
     ];
     let mut state: u32 = 0x1234_5678;
     (0..len)
@@ -104,17 +128,55 @@ fn mixed_text(len: usize) -> String {
         .collect()
 }
 
+const WORD_BREAKS: [WordBreak; 3] = [WordBreak::Normal, WordBreak::KeepAll, WordBreak::BreakAll];
+
 #[test]
 fn line_break_offsets_are_ordered_char_boundaries() {
     for len in [0, 1, 2, 3, 17, 500] {
         let text = mixed_text(len);
-        let mut prev = 0;
-        for (offset, _) in line_break_opportunities(&text) {
-            assert!(offset >= prev, "offsets went backwards in {text:?}");
-            assert!(offset <= text.len());
-            assert!(text.is_char_boundary(offset));
-            prev = offset;
+        for word_break in WORD_BREAKS {
+            let mut prev = 0;
+            for (offset, _) in line_break_opportunities_with(&text, word_break) {
+                assert!(offset > prev, "offsets not increasing in {text:?}");
+                assert!(offset <= text.len());
+                assert!(text.is_char_boundary(offset));
+                prev = offset;
+            }
+            assert_eq!(prev, text.len(), "no end-of-text break in {text:?}");
         }
+        assert!(line_break_opportunities(&text)
+            .eq(line_break_opportunities_with(&text, WordBreak::Normal)));
+    }
+}
+
+#[test]
+fn context_and_look_ahead_rules_stay_linear() {
+    // Long runs that the space context (LB8, LB14 to LB17), the number
+    // state (LB25), the regional indicator parity (LB30a, WB15), and
+    // the look-ahead past combining marks (LB15b, LB15c, LB19a, LB25,
+    // LB28a, WB6, WB12) walk over.
+    let marks = "\u{0301}".repeat(50_000);
+    let cases = [
+        format!("({}x", " ".repeat(200_000)),
+        format!("\u{200B}{}x", " ".repeat(200_000)),
+        format!("a\u{201D}{marks}b"),
+        format!(" .{marks}1"),
+        format!("$({marks}.{marks}1"),
+        format!("1{}", ",".repeat(200_000)),
+        format!("\u{1B05}{marks}\u{1B05}"),
+        format!("a:{marks}b 1.{marks}2"),
+        "\u{1F1E6}".repeat(100_000),
+        "\u{1100}".repeat(100_000),
+        "\u{201C}".repeat(100_000),
+        "\u{0E31}".repeat(100_000),
+        "\u{200D}".repeat(100_000),
+    ];
+    for text in &cases {
+        for word_break in WORD_BREAKS {
+            let last = line_break_opportunities_with(text, word_break).last();
+            assert_eq!(last.map(|(offset, _)| offset), Some(text.len()));
+        }
+        assert_eq!(word_breaks(text).last(), Some(text.len()));
     }
 }
 
@@ -147,15 +209,18 @@ fn wrap_lines_accepts_any_width_budget() {
         f32::MAX,
     ] {
         for break_at_word_boundaries in [true, false] {
-            let lines = wrap_lines(
-                &glyphs,
-                &text,
-                WrapOptions {
-                    max_width,
-                    break_at_word_boundaries,
-                },
-            );
-            assert_tiles(&text, &lines);
+            for word_break in WORD_BREAKS {
+                let lines = wrap_lines(
+                    &glyphs,
+                    &text,
+                    WrapOptions {
+                        max_width,
+                        break_at_word_boundaries,
+                        word_break,
+                    },
+                );
+                assert_tiles(&text, &lines);
+            }
         }
     }
 }
@@ -181,6 +246,7 @@ fn wrap_lines_ignores_glyphs_that_do_not_match_the_text() {
                 WrapOptions {
                     max_width,
                     break_at_word_boundaries,
+                    ..WrapOptions::default()
                 },
             );
             assert_tiles(text, &lines);
@@ -204,6 +270,7 @@ fn wrap_lines_long_tab_run_finishes() {
             WrapOptions {
                 max_width: 50.0,
                 break_at_word_boundaries,
+                ..WrapOptions::default()
             },
         );
         assert_tiles(&text, &lines);
@@ -223,6 +290,7 @@ fn wrap_lines_long_space_run_before_word_finishes() {
         WrapOptions {
             max_width: 3.0,
             break_at_word_boundaries: true,
+            ..WrapOptions::default()
         },
     );
     assert_tiles(&text, &lines);

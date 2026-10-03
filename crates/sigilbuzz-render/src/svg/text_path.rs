@@ -8,7 +8,7 @@ use sigilbuzz::tables::PathOp;
 use sigilbuzz::Face;
 
 use crate::affine::Affine;
-use crate::flatten::flatten;
+use crate::flatten::flatten_open;
 
 use super::clip_mask::{resolve_clip_shape, resolve_mask_shape};
 use super::document::{doc_full, push_fill, visit_cost, Defs, ElemCtx};
@@ -235,8 +235,11 @@ pub(super) struct PolyPoint {
 /// stroke for placement, matching the contract documented on
 /// [`TextPathInput`]. Tangent rotation and per-contour breaks are not
 /// supported.
+///
+/// The path is walked as drawn: a subpath without `Close` stays open,
+/// so an open reference path gets no return leg added to its length.
 pub(super) fn build_arc_length_polyline(ops: &[PathOp]) -> Vec<PolyPoint> {
-    let segs = flatten(
+    let segs = flatten_open(
         ops.iter().copied(),
         &Affine::identity(),
         DEFAULT_TOLERANCE_LOCAL,

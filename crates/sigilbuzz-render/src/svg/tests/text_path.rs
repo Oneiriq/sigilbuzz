@@ -26,6 +26,24 @@ fn arc_length_polyline_horizontal_line_lays_out_endpoints() {
 }
 
 #[test]
+fn arc_length_polyline_keeps_open_subpaths_open() {
+    // Fill flattening closes open contours, but a textPath reference is
+    // a curve to walk: neither subpath gets a return leg. Two 100-unit
+    // strokes give a total length of 200, not the 400 or so that the
+    // two close-lines would add.
+    let ops = vec![
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 100.0, y: 0.0 },
+        PathOp::MoveTo { x: 0.0, y: 50.0 },
+        PathOp::LineTo { x: 100.0, y: 50.0 },
+    ];
+    let poly = build_arc_length_polyline(&ops);
+    assert_eq!(poly.len(), 3);
+    assert!((poly[2].cum - 200.0).abs() < 1e-3, "got {}", poly[2].cum);
+    assert!((poly[2].x - 100.0).abs() < 1e-5 && (poly[2].y - 50.0).abs() < 1e-5);
+}
+
+#[test]
 fn sample_polyline_position_lerps_between_chord_endpoints() {
     let poly = vec![
         PolyPoint {

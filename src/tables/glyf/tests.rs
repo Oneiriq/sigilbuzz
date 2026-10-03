@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 mod composite;
 mod simple;
+mod variations;
 
 fn build_header(num_contours: i16, xmin: i16, ymin: i16, xmax: i16, ymax: i16) -> Vec<u8> {
     let mut out = Vec::new();

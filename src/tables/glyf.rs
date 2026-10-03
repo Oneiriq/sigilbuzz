@@ -52,13 +52,15 @@ mod simple;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::tables::gvar::Gvar;
 use crate::tables::hmtx::Hmtx;
 use crate::tables::loca::Loca;
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::{abs_f32, Reader};
 use crate::tables::vmtx::Vmtx;
 
-use simple::flatten_simple_glyph;
+use composite::read_components;
+use simple::{flatten_simple_glyph, simple_point_count};
 
 /// Glyph bounding box in font design units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,15 +119,17 @@ const FLAG_REPEAT: u8 = 0x08;
 const FLAG_X_SAME_OR_POS: u8 = 0x10;
 const FLAG_Y_SAME_OR_POS: u8 = 0x20;
 
-// Composite-glyph flag bits. ROUND_XY_TO_GRID (0x0004),
-// WE_HAVE_INSTRUCTIONS (0x0100), and USE_MY_METRICS (0x0200) only
-// matter to hinting and metrics, so the outline walk ignores them.
+// Composite-glyph flag bits. ROUND_XY_TO_GRID (0x0004) and
+// WE_HAVE_INSTRUCTIONS (0x0100) only matter to hinting, so the outline
+// walk ignores them. USE_MY_METRICS (0x0200) only matters to the
+// phantom points.
 const COMP_ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
 const COMP_ARGS_ARE_XY_VALUES: u16 = 0x0002;
 const COMP_WE_HAVE_A_SCALE: u16 = 0x0008;
 const COMP_MORE_COMPONENTS: u16 = 0x0020;
 const COMP_WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
 const COMP_WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+const COMP_USE_MY_METRICS: u16 = 0x0200;
 const COMP_SCALED_COMPONENT_OFFSET: u16 = 0x0800;
 const COMP_UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 
@@ -219,9 +223,9 @@ impl<'a> Glyf<'a> {
     /// of the 4 phantom points gvar expects (left-side-bearing,
     /// right-side-bearing, top, bottom). For simple glyphs the count
     /// comes from `endPtsOfContours[numContours-1] + 1`; composite
-    /// glyphs and zero-length glyphs return `None` (composites don't
-    /// participate in gvar's per-point delta scheme in sigilbuzz's
-    /// current cut).
+    /// glyphs and zero-length glyphs return `None`. A composite's gvar
+    /// points are its components instead, one each, which
+    /// [`Glyf::outline_at_coords`] handles.
     pub fn point_count(&self, loca: &Loca<'_>, glyph_id: u16) -> Result<Option<u16>> {
         let Some(body) = self.glyph_bytes(loca, glyph_id)? else {
             return Ok(None);
@@ -340,13 +344,17 @@ impl<'a> Glyf<'a> {
         vmtx: Option<&Vmtx<'_>>,
     ) -> Result<Option<Vec<(i16, i16)>>> {
         let metrics = PhantomMetrics { hmtx, vmtx };
+        let cx = FlattenCtx {
+            loca,
+            metrics: Some(&metrics),
+            var: None,
+        };
         let mut flat = FlatGlyph::default();
         let identity = Transform::identity();
         let drew = self.flatten(
-            loca,
+            &cx,
             glyph_id,
             None,
-            Some(&metrics),
             &identity,
             &mut flat,
             0,
@@ -368,10 +376,11 @@ impl<'a> Glyf<'a> {
 
     /// Drives `sink` with the ops for `glyph_id`, flattening
     /// composite glyphs recursively. `deltas` is an optional list
-    /// of `(dx, dy)` pairs in the glyph's point order. Supply the
-    /// output of [`crate::tables::Gvar::glyph_deltas`] folded into a
-    /// dense `[f32; num_points]` pair to apply variable-font
-    /// deltas. Pass `None` for the coord-free path.
+    /// of `(dx, dy)` pairs in the glyph's point order, added to the
+    /// points of a simple glyph before it is drawn; components of a
+    /// composite glyph never get them. Pass `None` for the coord-free
+    /// path. To draw a variable font at given coords, use
+    /// [`Glyf::outline_at_coords`], which also varies components.
     ///
     /// `metrics` supplies `hmtx` (and optionally `vmtx`) so anchor-mode
     /// composites whose anchor index points past the parent's contour
@@ -391,6 +400,149 @@ impl<'a> Glyf<'a> {
         metrics: Option<&PhantomMetrics<'_>>,
         sink: &mut S,
     ) -> Result<bool> {
+        let cx = FlattenCtx {
+            loca,
+            metrics,
+            var: None,
+        };
+        self.outline_with(&cx, glyph_id, deltas, sink)
+    }
+
+    /// Drives `sink` with the ops for `glyph_id` at the normalized
+    /// variation `coords`, with the glyph's `gvar` deltas applied the
+    /// way HarfBuzz applies them:
+    ///
+    /// - A simple glyph's points move by its deltas, with the points a
+    ///   tuple skips inferred from the points it lists (see
+    ///   [`Gvar::glyph_point_deltas`]).
+    /// - A composite glyph's deltas move its components, one delta per
+    ///   component, added to the component's x and y offset before the
+    ///   offset goes through the component's scale when
+    ///   `SCALED_COMPONENT_OFFSET` asks for that. The offset is not
+    ///   rounded. Each component is drawn at the same coords. A
+    ///   component placed by matching points ignores its delta: the
+    ///   points it matches already moved.
+    /// - Anchor points that name a phantom point use the phantom
+    ///   point moved by its delta.
+    ///
+    /// With no `gvar`, or with coords that are all zero (the default
+    /// instance), this draws the same outline as
+    /// [`Glyf::outline`] with no deltas. `metrics` works as in
+    /// [`Glyf::outline`].
+    ///
+    /// HarfBuzz also shifts the outline left by the x of phantom
+    /// point 1 (the left side bearing origin, see
+    /// [`Glyf::phantom_points_at_coords`]). That x is zero unless the
+    /// `hmtx` side bearing differs from the glyph's `xMin` or the
+    /// point varies; this method does not shift.
+    ///
+    /// Returns `Ok(false)` when the glyph id is valid but has no
+    /// outline data (whitespace glyph), `Ok(true)` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the glyph's `glyf` data or its `gvar`
+    /// data is malformed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::Outline;
+    /// use sigilbuzz::{Blob, Face};
+    ///
+    /// // A subset of Hahmlet, whose `wght` axis runs from 100 to 900.
+    /// let data = include_bytes!("../../tests/fixtures/hahmlet_gvar_subset.ttf");
+    /// let blob = Blob::new(data);
+    /// let face = Face::parse(&blob, 0)?;
+    /// let (loca, glyf, gvar) = (face.loca()?, face.glyf()?, face.gvar()?);
+    /// let o = 4; // `O`
+    /// let mut black = Outline::new();
+    /// glyf.outline_at_coords(&loca, o, gvar.as_ref(), &[1.0], None, &mut black)?;
+    /// let mut regular = Outline::new();
+    /// glyf.outline(&loca, o, None, None, &mut regular)?;
+    /// assert_eq!(black.len(), regular.len());
+    /// assert_ne!(black, regular);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn outline_at_coords<S: OutlineSink>(
+        &self,
+        loca: &Loca<'_>,
+        glyph_id: u16,
+        gvar: Option<&Gvar<'_>>,
+        coords: &[f32],
+        metrics: Option<&PhantomMetrics<'_>>,
+        sink: &mut S,
+    ) -> Result<bool> {
+        let cx = FlattenCtx {
+            loca,
+            metrics,
+            var: Variation::new(gvar, coords),
+        };
+        self.outline_with(&cx, glyph_id, None, sink)
+    }
+
+    /// Returns the four phantom points of `glyph_id` (left side
+    /// bearing origin, advance origin, top origin, bottom origin) at
+    /// the normalized variation `coords`, in the glyph's own frame.
+    ///
+    /// The default points come from `hmtx` and, when present, `vmtx`,
+    /// as for composite anchors. `gvar` then moves them by the glyph's
+    /// phantom deltas. A composite glyph takes the phantom points of
+    /// its last component flagged `USE_MY_METRICS`, at the same
+    /// coords, as HarfBuzz does. With no `gvar`, or coords that are
+    /// all zero, the points are the defaults.
+    ///
+    /// Without `HVAR`, HarfBuzz takes a varied glyph's advance from
+    /// these points: the x distance from the first to the second,
+    /// rounded and at least zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the glyph's `glyf`, `gvar`, or metrics
+    /// data is malformed, or composite glyphs nest too deep.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::glyf::PhantomMetrics;
+    /// use sigilbuzz::{Blob, Face};
+    ///
+    /// // A subset of Hahmlet, whose `wght` axis runs from 100 to 900.
+    /// let data = include_bytes!("../../tests/fixtures/hahmlet_gvar_subset.ttf");
+    /// let blob = Blob::new(data);
+    /// let face = Face::parse(&blob, 0)?;
+    /// let (loca, glyf, gvar, hmtx) = (face.loca()?, face.glyf()?, face.gvar()?, face.hmtx()?);
+    /// let metrics = PhantomMetrics { hmtx: &hmtx, vmtx: None };
+    /// let space = 9;
+    /// // The space advances 248 units at the default weight, 265 at 900.
+    /// let pp = glyf.phantom_points_at_coords(&loca, space, &metrics, gvar.as_ref(), &[1.0])?;
+    /// assert_eq!((pp[1].0 - pp[0].0).round(), 265.0);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn phantom_points_at_coords(
+        &self,
+        loca: &Loca<'_>,
+        glyph_id: u16,
+        metrics: &PhantomMetrics<'_>,
+        gvar: Option<&Gvar<'_>>,
+        coords: &[f32],
+    ) -> Result<[(f32, f32); 4]> {
+        let cx = FlattenCtx {
+            loca,
+            metrics: Some(metrics),
+            var: Variation::new(gvar, coords),
+        };
+        self.varied_phantoms(&cx, metrics, glyph_id, 0, &mut FlattenBudget::new())
+    }
+
+    /// Shared body of [`Glyf::outline`] and [`Glyf::outline_at_coords`].
+    fn outline_with<S: OutlineSink>(
+        &self,
+        cx: &FlattenCtx<'_>,
+        glyph_id: u16,
+        deltas: Option<&[(f32, f32)]>,
+        sink: &mut S,
+    ) -> Result<bool> {
         // Two-pass flattening: pass 1 walks the glyph (and any
         // composite children) into a flat point list with absolute
         // coordinates; pass 2 emits ops contour by contour. The
@@ -403,10 +555,9 @@ impl<'a> Glyf<'a> {
         let mut flat = FlatGlyph::default();
         let identity = Transform::identity();
         let drew = self.flatten(
-            loca,
+            cx,
             glyph_id,
             deltas,
-            metrics,
             &identity,
             &mut flat,
             0,
@@ -419,19 +570,75 @@ impl<'a> Glyf<'a> {
         Ok(true)
     }
 
+    /// Phantom points of `glyph_id` with its gvar deltas applied when
+    /// `cx` carries variations: HarfBuzz's phantom-only `get_points`.
+    /// `depth` and `budget` bound the walk through `USE_MY_METRICS`
+    /// components as they bound [`Glyf::flatten`].
+    fn varied_phantoms(
+        &self,
+        cx: &FlattenCtx<'_>,
+        metrics: &PhantomMetrics<'_>,
+        glyph_id: u16,
+        depth: u8,
+        budget: &mut FlattenBudget,
+    ) -> Result<[(f32, f32); 4]> {
+        if depth > MAX_COMPOSITE_DEPTH {
+            return Err(Error::Malformed {
+                offset: 0,
+                context: "glyf composite recursion exceeded cap",
+            });
+        }
+        budget.take_glyph()?;
+        let mut pp = self.phantom_points(cx.loca, glyph_id, metrics)?;
+        let Some(var) = cx.var else {
+            return Ok(pp);
+        };
+        // The glyph's own gvar points come first: contour points for a
+        // simple glyph, components for a composite, none when empty.
+        let mut components = Vec::new();
+        let own_points = match self.glyph_bytes(cx.loca, glyph_id)? {
+            Some(body) if body.len() >= 10 => {
+                let mut r = Reader::new(body);
+                let num_contours = r.read_i16()?;
+                r.skip(8)?; // bbox
+                if num_contours >= 0 {
+                    simple_point_count(&mut r, num_contours as u16)?
+                } else {
+                    components = read_components(&mut r)?;
+                    components.len()
+                }
+            }
+            _ => 0,
+        };
+        let deltas = var.gvar.phantom_deltas(glyph_id, var.coords, own_points)?;
+        for (p, d) in pp.iter_mut().zip(deltas) {
+            p.0 += d.0;
+            p.1 += d.1;
+        }
+        for c in components
+            .iter()
+            .filter(|c| c.flags & COMP_USE_MY_METRICS != 0)
+        {
+            pp = self.varied_phantoms(cx, metrics, c.glyph_id, depth + 1, budget)?;
+        }
+        Ok(pp)
+    }
+
     /// Flattens `glyph_id` (transformed by `tf`) into `out`. Returns
     /// `Ok(false)` for empty / out-of-range glyphs. Recurses through
     /// composite components, with `depth` capped by
     /// [`MAX_COMPOSITE_DEPTH`] and the total work capped by `budget`.
+    ///
+    /// `deltas` are dense per-point deltas for a simple root glyph
+    /// ([`Glyf::outline`]); variations in `cx` take their place.
     // The walk threads its tables, transform, output, and limits
     // through every level of the recursion.
     #[allow(clippy::too_many_arguments)]
     fn flatten(
         &self,
-        loca: &Loca<'_>,
+        cx: &FlattenCtx<'_>,
         glyph_id: u16,
         deltas: Option<&[(f32, f32)]>,
-        metrics: Option<&PhantomMetrics<'_>>,
         tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
@@ -444,7 +651,7 @@ impl<'a> Glyf<'a> {
             });
         }
         budget.take_glyph()?;
-        let Some(body) = self.glyph_bytes(loca, glyph_id)? else {
+        let Some(body) = self.glyph_bytes(cx.loca, glyph_id)? else {
             return Ok(false);
         };
         if body.len() < 10 {
@@ -454,12 +661,40 @@ impl<'a> Glyf<'a> {
         let num_contours = r.read_i16()?;
         r.skip(8)?; // bbox
         if num_contours >= 0 {
-            flatten_simple_glyph(&mut r, num_contours as u16, deltas, tf, out, budget)?;
+            let var = cx.var.map(|v| (v, glyph_id));
+            flatten_simple_glyph(&mut r, num_contours as u16, deltas, var, tf, out, budget)?;
         } else {
-            self.flatten_composite(&mut r, loca, glyph_id, metrics, tf, out, depth, budget)?;
+            self.flatten_composite(&mut r, cx, glyph_id, tf, out, depth, budget)?;
         }
         Ok(true)
     }
+}
+
+/// Variation inputs for one outline walk: the `gvar` table and the
+/// normalized coords to evaluate it at.
+#[derive(Debug, Clone, Copy)]
+struct Variation<'v> {
+    gvar: &'v Gvar<'v>,
+    coords: &'v [f32],
+}
+
+impl<'v> Variation<'v> {
+    /// `None` when there is nothing to vary: no `gvar`, or the default
+    /// instance (every coord zero), where HarfBuzz skips `gvar` too.
+    fn new(gvar: Option<&'v Gvar<'v>>, coords: &'v [f32]) -> Option<Self> {
+        let gvar = gvar?;
+        coords
+            .iter()
+            .any(|&c| c != 0.0)
+            .then_some(Self { gvar, coords })
+    }
+}
+
+/// Tables shared by every level of one outline walk.
+struct FlattenCtx<'c> {
+    loca: &'c Loca<'c>,
+    metrics: Option<&'c PhantomMetrics<'c>>,
+    var: Option<Variation<'c>>,
 }
 
 /// A 2x2 + translation affine transform. Used to flatten composite

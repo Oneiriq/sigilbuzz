@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use super::{round_f32_to_i16, Face};
 use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
+use crate::tables::outline::OutlineSink;
 use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Loca, Outline, PathOp};
 
 impl<'a> Face<'a> {
@@ -62,12 +63,15 @@ impl<'a> Face<'a> {
     }
 
     /// Returns the design-unit bounding box for `glyph_id` at the
-    /// given normalized axis coords. When `gvar` is present and any
-    /// tuple contributes a delta, the static bounds from `glyf` are
-    /// adjusted by the minimum / maximum `(dx, dy)` across every
-    /// contour point touched by the glyph's variation data. Missing
-    /// `gvar` (or coords that produce zero deltas) gives the same
-    /// answer as [`Face::glyph_bounds`].
+    /// given normalized axis coords.
+    ///
+    /// When the font varies (`gvar` is present and some coord is not
+    /// zero), the box is the extent of the varied outline's points,
+    /// off-curve points included, each edge rounded half away from
+    /// zero, as HarfBuzz computes glyph extents. A glyph whose varied
+    /// outline has no points gets an all-zero box. Otherwise the box
+    /// is the static one from [`Face::glyph_bounds`]. `num_contours`
+    /// always comes from the glyph header.
     pub fn glyph_bounds_at_coords(
         &self,
         glyph_id: u16,
@@ -76,54 +80,30 @@ impl<'a> Face<'a> {
         let Some(base) = self.glyph_bounds(glyph_id)? else {
             return Ok(None);
         };
+        if coords.iter().all(|&c| c == 0.0) {
+            return Ok(Some(base));
+        }
         let Some(gvar) = self.gvar()? else {
             return Ok(Some(base));
         };
-        // Composite glyphs and zero-contour glyphs return None here;
-        // sigilbuzz doesn't apply gvar deltas to those yet.
         let loca = self.loca()?;
         let glyf = self.glyf()?;
-        let Some(num_points) = glyf.point_count(&loca, glyph_id)? else {
-            return Ok(Some(base));
+        let hmtx = self.hmtx()?;
+        let vmtx = self.vmtx()?;
+        let metrics = PhantomMetrics {
+            hmtx: &hmtx,
+            vmtx: vmtx.as_ref(),
         };
-        let deltas = gvar.glyph_deltas(glyph_id, coords, num_points);
-        if deltas.is_empty() {
-            return Ok(Some(base));
-        }
-        // Simple glyphs carry points on contour edges; the bounding
-        // box tracks those extrema. A full renderer would interpolate
-        // composite glyphs and phantom points. sigilbuzz only needs
-        // an approximate bbox, so "shift corners by min/max deltas
-        // across touched points" is sufficient for layout work.
-        let mut x_lo = f32::INFINITY;
-        let mut x_hi = f32::NEG_INFINITY;
-        let mut y_lo = f32::INFINITY;
-        let mut y_hi = f32::NEG_INFINITY;
-        for d in &deltas {
-            if d.dx < x_lo {
-                x_lo = d.dx;
-            }
-            if d.dx > x_hi {
-                x_hi = d.dx;
-            }
-            if d.dy < y_lo {
-                y_lo = d.dy;
-            }
-            if d.dy > y_hi {
-                y_hi = d.dy;
-            }
-        }
-        if !x_lo.is_finite() {
-            return Ok(Some(base));
-        }
-        let adjusted = GlyphBounds {
-            x_min: base.x_min.saturating_add(round_f32_to_i16(x_lo)),
-            y_min: base.y_min.saturating_add(round_f32_to_i16(y_lo)),
-            x_max: base.x_max.saturating_add(round_f32_to_i16(x_hi)),
-            y_max: base.y_max.saturating_add(round_f32_to_i16(y_hi)),
-            num_contours: base.num_contours,
-        };
-        Ok(Some(adjusted))
+        let mut points = PointBox::default();
+        glyf.outline_at_coords(
+            &loca,
+            glyph_id,
+            Some(&gvar),
+            coords,
+            Some(&metrics),
+            &mut points,
+        )?;
+        Ok(Some(points.bounds(base.num_contours)))
     }
 
     /// Parses the `CFF ` (Compact Font Format 1) table.
@@ -264,36 +244,88 @@ impl<'a> Face<'a> {
             vmtx: vmtx.as_ref(),
         };
 
-        // Apply gvar if present and the font is variable.
-        if !coords.is_empty() {
-            if let Some(gvar) = self.gvar()? {
-                if let Some(num_points) = glyf.point_count(&loca, glyph_id)? {
-                    let deltas_sparse = gvar.glyph_deltas(glyph_id, coords, num_points);
-                    if !deltas_sparse.is_empty() {
-                        // Dense deltas indexed by point id. Phantom
-                        // points live at the end of the range but
-                        // don't appear in the simple-glyph coord
-                        // stream, so we only need the real-point
-                        // portion; outline() bounds-checks by slice
-                        // index.
-                        let mut dense: Vec<(f32, f32)> =
-                            alloc::vec![(0.0_f32, 0.0_f32); num_points as usize];
-                        for d in &deltas_sparse {
-                            if (d.point as usize) < dense.len() {
-                                dense[d.point as usize] = (d.dx, d.dy);
-                            }
-                        }
-                        let drew =
-                            glyf.outline(&loca, glyph_id, Some(&dense), Some(&metrics), &mut out)?;
-                        return Ok(drew.then_some(out));
-                    }
-                }
-            }
-        }
-
-        let drew = glyf.outline(&loca, glyph_id, None, Some(&metrics), &mut out)?;
+        // gvar moves simple glyphs' points and composite glyphs'
+        // components; `outline_at_coords` skips it at the default
+        // instance.
+        let gvar = if coords.is_empty() {
+            None
+        } else {
+            self.gvar()?
+        };
+        let drew = glyf.outline_at_coords(
+            &loca,
+            glyph_id,
+            gvar.as_ref(),
+            coords,
+            Some(&metrics),
+            &mut out,
+        )?;
         Ok(drew.then_some(out))
     }
+}
+
+/// Bounding box of every point an outline walk emits, off-curve
+/// points included. Implied on-curve points lie between two emitted
+/// points, so they never widen it.
+struct PointBox {
+    min: (f32, f32),
+    max: (f32, f32),
+}
+
+impl Default for PointBox {
+    fn default() -> Self {
+        Self {
+            min: (f32::INFINITY, f32::INFINITY),
+            max: (f32::NEG_INFINITY, f32::NEG_INFINITY),
+        }
+    }
+}
+
+impl PointBox {
+    fn add(&mut self, x: f32, y: f32) {
+        self.min = (self.min.0.min(x), self.min.1.min(y));
+        self.max = (self.max.0.max(x), self.max.1.max(y));
+    }
+
+    /// The box rounded half away from zero, or all zeros when no
+    /// point was seen.
+    fn bounds(&self, num_contours: i16) -> GlyphBounds {
+        if self.min.0 > self.max.0 {
+            return GlyphBounds {
+                x_min: 0,
+                y_min: 0,
+                x_max: 0,
+                y_max: 0,
+                num_contours,
+            };
+        }
+        GlyphBounds {
+            x_min: round_f32_to_i16(self.min.0),
+            y_min: round_f32_to_i16(self.min.1),
+            x_max: round_f32_to_i16(self.max.0),
+            y_max: round_f32_to_i16(self.max.1),
+            num_contours,
+        }
+    }
+}
+
+impl OutlineSink for PointBox {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.add(x, y);
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.add(x, y);
+    }
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        self.add(cx, cy);
+        self.add(x, y);
+    }
+    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
+        self.add(c1x, c1y);
+        self.add(c2x, c2y);
+        self.add(x, y);
+    }
+    fn close(&mut self) {}
 }
 
 /// Most VARC components one outline request may resolve, summed over

@@ -36,8 +36,9 @@ use crate::buffer::{Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
 use crate::tables::gdef::Gdef;
+use crate::tables::glyf::PhantomMetrics;
 use crate::tables::layout::{GlyphClasses, MatchGlyph};
-use crate::tables::{tag, Gpos};
+use crate::tables::{tag, Glyf, Gpos, Gvar, Hmtx, Hvar, Loca, Vmtx, Vvar};
 use crate::unicode::Script;
 
 /// Everything the positioning pass reads besides the glyphs.
@@ -269,22 +270,14 @@ pub(super) fn subtract_vertical_origins(
     coords: &[f32],
     glyphs: &mut [Glyph],
 ) -> Result<()> {
-    let hmtx = face.hmtx()?;
-    let hvar = if coords.is_empty() {
-        None
-    } else {
-        face.hvar()?
-    };
+    let advances = FontAdvances::new(face, coords)?;
     let vorg = face.vorg()?;
     let vmtx = face.vmtx()?;
     let hhea = face.hhea()?;
     let (ascender, descender) = (i32::from(hhea.ascent), i32::from(hhea.descent));
     for g in glyphs {
         let id = g.glyph_id as u16;
-        let mut h_advance = i32::from(hmtx.advance(id).unwrap_or(0));
-        if let Some(ref hvar) = hvar {
-            h_advance = h_advance.saturating_add(round_half_away(hvar.advance_delta(id, coords)));
-        }
+        let h_advance = advances.h_advance(g.glyph_id)?;
         let y_origin = match vorg {
             Some(ref vorg) => i32::from(vorg.vert_origin_y(id)),
             None => match glyph_top_and_height(face, id)? {
@@ -336,7 +329,7 @@ pub(super) fn has_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8;
 fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Vec<u16> {
     crate::ot::layout_select::feature_lookup_indices(
         gpos.script_list(),
-        gpos.feature_list(),
+        &gpos.features(),
         gpos.language_tags(),
         tag,
         script_priority,
@@ -350,7 +343,7 @@ fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Ve
 fn required_lookups(gpos: &Gpos<'_>, script_priority: &[[u8; 4]]) -> Vec<u16> {
     crate::ot::layout_select::required_feature(
         gpos.script_list(),
-        gpos.feature_list(),
+        &gpos.features(),
         gpos.language_tags(),
         script_priority,
     )
@@ -377,29 +370,115 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
     }
 }
 
-/// The font's horizontal advance of glyph `id`: its `hmtx` advance,
-/// moved by the `HVAR` delta at `coords` when the font varies (HarfBuzz's
-/// `hb_font_get_glyph_h_advance`), rounded to the nearest unit.
-pub(super) fn font_advance(
-    hmtx: &crate::tables::hmtx::Hmtx<'_>,
-    hvar: Option<&crate::tables::hvar::Hvar<'_>>,
-    coords: &[f32],
-    id: u32,
-) -> i32 {
-    let id = id as u16;
-    let base = i32::from(hmtx.advance(id).unwrap_or(0));
-    match hvar {
-        Some(hvar) => {
-            let delta = hvar.advance_delta(id, coords);
-            // Round to nearest without libm: the deltas are small.
-            let rounded = if delta >= 0.0 {
-                (delta + 0.5) as i32
-            } else {
-                (delta - 0.5) as i32
-            };
-            base.saturating_add(rounded)
+/// The font's advances at a set of coords, as HarfBuzz's
+/// `hb_ot_get_glyph_h_advances` and `hb_ot_get_glyph_v_advances` read
+/// them. At the default instance (no coords, or all zero) an advance
+/// is the `hmtx` (or `vmtx`) one. Otherwise:
+///
+/// - with `HVAR` (or `VVAR`), the advance moves by the rounded delta;
+/// - without it but with `gvar`, the advance is the distance between
+///   the glyph's phantom points moved by their `gvar` deltas (see
+///   [`Glyf::phantom_points_at_coords`]): the first two in x
+///   horizontally, the last two in y vertically, rounded and at least
+///   zero.
+pub(super) struct FontAdvances<'a, 'c> {
+    hmtx: Hmtx<'a>,
+    vmtx: Option<Vmtx<'a>>,
+    coords: &'c [f32],
+    /// `None` at the default instance.
+    hvar: Option<Hvar<'a>>,
+    vvar: Option<Vvar<'a>>,
+    /// The tables of the phantom-point fallback, away from the default
+    /// instance in a `glyf` font with `gvar`.
+    phantoms: Option<PhantomTables<'a>>,
+}
+
+/// The tables the varied phantom points of a `glyf` glyph need.
+struct PhantomTables<'a> {
+    glyf: Glyf<'a>,
+    loca: Loca<'a>,
+    gvar: Gvar<'a>,
+}
+
+impl<'a, 'c> FontAdvances<'a, 'c> {
+    /// Reads the tables the advances of `face` at `coords` come from.
+    pub(super) fn new(face: &Face<'a>, coords: &'c [f32]) -> Result<Self> {
+        let mut advances = Self {
+            hmtx: face.hmtx()?,
+            vmtx: face.vmtx()?,
+            coords,
+            hvar: None,
+            vvar: None,
+            phantoms: None,
+        };
+        if coords.iter().all(|&c| c == 0.0) {
+            return Ok(advances);
         }
-        None => base,
+        advances.hvar = face.hvar()?;
+        advances.vvar = face.vvar()?;
+        if advances.hvar.is_none() || advances.vvar.is_none() {
+            if let (Some(gvar), true) = (face.gvar()?, face.record(tag::GLYF).is_some()) {
+                advances.phantoms = Some(PhantomTables {
+                    glyf: face.glyf()?,
+                    loca: face.loca()?,
+                    gvar,
+                });
+            }
+        }
+        Ok(advances)
+    }
+
+    /// The horizontal advance of glyph `id`, in font units.
+    ///
+    /// # Errors
+    ///
+    /// On the phantom-point fallback, returns the error of a glyph
+    /// whose `glyf` or `gvar` data is malformed.
+    pub(super) fn h_advance(&self, id: u32) -> Result<i32> {
+        let id = id as u16;
+        let base = i32::from(self.hmtx.advance(id).unwrap_or(0));
+        if let Some(hvar) = &self.hvar {
+            return Ok(base.saturating_add(round_half_away(hvar.advance_delta(id, self.coords))));
+        }
+        match self.varied_phantoms(id)? {
+            Some(pp) => Ok(round_half_away(pp[1].0 - pp[0].0).max(0)),
+            None => Ok(base),
+        }
+    }
+
+    /// The vertical advance of glyph `id` from `vmtx`, in font units,
+    /// positive downward.
+    ///
+    /// # Errors
+    ///
+    /// As [`FontAdvances::h_advance`].
+    pub(super) fn v_advance(&self, vmtx: &Vmtx<'_>, id: u32) -> Result<i32> {
+        let id = id as u16;
+        let base = i32::from(vmtx.advance(id).unwrap_or(0));
+        if let Some(vvar) = &self.vvar {
+            return Ok(
+                base.saturating_add(round_half_away(vvar.advance_height_delta(id, self.coords)))
+            );
+        }
+        match self.varied_phantoms(id)? {
+            Some(pp) => Ok(round_half_away(pp[2].1 - pp[3].1).max(0)),
+            None => Ok(base),
+        }
+    }
+
+    /// The phantom points of glyph `id` at the coords, or `None` when
+    /// the advances do not come from them.
+    fn varied_phantoms(&self, id: u16) -> Result<Option<[(f32, f32); 4]>> {
+        let Some(t) = &self.phantoms else {
+            return Ok(None);
+        };
+        let metrics = PhantomMetrics {
+            hmtx: &self.hmtx,
+            vmtx: self.vmtx.as_ref(),
+        };
+        t.glyf
+            .phantom_points_at_coords(&t.loca, id, &metrics, Some(&t.gvar), self.coords)
+            .map(Some)
     }
 }
 

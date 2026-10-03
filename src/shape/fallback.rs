@@ -140,27 +140,19 @@ pub(super) fn adjust_spaces(
 
 /// The advance of glyph `gid` along the run, as the default positioning
 /// computes it: `hmtx` (plus `HVAR`) horizontally, `vmtx` (plus `VVAR`)
-/// or the ascender-to-descender height vertically. Always positive.
+/// or the ascender-to-descender height vertically, with the varied
+/// phantom points of a `glyf` font standing in for a missing `HVAR` or
+/// `VVAR` (see `position::FontAdvances`). Always positive.
 fn advance(face: &Face<'_>, coords: &[f32], gid: u16, horizontal: bool) -> Result<i32> {
-    let round = super::position::round_half_away;
+    let advances = super::position::FontAdvances::new(face, coords)?;
     if horizontal {
-        let base = i32::from(face.hmtx()?.advance(gid).unwrap_or(0));
-        let delta = match (coords.is_empty(), face.hvar()?) {
-            (false, Some(hvar)) => round(hvar.advance_delta(gid, coords)),
-            _ => 0,
-        };
-        return Ok(base.saturating_add(delta));
+        return advances.h_advance(u32::from(gid));
     }
     let Some(vmtx) = face.vmtx()? else {
         let hhea = face.hhea()?;
         return Ok(i32::from(hhea.ascent) - i32::from(hhea.descent));
     };
-    let base = i32::from(vmtx.advance(gid).unwrap_or(0));
-    let delta = match (coords.is_empty(), face.vvar()?) {
-        (false, Some(vvar)) => round(vvar.advance_height_delta(gid, coords)),
-        _ => 0,
-    };
-    Ok(base.saturating_add(delta))
+    advances.v_advance(&vmtx, u32::from(gid))
 }
 
 #[cfg(test)]

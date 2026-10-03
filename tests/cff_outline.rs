@@ -52,7 +52,10 @@ fn cff2_outline_returns_some_for_source_sans() {
     assert!(moves >= 1, "no MoveTo");
     assert!(lines >= 1, "no LineTo");
     assert_eq!(quads, 0, "CFF emits cubics, not quads");
-    assert!(closes >= moves.saturating_sub(1), "missing Close ops");
+    // Every contour is closed, the last one included: CFF2 has no
+    // endchar, so the outline closes it when the charstring ends.
+    assert_eq!(closes, moves, "every contour must end with Close");
+    assert_eq!(a.ops().last(), Some(&PathOp::Close));
     assert!(
         curves >= 1,
         "expected at least one CubicTo on Source Sans A"

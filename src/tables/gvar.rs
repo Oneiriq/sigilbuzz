@@ -4,9 +4,15 @@
 //! varies a glyph's *advance* across the design space, `gvar` varies
 //! every contour point: at coord `c` the rendered point at index `i`
 //! is the base glyph's point `i` plus the weighted sum of per-region
-//! `(dx, dy)` deltas for that point. sigilbuzz doesn't rasterize yet,
-//! but `glyph_bounds_at_coords` needs the deltas to shift the glyph
-//! bounding box, which is all this parser exposes today.
+//! `(dx, dy)` deltas for that point.
+//!
+//! A tuple may list deltas for only some points. The points it skips
+//! get inferred deltas (the spec's "interpolation of untouched
+//! points", IUP): each skipped point takes its delta from the nearest
+//! listed points before and after it on the same contour.
+//! [`Gvar::glyph_point_deltas`] does that per tuple, the way HarfBuzz
+//! does, and is what the outline and advance code uses.
+//! [`Gvar::glyph_deltas`] only reports the listed deltas.
 //!
 //! # Layout
 //!
@@ -49,6 +55,11 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::parse::{abs_f32, Reader};
+
+#[cfg(test)]
+mod iup_tests;
+#[cfg(test)]
+pub(crate) mod testing;
 
 /// A parsed `gvar` table.
 #[derive(Debug, Clone)]
@@ -149,6 +160,12 @@ impl<'a> Gvar<'a> {
     /// Glyphs with no variation data, or with indices past the end,
     /// return an empty vector.
     ///
+    /// Only the deltas the tuples list are reported: points a tuple
+    /// skips get no inferred delta here. Use
+    /// [`Gvar::glyph_point_deltas`] for the deltas a renderer applies.
+    /// Malformed variation data also yields an empty vector; the
+    /// `Result` of [`Gvar::glyph_point_deltas`] reports it instead.
+    ///
     /// `num_points` is the glyph's total point count, inclusive of
     /// the 4 phantom points gvar expects (obtain from
     /// [`crate::tables::Glyf::point_count`]). It's required because
@@ -157,32 +174,178 @@ impl<'a> Gvar<'a> {
     ///
     /// The returned `PointDelta`s are ordered by first appearance of
     /// each point index (deltas for the same point are summed into
-    /// one entry). Callers that only care about the outline bounding
-    /// box can reduce via min/max on `dx` and `dy`.
+    /// one entry).
     #[must_use]
     pub fn glyph_deltas(&self, glyph_id: u16, coords: &[f32], num_points: u16) -> Vec<PointDelta> {
-        let Some((start, end)) = self.glyph_range(glyph_id) else {
-            return Vec::new();
-        };
-        if start == end {
-            return Vec::new();
+        // Accumulate deltas into an insertion-ordered table keyed by
+        // point index. A `Vec<PointDelta>` gives deterministic
+        // output and avoids HashMap ordering nondeterminism.
+        let mut acc = DeltaAccumulator::default();
+        let walked = self.walk_tuples(glyph_id, coords, usize::from(num_points), |t| {
+            match t.points {
+                None => {
+                    for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate() {
+                        acc.add(i as u16, t.scalar * x as f32, t.scalar * y as f32);
+                    }
+                }
+                Some(points) => {
+                    for ((&pt, &x), &y) in points.iter().zip(t.xs).zip(t.ys) {
+                        acc.add(pt, t.scalar * x as f32, t.scalar * y as f32);
+                    }
+                }
+            }
+        });
+        match walked {
+            Ok(()) => acc.deltas,
+            Err(_) => Vec::new(),
         }
-        // Checked: two u32 offsets can overflow a 32-bit usize.
-        let base = self.data_array_off as usize;
-        let (Some(gvd_start), Some(gvd_end)) = (
-            base.checked_add(start as usize),
-            base.checked_add(end as usize),
-        ) else {
-            return Vec::new();
-        };
-        if gvd_start >= gvd_end {
-            return Vec::new();
+    }
+
+    /// Returns the delta of every point of `glyph_id` at the given
+    /// normalized coords, with the points each tuple skips inferred
+    /// from the points it lists (IUP), as HarfBuzz does.
+    ///
+    /// `points` are the glyph's own points in glyph order, without
+    /// the phantom points: the contour points of a simple glyph, or
+    /// one point per component of a composite glyph (its x and y
+    /// offset). `end_points` are the simple glyph's
+    /// `endPtsOfContours`. Inference runs per contour and only for
+    /// points on a contour, so a composite glyph passes an empty
+    /// `end_points` and gets the listed deltas only, as do the
+    /// phantom points.
+    ///
+    /// The result holds `points.len() + 4` deltas: one per point, then
+    /// the four phantom points (left side bearing origin, advance
+    /// origin, top origin, and bottom origin). Glyphs without
+    /// variation data get all zeros.
+    ///
+    /// Inference works per tuple, on the tuple's deltas already
+    /// scaled by its region scalar, before the tuples are summed. For
+    /// each point a tuple skips, it finds the nearest listed points
+    /// before and after it on the contour (wrapping around), and per
+    /// axis:
+    ///
+    /// - when the two listed points share the coordinate, it takes
+    ///   their delta if they agree, otherwise zero;
+    /// - when the point lies outside the two coordinates, it takes the
+    ///   delta of the nearer one;
+    /// - otherwise it interpolates linearly between the two deltas.
+    ///
+    /// A contour with one listed point moves rigidly by that point's
+    /// delta. A contour with no listed points does not move. Listed
+    /// point numbers past the end are ignored; a point listed twice
+    /// gets both deltas.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Truncated`] or [`Error::Malformed`] when the
+    /// glyph's variation data runs past its bounds or does not decode.
+    /// The offset counts from the start of the `gvar` table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigilbuzz::tables::Gvar;
+    ///
+    /// // A gvar with one axis and no glyph variation data.
+    /// let mut bytes = Vec::new();
+    /// for v in [1u16, 0, 1, 0] {
+    ///     bytes.extend_from_slice(&v.to_be_bytes()); // version, axes, shared tuples
+    /// }
+    /// bytes.extend_from_slice(&0u32.to_be_bytes()); // shared tuples offset
+    /// bytes.extend_from_slice(&1u16.to_be_bytes()); // glyph count
+    /// bytes.extend_from_slice(&0u16.to_be_bytes()); // short offsets
+    /// bytes.extend_from_slice(&24u32.to_be_bytes()); // data array offset
+    /// bytes.extend_from_slice(&[0, 0, 0, 0]); // glyph 0 has no data
+    /// let gvar = Gvar::parse(&bytes)?;
+    /// let deltas = gvar.glyph_point_deltas(0, &[1.0], &[(0, 0), (100, 0)], &[1])?;
+    /// assert_eq!(deltas, vec![(0.0, 0.0); 6]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
+    pub fn glyph_point_deltas(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        points: &[(i32, i32)],
+        end_points: &[u16],
+    ) -> Result<Vec<(f32, f32)>> {
+        let count = points.len() + PHANTOM_COUNT;
+        let mut total = alloc::vec![(0.0_f32, 0.0_f32); count];
+        // Contour membership, from the end point numbers. Points past
+        // the last end point (and the phantom points) are on no
+        // contour, so inference never touches them.
+        let mut is_end = alloc::vec![false; points.len()];
+        for &e in end_points {
+            if let Some(flag) = is_end.get_mut(usize::from(e)) {
+                *flag = true;
+            }
         }
-        let Some(body) = self.data.get(gvd_start..gvd_end) else {
-            return Vec::new();
+        // Per-tuple scratch, sized on the first tuple that lists its
+        // points.
+        let mut tuple: Vec<(f32, f32)> = Vec::new();
+        let mut listed: Vec<bool> = Vec::new();
+        self.walk_tuples(glyph_id, coords, count, |t| match t.points {
+            None => {
+                for ((slot, &x), &y) in total.iter_mut().zip(t.xs).zip(t.ys) {
+                    slot.0 += t.scalar * x as f32;
+                    slot.1 += t.scalar * y as f32;
+                }
+            }
+            Some(numbers) => {
+                tuple.clear();
+                tuple.resize(count, (0.0, 0.0));
+                listed.clear();
+                listed.resize(count, false);
+                for ((&pt, &x), &y) in numbers.iter().zip(t.xs).zip(t.ys) {
+                    let i = usize::from(pt);
+                    let Some(slot) = tuple.get_mut(i) else {
+                        continue;
+                    };
+                    slot.0 += t.scalar * x as f32;
+                    slot.1 += t.scalar * y as f32;
+                    listed[i] = true;
+                }
+                infer_unlisted(&mut tuple, &listed, points, &is_end);
+                for (slot, d) in total.iter_mut().zip(&tuple) {
+                    slot.0 += d.0;
+                    slot.1 += d.1;
+                }
+            }
+        })?;
+        Ok(total)
+    }
+
+    /// Deltas of the four phantom points of a glyph with `num_points`
+    /// points of its own (contour points, or components). Only listed
+    /// deltas apply: phantom points are on no contour.
+    pub(crate) fn phantom_deltas(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        num_points: usize,
+    ) -> Result<[(f32, f32); 4]> {
+        let mut out = [(0.0_f32, 0.0_f32); PHANTOM_COUNT];
+        let mut add = |i: usize, x: i32, y: i32, scalar: f32| {
+            if let Some(slot) = i.checked_sub(num_points).and_then(|p| out.get_mut(p)) {
+                slot.0 += scalar * x as f32;
+                slot.1 += scalar * y as f32;
+            }
         };
-        self.deltas_from_glyph_data(body, coords, num_points)
-            .unwrap_or_default()
+        self.walk_tuples(glyph_id, coords, num_points + PHANTOM_COUNT, |t| {
+            match t.points {
+                None => {
+                    for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate().skip(num_points) {
+                        add(i, x, y, t.scalar);
+                    }
+                }
+                Some(numbers) => {
+                    for ((&pt, &x), &y) in numbers.iter().zip(t.xs).zip(t.ys) {
+                        add(usize::from(pt), x, y, t.scalar);
+                    }
+                }
+            }
+        })?;
+        Ok(out)
     }
 
     fn glyph_range(&self, glyph_id: u16) -> Option<(u32, u32)> {
@@ -194,12 +357,68 @@ impl<'a> Gvar<'a> {
         Some((start, end))
     }
 
-    fn deltas_from_glyph_data(
+    /// Decodes every tuple of `glyph_id` whose region scalar at
+    /// `coords` is not zero and hands it to `visit`, in table order.
+    /// `num_points` is the glyph's point count including the phantom
+    /// points: the all-points form packs that many deltas.
+    ///
+    /// Glyph ids past the end and glyphs with no data visit nothing.
+    /// Errors carry offsets from the start of the table.
+    fn walk_tuples<F>(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        num_points: usize,
+        mut visit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&TupleDeltas<'_>),
+    {
+        let Some((start, end)) = self.glyph_range(glyph_id) else {
+            return Ok(());
+        };
+        if start == end {
+            return Ok(());
+        }
+        // The offset array entry for this glyph, for error reports.
+        let entry_size = if self.long_offsets { 4 } else { 2 };
+        let entry = GVAR_HEADER_SIZE + usize::from(glyph_id) * entry_size;
+        if start > end {
+            return Err(Error::Malformed {
+                offset: entry,
+                context: "gvar glyph data offsets decrease",
+            });
+        }
+        // Checked: two u32 offsets can overflow a 32-bit usize.
+        let base = self.data_array_off as usize;
+        let (Some(gvd_start), Some(gvd_end)) = (
+            base.checked_add(start as usize),
+            base.checked_add(end as usize),
+        ) else {
+            return Err(Error::Malformed {
+                offset: entry,
+                context: "gvar glyph data offset overflows",
+            });
+        };
+        let Some(body) = self.data.get(gvd_start..gvd_end) else {
+            return Err(Error::Truncated {
+                offset: gvd_start.min(self.data.len()),
+                context: "gvar glyph data past end of table",
+            });
+        };
+        self.walk_glyph_data(body, coords, num_points, &mut visit)
+            .map_err(|e| rebase(e, gvd_start))
+    }
+
+    /// [`Gvar::walk_tuples`] on one `GlyphVariationData`. Errors carry
+    /// offsets from the start of `body`.
+    fn walk_glyph_data(
         &self,
         body: &[u8],
         coords: &[f32],
-        num_points: u16,
-    ) -> Result<Vec<PointDelta>> {
+        num_points: usize,
+        visit: &mut dyn FnMut(&TupleDeltas<'_>),
+    ) -> Result<()> {
         let mut r = Reader::new(body);
         let tvc = r.read_u16()?;
         let tuple_count = tvc & 0x0FFF;
@@ -218,42 +437,38 @@ impl<'a> Gvar<'a> {
         // Data area starts at data_off from the beginning of the
         // GlyphVariationData. Shared point numbers (if any) come
         // first, consuming their own bytes from that region.
-        if data_off > body.len() {
+        let Some(data_region) = body.get(data_off..) else {
             return Err(Error::Truncated {
-                offset: data_off,
+                offset: 2,
                 context: "gvar glyph data offset past end",
             });
-        }
-        let data_region = &body[data_off..];
+        };
         let mut cursor = 0usize;
 
+        // An empty list from a shared-points block signals the
+        // all-points shortcut.
         let shared_points: Option<Vec<u16>> = if has_shared_points {
-            let (pts, used) = read_packed_point_numbers(data_region)?;
+            let (pts, used) =
+                read_packed_point_numbers(data_region).map_err(|e| rebase(e, data_off))?;
             cursor = used;
             Some(pts)
         } else {
             None
         };
-        // An empty Vec from a shared-points block signals the
-        // all-points shortcut. Downstream differentiates with
-        // `shared_points_is_all_points`.
-        let shared_points_is_all_points =
-            has_shared_points && shared_points.as_ref().is_some_and(Vec::is_empty);
 
-        // Accumulate deltas into an insertion-ordered table keyed by
-        // point index. A `Vec<PointDelta>` gives deterministic
-        // output and avoids HashMap ordering nondeterminism.
-        let mut acc = DeltaAccumulator::default();
-
+        // Every visited tuple costs the caller work in proportion to
+        // the point count, so a glyph of many small tuples over many
+        // points is capped, as HarfBuzz charges its budget per tuple.
+        let mut work = 0usize;
         for header in &headers {
+            let tuple_start = cursor;
             let tuple_data_len = header.variation_data_size as usize;
-            if cursor + tuple_data_len > data_region.len() {
+            let Some(tuple_bytes) = data_region.get(cursor..cursor + tuple_data_len) else {
                 return Err(Error::Truncated {
-                    offset: cursor,
+                    offset: data_off + cursor,
                     context: "gvar tuple data region truncated",
                 });
-            }
-            let tuple_bytes = &data_region[cursor..cursor + tuple_data_len];
+            };
             cursor += tuple_data_len;
 
             // Resolve this tuple's peak / intermediate region.
@@ -277,71 +492,174 @@ impl<'a> Gvar<'a> {
                 continue;
             }
 
+            work = work.saturating_add(num_points.max(1));
+            if work > MAX_TUPLE_WORK {
+                return Err(Error::Malformed {
+                    offset: 0,
+                    context: "gvar glyph variation data exceeds the work cap",
+                });
+            }
+
             // Within the tuple's bytes: optional private point
             // numbers, then packed x deltas, then packed y deltas.
+            let at = |e: Error| rebase(e, data_off + tuple_start);
             let mut tr = 0usize;
-            // Decide which point list applies, and whether this is
-            // the all-points case.
-            let (private_points, tuple_is_all_points) = if header.private_point_numbers {
-                let (pts, used) = read_packed_point_numbers(tuple_bytes)?;
+            let private_points = if header.private_point_numbers {
+                let (pts, used) = read_packed_point_numbers(tuple_bytes).map_err(at)?;
                 tr = used;
-                let all_pts = pts.is_empty();
-                (Some(pts), all_pts)
+                Some(pts)
             } else {
-                (None, false)
+                None
             };
+            // Neither private nor shared point numbers means all
+            // points, as does an empty list.
+            let points: Option<&[u16]> = private_points
+                .as_deref()
+                .or(shared_points.as_deref())
+                .filter(|p| !p.is_empty());
 
-            let point_numbers: &[u16] = if let Some(ref pts) = private_points {
-                pts.as_slice()
-            } else if let Some(ref sp) = shared_points {
-                sp.as_slice()
-            } else {
-                &[]
-            };
-            let is_all_points = if header.private_point_numbers {
-                tuple_is_all_points
-            } else if has_shared_points {
-                shared_points_is_all_points
-            } else {
-                // Neither private nor shared point numbers present:
-                // spec says this is equivalent to the all-points
-                // shortcut.
-                true
-            };
-
-            // X and Y streams each carry exactly `n` deltas, where n
-            // is `num_points` in the all-points shortcut or
-            // `point_numbers.len()` otherwise.
-            let n = if is_all_points {
-                num_points as usize
-            } else {
-                point_numbers.len()
-            };
-            let (xs, consumed_x) = read_packed_deltas_n(&tuple_bytes[tr..], n)?;
+            // X and Y streams each carry exactly `n` deltas: one per
+            // listed point, or one per point in the all-points form.
+            let n = points.map_or(num_points, <[u16]>::len);
+            let (xs, consumed_x) = read_packed_deltas_n(&tuple_bytes[tr..], n)
+                .map_err(|e| rebase(e, data_off + tuple_start + tr))?;
             tr += consumed_x;
-            let (ys, _consumed_y) = read_packed_deltas_n(&tuple_bytes[tr..], n)?;
-
-            if is_all_points {
-                for i in 0..n {
-                    let pt = i as u16;
-                    let dx = scalar * xs[i] as f32;
-                    let dy = scalar * ys[i] as f32;
-                    acc.add(pt, dx, dy);
-                }
-            } else {
-                for i in 0..n {
-                    let Some(&pt) = point_numbers.get(i) else {
-                        break;
-                    };
-                    let dx = scalar * xs[i] as f32;
-                    let dy = scalar * ys[i] as f32;
-                    acc.add(pt, dx, dy);
-                }
-            }
+            let (ys, _consumed_y) = read_packed_deltas_n(&tuple_bytes[tr..], n)
+                .map_err(|e| rebase(e, data_off + tuple_start + tr))?;
+            visit(&TupleDeltas {
+                scalar,
+                points,
+                xs: &xs,
+                ys: &ys,
+            });
         }
-
-        Ok(acc.deltas)
+        Ok(())
     }
+}
+
+/// Size of the fixed `gvar` header, before the glyph offset array.
+const GVAR_HEADER_SIZE: usize = 20;
+
+/// Phantom points gvar appends after a glyph's own points.
+const PHANTOM_COUNT: usize = 4;
+
+/// Cap on the points times tuples one glyph's variation data may make
+/// a caller walk. Real glyphs stay far below it: a few hundred points
+/// over at most a few hundred tuples.
+const MAX_TUPLE_WORK: usize = 1 << 24;
+
+/// One tuple's decoded deltas, as [`Gvar::walk_tuples`] hands them out.
+struct TupleDeltas<'t> {
+    /// The tuple's region scalar at the requested coords. Never zero.
+    scalar: f32,
+    /// The listed point numbers, or `None` for every point.
+    points: Option<&'t [u16]>,
+    /// Unscaled x deltas, one per listed point (or per point).
+    xs: &'t [i32],
+    /// Unscaled y deltas, parallel to `xs`.
+    ys: &'t [i32],
+}
+
+/// Moves the offset of a parse error found in a sub-slice that starts
+/// `base` bytes further in.
+fn rebase(e: Error, base: usize) -> Error {
+    match e {
+        Error::Truncated { offset, context } => Error::Truncated {
+            offset: offset.saturating_add(base),
+            context,
+        },
+        Error::Malformed { offset, context } => Error::Malformed {
+            offset: offset.saturating_add(base),
+            context,
+        },
+        other => other,
+    }
+}
+
+/// Infers the deltas of the points one tuple does not list (`listed`
+/// false), contour by contour, from the listed points around them.
+/// `deltas` holds the tuple's scaled deltas, one per point plus the
+/// phantom points; `orig` the glyph's default point positions; and
+/// `is_end` marks the last point of each contour.
+fn infer_unlisted(
+    deltas: &mut [(f32, f32)],
+    listed: &[bool],
+    orig: &[(i32, i32)],
+    is_end: &[bool],
+) {
+    let mut start = 0;
+    for (end, _) in is_end.iter().enumerate().filter(|&(_, &e)| e) {
+        if end >= start {
+            infer_contour(deltas, listed, orig, start, end);
+        }
+        start = end + 1;
+    }
+}
+
+/// [`infer_unlisted`] for the contour `start..=end`.
+fn infer_contour(
+    deltas: &mut [(f32, f32)],
+    listed: &[bool],
+    orig: &[(i32, i32)],
+    start: usize,
+    end: usize,
+) {
+    let listed_count = listed[start..=end].iter().filter(|&&l| l).count();
+    if listed_count == 0 || listed_count == end - start + 1 {
+        return;
+    }
+    let next = |i: usize| if i >= end { start } else { i + 1 };
+    let Some(first) = (start..=end).find(|&i| listed[i]) else {
+        return;
+    };
+    // Walk the listed points around the contour once, filling each
+    // run of unlisted points between a listed point and the next.
+    let mut prev = first;
+    loop {
+        let mut after = next(prev);
+        while !listed[after] {
+            after = next(after);
+        }
+        let mut i = next(prev);
+        while i != after {
+            let target = orig[i];
+            let (p, a) = (orig[prev], orig[after]);
+            let (pd, ad) = (deltas[prev], deltas[after]);
+            deltas[i] = (
+                infer_delta(target.0 as f32, p.0 as f32, a.0 as f32, pd.0, ad.0),
+                infer_delta(target.1 as f32, p.1 as f32, a.1 as f32, pd.1, ad.1),
+            );
+            i = next(i);
+        }
+        if after == first {
+            break;
+        }
+        prev = after;
+    }
+}
+
+/// HarfBuzz's `infer_delta` on one axis: the delta of a point at
+/// `target` between listed points at `prev` and `next` whose deltas
+/// are `prev_delta` and `next_delta`.
+// Exact comparisons on purpose: the coordinates are integers, and equal
+// deltas must agree bit for bit, as in HarfBuzz.
+#[allow(clippy::float_cmp)]
+fn infer_delta(target: f32, prev: f32, next: f32, prev_delta: f32, next_delta: f32) -> f32 {
+    if prev == next {
+        return if prev_delta == next_delta {
+            prev_delta
+        } else {
+            0.0
+        };
+    }
+    if target <= prev.min(next) {
+        return if prev < next { prev_delta } else { next_delta };
+    }
+    if target >= prev.max(next) {
+        return if prev > next { prev_delta } else { next_delta };
+    }
+    let r = (target - prev) / (next - prev);
+    prev_delta + r * (next_delta - prev_delta)
 }
 
 // ----------------------------------------------------------------------------
