@@ -108,6 +108,28 @@ fn charstring_rmoveto_rlineto_endchar() {
     assert!(matches!(o.ops()[2], PathOp::LineTo { x: 150.0, y: 150.0 }));
     assert!(matches!(o.ops()[3], PathOp::LineTo { x: 100.0, y: 150.0 }));
     assert!(matches!(o.ops()[4], PathOp::Close));
+    // endchar closed the contour, so the final close after the run
+    // must not add a second Close.
+    assert_eq!(o.len(), 5);
+}
+
+#[test]
+fn charstring_without_endchar_still_closes_its_contour() {
+    // 0 0 rmoveto 10 0 rlineto, with no endchar. A malformed CFF1
+    // charstring like this used to leave its contour open.
+    let cs = [139, 139, op_code::RMOVETO, 149, 139, op_code::RLINETO];
+    let cff = build_cff_with_charstring(&cs);
+    let parsed = Cff::parse(&cff).unwrap();
+    let mut o = Outline::new();
+    parsed.outline(0, &mut o).unwrap();
+    assert_eq!(
+        o.ops(),
+        [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 10.0, y: 0.0 },
+            PathOp::Close,
+        ]
+    );
 }
 
 #[test]

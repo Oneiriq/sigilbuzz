@@ -176,6 +176,10 @@ impl<'a> Cff<'a> {
             .unwrap_or(&[]);
         let mut interp = Interp::new(&self.global_subrs, local_subrs, sink, false);
         interp.run(cs, 0)?;
+        // A well-formed CFF1 charstring has already closed its last
+        // contour at endchar; this only covers charstrings that end
+        // without one.
+        interp.finish();
         Ok(true)
     }
 }

@@ -182,6 +182,9 @@ impl<'a> Cff2<'a> {
         let mut interp =
             crate::tables::cff::Interp2::new(&self.global_subrs, local_subrs, sink, blend);
         interp.run(cs, 0)?;
+        // CFF2 has no endchar, so the last contour is still open when
+        // the charstring runs out. Close it here.
+        interp.finish();
         Ok(true)
     }
 }
@@ -504,6 +507,104 @@ mod tests {
             out.extend_from_slice(&0u16.to_be_bytes());
         }
         out
+    }
+
+    /// Builds a minimal CFF2 table: a Top DICT naming the CharStrings
+    /// INDEX and the FDArray, an empty Global Subr INDEX, one glyph
+    /// whose charstring is `cs`, and one empty Font DICT.
+    fn build_cff2(cs: &[u8]) -> Vec<u8> {
+        let top_dict_len = 13u8;
+        let cs_off = 5 + usize::from(top_dict_len) + 4;
+        let fda_off = cs_off + 4 + 1 + 2 + cs.len();
+        let mut out = alloc::vec![2, 0, 5, 0, top_dict_len];
+        out.push(29);
+        out.extend_from_slice(&(cs_off as i32).to_be_bytes());
+        out.push(17); // CharStrings
+        out.push(29);
+        out.extend_from_slice(&(fda_off as i32).to_be_bytes());
+        out.extend_from_slice(&[12, 36]); // FDArray
+        out.extend_from_slice(&0u32.to_be_bytes()); // Global Subr INDEX
+        assert_eq!(out.len(), cs_off);
+        out.extend_from_slice(&1u32.to_be_bytes()); // CharStrings INDEX
+        out.extend_from_slice(&[1, 1, 1 + cs.len() as u8]);
+        out.extend_from_slice(cs);
+        assert_eq!(out.len(), fda_off);
+        out.extend_from_slice(&1u32.to_be_bytes()); // FDArray INDEX
+        out.extend_from_slice(&[1, 1, 1]); // one empty Font DICT
+        out
+    }
+
+    fn cff2_ops(cs: &[u8]) -> Vec<PathOp> {
+        let table = build_cff2(cs);
+        let cff2 = Cff2::parse(&table).unwrap();
+        let mut out = Outline::new();
+        assert!(cff2.outline(0, &[], &mut out).unwrap());
+        out.ops().to_vec()
+    }
+
+    #[test]
+    fn cff2_outline_closes_the_last_contour_without_endchar() {
+        // 100 100 rmoveto 50 0 rlineto 0 50 rlineto. CFF2 has no
+        // endchar, so the charstring just ends with the contour open.
+        let cs = [
+            239,
+            239,
+            op_code::RMOVETO,
+            189,
+            139,
+            op_code::RLINETO,
+            139,
+            189,
+            op_code::RLINETO,
+        ];
+        assert_eq!(
+            cff2_ops(&cs),
+            [
+                PathOp::MoveTo { x: 100.0, y: 100.0 },
+                PathOp::LineTo { x: 150.0, y: 100.0 },
+                PathOp::LineTo { x: 150.0, y: 150.0 },
+                PathOp::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn cff2_moveto_closes_the_previous_contour() {
+        // 0 0 rmoveto 10 0 rlineto 0 10 rmoveto 0 10 rlineto. The second
+        // moveto closes the first contour, and the end of the
+        // charstring closes the second.
+        let cs = [
+            139,
+            139,
+            op_code::RMOVETO,
+            149,
+            139,
+            op_code::RLINETO,
+            139,
+            149,
+            op_code::RMOVETO,
+            139,
+            149,
+            op_code::RLINETO,
+        ];
+        assert_eq!(
+            cff2_ops(&cs),
+            [
+                PathOp::MoveTo { x: 0.0, y: 0.0 },
+                PathOp::LineTo { x: 10.0, y: 0.0 },
+                PathOp::Close,
+                PathOp::MoveTo { x: 10.0, y: 10.0 },
+                PathOp::LineTo { x: 10.0, y: 20.0 },
+                PathOp::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn cff2_outline_without_drawing_ops_has_no_close() {
+        // A charstring that never moves draws nothing, so there is no
+        // contour to close.
+        assert!(cff2_ops(&[139, 139, op_code::HSTEM]).is_empty());
     }
 
     #[test]

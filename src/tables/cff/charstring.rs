@@ -47,8 +47,8 @@ pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
     is_cff2: bool,
     /// True once endchar fires. Outer loop halts.
     done: bool,
-    /// True after the first move operator. Needed to close open
-    /// contours at endchar.
+    /// True while a contour is open, from a move operator until the
+    /// next move operator, endchar, or [`Self::finish`] closes it.
     in_contour: bool,
     /// Operands and operators executed so far, checked against
     /// [`MAX_CHARSTRING_OPS`].
@@ -643,6 +643,17 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             self.in_contour = false;
         }
     }
+
+    /// Closes the contour still open when the charstring runs out.
+    ///
+    /// CFF1 closes its last contour at `endchar`, but CFF2 has no
+    /// `endchar`: a CFF2 charstring simply ends, and without this call
+    /// its final contour would stay open. Call it once after
+    /// [`Self::run`] returns. It is idempotent, so a CFF1 charstring
+    /// that already ended with `endchar` is unaffected.
+    pub(crate) fn finish(&mut self) {
+        self.close_contour();
+    }
 }
 
 /// Thin CFF2 wrapper around [`Interp`] with blend context wired in
@@ -666,6 +677,11 @@ impl<'a, 'b, S: OutlineSink> Interp2<'a, 'b, S> {
 
     pub(crate) fn run(&mut self, code: &'a [u8], depth: u8) -> Result<()> {
         self.inner.run(code, depth)
+    }
+
+    /// Closes the final contour. See [`Interp::finish`].
+    pub(crate) fn finish(&mut self) {
+        self.inner.finish();
     }
 }
 

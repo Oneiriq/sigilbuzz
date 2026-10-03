@@ -99,3 +99,19 @@ Fonts used by the integration tests.
   other Noto fonts in `tests/fonts/`, whose README has the exact fontTools steps. The
   subsets of Noto Sans Javanese, Chakma, Khudawadi, Takri, Syriac, and Adlam that
   `tests/script_coverage_parity.rs` uses are listed there too.
+- `noto_sans_kr_vf_cff2_subset.otf`: a 4,480-byte subset of Noto Sans KR VF (version
+  2.004) by Adobe, SIL Open Font License 1.1 (reserved font name "Source", which the
+  subset does not use). Source:
+  <https://github.com/notofonts/noto-cjk/raw/main/Sans/Variable/OTF/Subset/NotoSansKR-VF.otf>
+  (SHA-256 `e647f53b18a4823647a51bcbdac866617701a4dd8ce495bac2db5ecea88d8f21`), license
+  at <https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE>. It keeps the
+  `CFF2` outlines, the `wght` axis and the variation tables for `.notdef` and the
+  syllables 귁 (U+ADC1) and 빛 (U+BE5B), whose last contours end away from their start
+  points. CFF2 charstrings have no `endchar`, so the last contour of every glyph used
+  to stay open, and a fill drew streaks across those two syllables. Built with this
+  repository's CLI:
+
+      sigilbuzz subset NotoSansKR-VF.otf noto_sans_kr_vf_cff2_subset.otf \
+          --unicodes "U+ADC1,U+BE5B" --drop-layout
+
+  `tests/cff2_closed_contours.rs` uses it.
