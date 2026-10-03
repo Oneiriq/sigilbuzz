@@ -28,7 +28,7 @@ pub const SAMPLE_TEXTS: &[&str] = &[
 /// Common feature tags, turned on or off by the fuzzer.
 pub const FEATURE_TAGS: &[[u8; 4]] = &[
     *b"liga", *b"kern", *b"calt", *b"smcp", *b"c2sc", *b"onum", *b"tnum", *b"frac", *b"ss01",
-    *b"vert", *b"vrt2", *b"rlig", *b"ccmp", *b"mark", *b"mkmk", *b"zzzz",
+    *b"vert", *b"vrt2", *b"rlig", *b"ccmp", *b"mark", *b"mkmk", *b"zzzz", *b"rvrn", *b"palt",
 ];
 
 /// A small reader over the fuzzer's control bytes. It hands out zeros once

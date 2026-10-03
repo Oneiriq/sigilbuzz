@@ -19,6 +19,12 @@
 //! (`F_GLOBAL_SEARCH`). When a language system lists a tag twice, the
 //! first entry wins, as in `hb_ot_layout_collect_features_map`.
 //!
+//! Features are read by index through [`ActiveFeatures`]: when the
+//! table's FeatureVariations selected a record for the font's
+//! coordinates, a feature that record substitutes keeps its tag and
+//! takes the record's lookups (`get_feature_variation`). The `vert`
+//! search goes by index too, so it sees the substitution.
+//!
 //! A language system's required feature (`requiredFeatureIndex`) joins
 //! the lookups of its tag, which is where HarfBuzz schedules a required
 //! feature whose tag the shaper knows. [`required_feature`] exposes it
@@ -30,7 +36,7 @@
 
 use alloc::vec::Vec;
 
-use crate::tables::layout::{FeatureList, LangSys, ScriptList};
+use crate::tables::layout::{ActiveFeatures, LangSys, ScriptList};
 
 /// Script tags HarfBuzz falls back to, in order, when none of the
 /// run's own tags is in the table.
@@ -78,7 +84,7 @@ pub(crate) fn chosen_script(
 /// at all.
 pub(crate) fn feature_lookup_indices(
     script_list: &ScriptList<'_>,
-    feature_list: &FeatureList<'_>,
+    features: &ActiveFeatures<'_>,
     language_tags: &[[u8; 4]],
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
@@ -86,13 +92,17 @@ pub(crate) fn feature_lookup_indices(
     let lang_sys = select_lang_sys(script_list, language_tags, script_priority);
     let found = lang_sys
         .as_ref()
-        .and_then(|lang_sys| lang_sys_lookups(lang_sys, feature_list, tag));
+        .and_then(|lang_sys| lang_sys_lookups(lang_sys, features, tag));
     if found.is_some() {
         return found;
     }
     if GLOBAL_SEARCH_FEATURES.contains(&tag) {
-        if let Some((_, feature)) = feature_list.iter().find(|(t, _)| *t == tag) {
-            return Some(sorted(feature.lookup_indices().collect()));
+        if let Some(index) = features.find(tag) {
+            let lookups = features
+                .get(index)
+                .map(|(_, feature)| feature.lookup_indices().collect())
+                .unwrap_or_default();
+            return Some(sorted(lookups));
         }
     }
     lang_sys.map(|_| Vec::new())
@@ -102,12 +112,12 @@ pub(crate) fn feature_lookup_indices(
 /// picks: its tag and sorted lookup indices.
 pub(crate) fn required_feature(
     script_list: &ScriptList<'_>,
-    feature_list: &FeatureList<'_>,
+    features: &ActiveFeatures<'_>,
     language_tags: &[[u8; 4]],
     script_priority: &[[u8; 4]],
 ) -> Option<([u8; 4], Vec<u16>)> {
     let lang_sys = select_lang_sys(script_list, language_tags, script_priority)?;
-    let (tag, feature) = feature_list.get(lang_sys.required_feature_index()?)?;
+    let (tag, feature) = features.get(lang_sys.required_feature_index()?)?;
     Some((tag, sorted(feature.lookup_indices().collect())))
 }
 
@@ -116,11 +126,11 @@ pub(crate) fn required_feature(
 /// its tag matches. `None` when the language system carries neither.
 fn lang_sys_lookups(
     lang_sys: &LangSys<'_>,
-    feature_list: &FeatureList<'_>,
+    features: &ActiveFeatures<'_>,
     tag: [u8; 4],
 ) -> Option<Vec<u16>> {
     let with_tag = |index: u16| {
-        feature_list
+        features
             .get(index)
             .filter(|(feature_tag, _)| *feature_tag == tag)
             .map(|(_, feature)| feature)
@@ -147,6 +157,7 @@ fn sorted(mut indices: Vec<u16>) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::layout::{FeatureList, FeatureVariations};
     use alloc::vec;
 
     /// Minimal GSUB-style blob pieces: a ScriptList, a FeatureList,
@@ -216,10 +227,42 @@ mod tests {
 
     impl Fixture {
         fn lookups(&self, langs: &[[u8; 4]], tag: &[u8; 4], pri: &[[u8; 4]]) -> Option<Vec<u16>> {
+            self.varied_lookups(None, langs, tag, pri)
+        }
+
+        /// [`Self::lookups`] with the one record of the FeatureVariations
+        /// `variations` selected.
+        fn varied_lookups(
+            &self,
+            variations: Option<&[u8]>,
+            langs: &[[u8; 4]],
+            tag: &[u8; 4],
+            pri: &[[u8; 4]],
+        ) -> Option<Vec<u16>> {
             let scripts = ScriptList::parse(&self.scripts).unwrap();
-            let features = FeatureList::parse(&self.features).unwrap();
+            let features = self.features(variations);
             feature_lookup_indices(&scripts, &features, langs, *tag, pri)
         }
+
+        fn features<'a>(&'a self, variations: Option<&'a [u8]>) -> ActiveFeatures<'a> {
+            let list = FeatureList::parse(&self.features).unwrap();
+            let record = variations.map(|v| (FeatureVariations::parse(v).unwrap(), 0));
+            ActiveFeatures::new(list, record)
+        }
+    }
+
+    /// FeatureVariations with one record that always applies and gives
+    /// feature `index` the single lookup `lookup`.
+    fn substituting(index: u16, lookup: u16) -> Vec<u8> {
+        let mut out = vec![0, 1, 0, 0, 0, 0, 0, 1];
+        out.extend_from_slice(&0u32.to_be_bytes()); // null ConditionSet
+        out.extend_from_slice(&16u32.to_be_bytes()); // substitution
+        out.extend_from_slice(&[0, 1, 0, 0, 0, 1]);
+        out.extend_from_slice(&index.to_be_bytes());
+        out.extend_from_slice(&12u32.to_be_bytes()); // alternate Feature
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(&lookup.to_be_bytes());
+        out
     }
 
     /// Features: 0 = locl (TRK), 1 = liga (default), 2 = liga (TRK),
@@ -350,7 +393,7 @@ mod tests {
     fn required_feature_of_the_selected_language_system() {
         let f = latin_fixture();
         let scripts = ScriptList::parse(&f.scripts).unwrap();
-        let features = FeatureList::parse(&f.features).unwrap();
+        let features = f.features(None);
         let latn = [*b"latn"];
         assert_eq!(
             required_feature(&scripts, &features, &[*b"AZE "], &latn),
@@ -361,6 +404,53 @@ mod tests {
             None
         );
         assert_eq!(required_feature(&scripts, &features, &[], &latn), None);
+    }
+
+    #[test]
+    fn a_substituted_feature_keeps_its_tag_and_takes_the_alternate_lookups() {
+        let f = latin_fixture();
+        let latn = [*b"latn"];
+        // Feature 1 is the default language system's liga.
+        let v = substituting(1, 99);
+        assert_eq!(
+            f.varied_lookups(Some(&v), &[], b"liga", &latn),
+            Some(vec![99])
+        );
+        // TRK's liga is feature 2, which the record leaves alone.
+        assert_eq!(
+            f.varied_lookups(Some(&v), &[*b"TRK "], b"liga", &latn),
+            Some(vec![12])
+        );
+        // The required feature of AZE is feature 3.
+        let v = substituting(3, 98);
+        assert_eq!(
+            f.varied_lookups(Some(&v), &[*b"AZE "], b"rlig", &latn),
+            Some(vec![98])
+        );
+        let scripts = ScriptList::parse(&f.scripts).unwrap();
+        let features = f.features(Some(&v));
+        assert_eq!(
+            required_feature(&scripts, &features, &[*b"AZE "], &latn),
+            Some((*b"rlig", vec![98]))
+        );
+    }
+
+    #[test]
+    fn the_vert_search_sees_substitutions() {
+        let f = Fixture {
+            scripts: script_list(&[
+                (*b"DFLT", Some(lang_sys(0xFFFF, &[])), vec![]),
+                (*b"kana", Some(lang_sys(0xFFFF, &[0, 1])), vec![]),
+            ]),
+            features: feature_list(&[*b"vert", *b"vrt2"]),
+        };
+        let v = substituting(0, 97);
+        let dflt = [*b"DFLT"];
+        assert_eq!(
+            f.varied_lookups(Some(&v), &[], b"vert", &dflt),
+            Some(vec![97])
+        );
+        assert_eq!(f.lookups(&[], b"vert", &dflt), Some(vec![10]));
     }
 
     #[test]
