@@ -46,16 +46,17 @@ impl<'a> Index<'a> {
     ///
     /// Fails with [`Error::Malformed`] when `i` is out of range, when
     /// the entry's offsets are zero or descend, or when the entry ends
-    /// past the data region.
+    /// past the data region. The first two report the position of
+    /// offset slot `i`, where entry `i`'s offsets start.
     pub(crate) fn get(&self, i: usize) -> Result<&'a [u8]> {
         if i >= self.len() {
             return Err(Error::Malformed {
-                offset: self.data_start,
+                offset: self.slot_position(i),
                 context: "CFF INDEX entry out of range",
             });
         }
         let non_monotone = || Error::Malformed {
-            offset: self.data_start,
+            offset: self.slot_position(i),
             context: "CFF INDEX offsets non-monotone",
         };
         let a = self.offset(i).ok_or_else(non_monotone)?;
@@ -69,6 +70,14 @@ impl<'a> Index<'a> {
             offset: self.data_start.saturating_add(end),
             context: "CFF INDEX entry past end",
         })
+    }
+
+    /// Absolute position of offset slot `k` in the table. The offset
+    /// array ends where the data region starts. Saturates for a `k` far
+    /// past the array.
+    fn slot_position(&self, k: usize) -> usize {
+        let offsets_start = self.data_start.saturating_sub(self.offsets.len());
+        offsets_start.saturating_add(k.saturating_mul(usize::from(self.off_size)))
     }
 
     /// Reads offset `k` (0-based, up to `count`). `None` only if the
@@ -315,6 +324,35 @@ mod tests {
         let index = parse(&bytes).unwrap();
         assert!(matches!(index.get(0), Err(Error::Malformed { .. })));
         assert!(matches!(index.get(1), Err(Error::Malformed { .. })));
+    }
+
+    /// The byte offset a failed [`Index::get`] reports.
+    fn get_error_offset(index: &Index<'_>, i: usize) -> usize {
+        match index.get(i) {
+            Err(Error::Malformed { offset, .. }) => offset,
+            other => panic!("entry {i}: expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_errors_report_the_offset_slot() {
+        // Seven unrelated bytes, then an INDEX with count 3, offSize 2,
+        // offsets [1, 3, 2, 4], and three data bytes. Offset slot k sits
+        // at 7 + 3 + 2k in the table.
+        let mut table = alloc::vec![0xEE; 7];
+        table.extend_from_slice(&[0, 3, 2, 0, 1, 0, 3, 0, 2, 0, 4, b'a', b'b', b'c']);
+        let index = read_index(&mut Reader::at(&table, 7).unwrap()).unwrap();
+        // Entry 1 runs backward, from offset 3 to offset 2.
+        assert_eq!(get_error_offset(&index, 1), 7 + 3 + 2);
+        // An entry past the end reports the slot it would start at.
+        assert_eq!(get_error_offset(&index, 3), 7 + 3 + 6);
+        assert_eq!(get_error_offset(&index, usize::MAX), usize::MAX);
+
+        // A zero first offset, in an INDEX with offSize 1 four bytes in.
+        let mut table = alloc::vec![0xEE; 4];
+        table.extend_from_slice(&[0, 1, 1, 0, 2, b'a']);
+        let index = read_index(&mut Reader::at(&table, 4).unwrap()).unwrap();
+        assert_eq!(get_error_offset(&index, 0), 4 + 3);
     }
 
     #[test]
