@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+use super::charset::standard_encoding_sid;
 use super::index::Index;
 use super::op_code;
 use crate::error::{Error, Result};
@@ -60,6 +61,28 @@ pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
     /// `vsindex`. Every `blend` in a glyph reuses them until `vsindex`
     /// changes, instead of re-reading the variation store each time.
     blend_regions: Option<BlendRegions>,
+    /// The accented character an `endchar` with seac operands asked
+    /// for. The caller draws it once the run ends.
+    seac: Option<Seac>,
+    /// True while drawing the base or accent of a seac, which may not
+    /// use seac itself.
+    seac_component: bool,
+}
+
+/// A Type 2 `endchar` in its seac form, `adx ady bchar achar endchar`:
+/// draw the base character, then the accent with its origin at
+/// `(adx, ady)`. Both are named by Standard Encoding code, kept here as
+/// the SIDs the encoding gives them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Seac {
+    /// Accent origin x, relative to the base character's origin.
+    pub(crate) adx: f32,
+    /// Accent origin y, relative to the base character's origin.
+    pub(crate) ady: f32,
+    /// SID of the base character.
+    pub(crate) base: u16,
+    /// SID of the accent character.
+    pub(crate) accent: u16,
 }
 
 /// Variation store data for one `vsindex`, computed once per outline.
@@ -99,7 +122,23 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             ops: 0,
             blend: None,
             blend_regions: None,
+            seac: None,
+            seac_component: false,
         }
+    }
+
+    /// Makes this interpreter draw a seac base or accent: the pen starts
+    /// at the component's origin `(x, y)` instead of `(0, 0)`, and a
+    /// seac inside the component is an error.
+    pub(crate) fn start_seac_component(&mut self, x: f32, y: f32) {
+        self.x = x;
+        self.y = y;
+        self.seac_component = true;
+    }
+
+    /// The seac that the charstring's `endchar` asked for, if any.
+    pub(crate) fn take_seac(&mut self) -> Option<Seac> {
+        self.seac.take()
     }
 
     pub(crate) fn run(&mut self, code: &'a [u8], depth: u8) -> Result<()> {
@@ -371,11 +410,14 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             op_code::ENDCHAR => {
                 if !self.is_cff2 {
                     self.maybe_consume_width();
-                    // Reject seac-like endchar (4 args = deprecated).
-                    if self.stack.len() == 4 {
-                        return Err(Error::Unsupported {
-                            context: "CFF seac (endchar with 4 args) deprecated",
-                        });
+                    // Type 2 keeps Type 1's seac as an endchar with four
+                    // operands, `adx ady bchar achar`. When endchar is
+                    // the first stack-clearing operator a width may sit
+                    // below them, which makes five. Like HarfBuzz and
+                    // FreeType, take the top four whenever there are at
+                    // least four.
+                    if self.stack.len() >= 4 {
+                        self.seac = Some(self.read_seac(r.position())?);
                     }
                 }
                 self.close_contour();
@@ -430,6 +472,30 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             }
         }
         Ok(())
+    }
+
+    /// Reads the seac operands, the top four on the stack. `at` is the
+    /// charstring position of the `endchar`, for errors.
+    fn read_seac(&self, at: usize) -> Result<Seac> {
+        if self.seac_component {
+            return Err(Error::Malformed {
+                offset: at,
+                context: "CFF seac base or accent uses seac",
+            });
+        }
+        let n = self.stack.len();
+        let sid = |code: f32| {
+            standard_encoding_sid(code).ok_or(Error::Malformed {
+                offset: at,
+                context: "CFF seac code not in the Standard Encoding",
+            })
+        };
+        Ok(Seac {
+            adx: self.stack[n - 4],
+            ady: self.stack[n - 3],
+            base: sid(self.stack[n - 2])?,
+            accent: sid(self.stack[n - 1])?,
+        })
     }
 
     fn alternating_curveto(&mut self, args: &[f32], start_horiz: bool) -> Result<()> {
