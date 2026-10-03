@@ -355,6 +355,18 @@ mod tests {
     }
 
     #[test]
+    fn southeast_asian_text_has_a_boundary_after_every_character() {
+        // Thai "ภาษาไทย ดี" ("the Thai language is good"). UAX #29 keeps
+        // the SA scripts out of ALetter because their words need a
+        // dictionary, which this crate does not have yet. Until it
+        // does, every Thai letter is a segment of its own, and only a
+        // combining mark such as the vowel U+0E35 joins the letter
+        // before it (WB4).
+        let text = "\u{0E20}\u{0E32}\u{0E29}\u{0E32}\u{0E44}\u{0E17}\u{0E22} \u{0E14}\u{0E35}";
+        assert_eq!(boundaries(text), vec![3, 6, 9, 12, 15, 18, 21, 22, 28]);
+    }
+
+    #[test]
     fn katakana_runs_and_extenders() {
         // "カタカナ_word" stays one word (WB13, WB13a, WB13b).
         let text = "\u{30AB}\u{30BF}\u{30AB}\u{30CA}_word";
