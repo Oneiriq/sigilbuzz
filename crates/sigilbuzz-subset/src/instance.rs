@@ -34,6 +34,8 @@
 //!   (and `vhea`) follow from the baked glyphs. A font without `gvar`
 //!   keeps its outlines and folds the `HVAR` (and `VVAR`) deltas into
 //!   the advances instead.
+//! - `BASE` coordinates varied through its store move by their deltas
+//!   and the store goes (see [`crate::base::instance_base`]).
 //!
 //! Every value rounds to the nearest unit, halves up, as HarfBuzz and
 //! fontTools round.
@@ -155,6 +157,7 @@ mod partial;
 mod region;
 mod store_remap;
 
+use crate::base::BaseBake;
 use crate::sfnt;
 use crate::util;
 use crate::warnings::Warnings;
@@ -167,7 +170,7 @@ use metrics::{
 };
 use partial::{layout_variations, partial_instance, pinned_axes};
 
-pub(crate) use ivs::bake_ivs_partial;
+pub(crate) use ivs::{bake_ivs_partial, project_ivs_with, PinnedOnly, Projection, RegionRemap};
 pub(crate) use region::project_region_onto_kept_axes;
 
 /// F2DOT14 normalized axis coordinate. Matches the on-disk encoding the
@@ -380,6 +383,13 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         tables.push((tag::GDEF, b.clone()));
     }
 
+    // BASE: the coordinates its store varies move to the instance.
+    let base_bake = if input.drop_var_tables {
+        push_base(face, &coords, &[], &warnings, &mut tables)
+    } else {
+        BaseBake::Unchanged
+    };
+
     // Carry every other table through verbatim, with a drop list for
     // the variable-font tables when `drop_var_tables` is true.
     for rec in face.records() {
@@ -397,6 +407,9 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         // GDEF was handled above (either pruned or dropped from the
         // pruning path).
         if rec.tag == tag::GDEF && !matches!(gdef_bake, GdefBake::Unchanged) {
+            continue;
+        }
+        if rec.tag == tag::BASE && base_bake == BaseBake::Dropped {
             continue;
         }
         // GPOS was handled above when the variation bake produced a
@@ -443,6 +456,23 @@ fn snap_f2dot14(v: f32) -> f32 {
     f32::from(glyf::clamp_i16(util::round_half_up(
         v.clamp(-1.0, 1.0) * 16384.0,
     ))) / 16384.0
+}
+
+/// Applies the `BASE` variations at the post-avar `coords` (see
+/// [`crate::base::instance_base`]; `pins` as there) and pushes the
+/// rebuilt table onto `tables`.
+fn push_base(
+    face: &Face<'_>,
+    coords: &[f32],
+    pins: &[AxisPin],
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) -> BaseBake {
+    let bake = crate::base::instance_base(face, coords, pins, warnings);
+    if let BaseBake::Rebuilt(b) = &bake {
+        tables.push((tag::BASE, b.clone()));
+    }
+    bake
 }
 
 /// What [`push_glyf_tables`] baked besides the tables it pushed.
@@ -636,6 +666,12 @@ fn cff2_bake(
         tables.push((tag::GDEF, b.clone()));
     }
 
+    let base_bake = if input.drop_var_tables {
+        push_base(face, coords, &[], &warnings, &mut tables)
+    } else {
+        BaseBake::Unchanged
+    };
+
     for rec in face.records() {
         if tables.iter().any(|(t, _)| *t == rec.tag) {
             continue;
@@ -649,6 +685,9 @@ fn cff2_bake(
             continue;
         }
         if rec.tag == tag::GDEF && !matches!(gdef_bake, GdefBake::Unchanged) {
+            continue;
+        }
+        if rec.tag == tag::BASE && base_bake == BaseBake::Dropped {
             continue;
         }
         if rec.tag == tag::GPOS && gpos_baked.is_some() {

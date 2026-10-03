@@ -16,7 +16,7 @@
 //!
 //! A `BASE` that cannot be walked is left out and reported.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
@@ -26,6 +26,10 @@ use crate::read;
 use crate::util::{WorkBudget, WORK_LIMIT};
 use crate::warnings::Warnings;
 use crate::GlyphId;
+
+mod instance;
+
+pub(crate) use instance::{instance_base, BaseBake};
 
 /// The `STAT` table tag.
 pub(crate) const STAT: [u8; 4] = *b"STAT";
@@ -103,11 +107,43 @@ fn remap(bytes: &[u8], gid_map: &[(GlyphId, GlyphId)]) -> Result<Vec<u8>, Error>
 /// many offsets share it, and the walk gives up on a table that would
 /// cost more than [`WORK_LIMIT`].
 pub(crate) fn format2_coords(bytes: &[u8]) -> Result<BTreeSet<usize>, Error> {
+    Ok(walk(bytes, None)?.format2)
+}
+
+/// Where the structures of a `BASE` table sit, for a rebuild that moves
+/// them: see [`layout`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Layout {
+    /// The byte range of every table walked but the header and the
+    /// BaseCoords: axes, tag lists, script lists, scripts, values and
+    /// MinMax tables.
+    pub(crate) ranges: Vec<(usize, usize)>,
+    /// Every non-null Offset16 between them, and from them to the
+    /// BaseCoords: `(slot, base, target)`, the target measured from
+    /// `base`.
+    pub(crate) offsets: Vec<(usize, usize, usize)>,
+    /// Every BaseCoord, by offset, with its format.
+    pub(crate) coords: BTreeMap<usize, u16>,
+}
+
+/// Walks (and so checks) the `BASE` table `bytes` as [`format2_coords`]
+/// does, also reading each axis's BaseTagList, and returns where every
+/// structure in it sits.
+pub(crate) fn layout(bytes: &[u8]) -> Result<Layout, Error> {
+    Ok(walk(bytes, Some(Layout::default()))?
+        .layout
+        .unwrap_or_default())
+}
+
+/// Walks the `BASE` table `bytes` from its header, collecting a
+/// [`Layout`] when `layout` is set.
+fn walk(bytes: &[u8], layout: Option<Layout>) -> Result<Walk<'_>, Error> {
     let mut walk = Walk {
         bytes,
         budget: WorkBudget::new(WORK_LIMIT),
         seen: BTreeSet::new(),
         format2: BTreeSet::new(),
+        layout,
     };
     if read::u16_at(bytes, 0, CTX)? != 1 {
         return Err(Error::Malformed {
@@ -116,12 +152,11 @@ pub(crate) fn format2_coords(bytes: &[u8]) -> Result<BTreeSet<usize>, Error> {
         });
     }
     for axis_slot in [4, 6] {
-        let axis = read::u16_at(bytes, axis_slot, CTX)?;
-        if axis != 0 {
-            walk.axis(usize::from(axis))?;
+        if let Some(axis) = walk.offset16(axis_slot, 0)? {
+            walk.axis(axis)?;
         }
     }
-    Ok(walk.format2)
+    Ok(walk)
 }
 
 /// Context for a read that runs past the table.
@@ -135,6 +170,8 @@ struct Walk<'a> {
     seen: BTreeSet<usize>,
     /// Format 2 `BaseCoord`s found, by offset.
     format2: BTreeSet<usize>,
+    /// The structures found, when the walk collects them.
+    layout: Option<Layout>,
 }
 
 impl Walk<'_> {
@@ -155,22 +192,44 @@ impl Walk<'_> {
     }
 
     /// The position of the subtable an Offset16 at `slot` points at,
-    /// measured from `base`; `None` for a null offset.
-    fn offset16(&self, slot: usize, base: usize) -> Result<Option<usize>, Error> {
+    /// measured from `base`; `None` for a null offset. A collecting
+    /// walk records the offset.
+    fn offset16(&mut self, slot: usize, base: usize) -> Result<Option<usize>, Error> {
         let off = read::u16_at(self.bytes, slot, CTX)?;
-        Ok((off != 0).then(|| base + usize::from(off)))
+        let target = (off != 0).then(|| base + usize::from(off));
+        if let (Some(layout), Some(target)) = (self.layout.as_mut(), target) {
+            layout.offsets.push((slot, base, target));
+        }
+        Ok(target)
     }
 
-    /// An Axis table: its BaseScriptList. The BaseTagList names no
-    /// glyphs.
+    /// Records the table at `start..end` in a collecting walk.
+    fn range(&mut self, start: usize, end: usize) {
+        if let Some(layout) = self.layout.as_mut() {
+            layout.ranges.push((start, end));
+        }
+    }
+
+    /// An Axis table: its BaseScriptList, and, in a collecting walk,
+    /// its BaseTagList, which names no glyphs.
     fn axis(&mut self, at: usize) -> Result<(), Error> {
         read::slice_at(self.bytes, at, 4, CTX)?;
+        self.range(at, at + 4);
+        if self.layout.is_some() {
+            if let Some(tags) = self.offset16(at, at)? {
+                let count = usize::from(read::u16_at(self.bytes, tags, CTX)?);
+                read::array_at(self.bytes, tags + 2, count, 4, CTX)?;
+                self.charge(count + 1)?;
+                self.range(tags, tags + 2 + 4 * count);
+            }
+        }
         let Some(list) = self.offset16(at + 2, at)? else {
             return Ok(());
         };
         let count = usize::from(read::u16_at(self.bytes, list, CTX)?);
         read::array_at(self.bytes, list + 2, count, 6, CTX)?;
         self.charge(count)?;
+        self.range(list, list + 2 + 6 * count);
         for i in 0..count {
             if let Some(script) = self.offset16(list + 2 + i * 6 + 4, list)? {
                 self.script(script)?;
@@ -188,6 +247,7 @@ impl Walk<'_> {
         let count = usize::from(read::u16_at(self.bytes, at + 4, CTX)?);
         read::array_at(self.bytes, at + 6, count, 6, CTX)?;
         self.charge(count + 1)?;
+        self.range(at, at + 6 + 6 * count);
         if let Some(values) = self.offset16(at, at)? {
             self.values(values)?;
         }
@@ -210,6 +270,7 @@ impl Walk<'_> {
         let count = usize::from(read::u16_at(self.bytes, at + 2, CTX)?);
         read::array_at(self.bytes, at + 4, count, 2, CTX)?;
         self.charge(count + 1)?;
+        self.range(at, at + 4 + 2 * count);
         for i in 0..count {
             if let Some(coord) = self.offset16(at + 4 + i * 2, at)? {
                 self.coord(coord)?;
@@ -226,6 +287,7 @@ impl Walk<'_> {
         let count = usize::from(read::u16_at(self.bytes, at + 4, CTX)?);
         read::array_at(self.bytes, at + 6, count, 8, CTX)?;
         self.charge(count + 1)?;
+        self.range(at, at + 6 + 8 * count);
         let slots = [at, at + 2]
             .into_iter()
             .chain((0..count).flat_map(|i| [at + 6 + i * 8 + 4, at + 6 + i * 8 + 6]));
@@ -244,7 +306,8 @@ impl Walk<'_> {
             return Ok(());
         }
         self.charge(1)?;
-        let len = match read::u16_at(self.bytes, at, CTX)? {
+        let format = read::u16_at(self.bytes, at, CTX)?;
+        let len = match format {
             1 => 4,
             2 => 8,
             3 => 6,
@@ -258,6 +321,9 @@ impl Walk<'_> {
         read::slice_at(self.bytes, at, len, "BaseCoord truncated")?;
         if len == 8 {
             self.format2.insert(at);
+        }
+        if let Some(layout) = self.layout.as_mut() {
+            layout.coords.insert(at, format);
         }
         Ok(())
     }

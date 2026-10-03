@@ -13,7 +13,8 @@ use super::ivs::PinnedOnly;
 use super::metrics::{bake_vorg, MvarBake, VorgBake};
 use super::metrics_var::{bake_hvar_partial_with, bake_mvar_partial, bake_vvar_partial_with};
 use super::store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
-use super::{post_avar, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput};
+use super::{post_avar, push_base, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput};
+use crate::base::BaseBake;
 use crate::sfnt;
 use crate::warnings::Warnings;
 use crate::SubsetError;
@@ -40,6 +41,8 @@ use crate::SubsetError;
 ///   their defaults), as HarfBuzz's instancer does; the gvar tuples and
 ///   the `HVAR` / `VVAR` regions left on the pinned axes only are in
 ///   those tables now, so the variation tables drop them,
+/// - moves the `BASE` coordinates varied through its store to the new
+///   default and projects the store,
 /// - rides `maxp` and the rest of the layout and other tables through
 ///   verbatim. The Keep-axis variations stay live; the Pin-axis
 ///   dimensions fold into the trimmed deltas so a shaper at
@@ -226,6 +229,10 @@ pub(super) fn partial_instance(
         tables.push((tag::GVAR, new_gvar));
     }
 
+    // BASE: the coordinates its store varies move to the new default,
+    // and the store keeps the kept axes.
+    let base_bake = push_base(face, &post_avar_coords, pins, &warnings, &mut tables);
+
     // Carry every other table through verbatim.
     for rec in face.records() {
         if tables.iter().any(|(t, _)| *t == rec.tag) {
@@ -238,7 +245,7 @@ pub(super) fn partial_instance(
         if rec.tag == tag::GDEF && matches!(gdef_bake, GdefBake::Dropped) {
             continue;
         }
-        if dropped.contains(&rec.tag) {
+        if dropped.contains(&rec.tag) || (rec.tag == tag::BASE && base_bake == BaseBake::Dropped) {
             continue;
         }
         // Vertical metrics the glyph bake could not read, and a VORG

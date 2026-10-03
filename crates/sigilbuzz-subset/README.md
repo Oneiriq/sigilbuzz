@@ -41,16 +41,17 @@ such as `COLR`, `CPAL`, `MVAR` and `DSIG`, stay, since no glyph ID changes, but 
 
 `instance` handles variable fonts. It bakes a set of axis coordinates into a static
 font, or pins some axes and leaves the rest variable. It moves `glyf` outlines (inferred
-points and composite offsets included) and the advances and side bearings their phantom
-points give, the way HarfBuzz's instancer does.
+points and composite offsets included), the advances and side bearings their phantom
+points give, and the `BASE` coordinates the store varies, the way HarfBuzz's instancer
+does.
 
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
 a Device table, an anchor), or a malformed vertical metrics table (`vhea`, `vmtx`,
 `VORG`, `VVAR`), `BASE` or `STAT`, is left out of a subset instead of failing the whole
 run, the way HarfBuzz handles it. `instance` does the same for the vertical metrics
-tables and for the GDEF and FeatureVariations data it rebuilds. Every piece left out is
-reported in `SubsetOutput::warnings` (or `InstancedOutput::warnings`) with its table,
-byte offset, and reason.
+tables, for `BASE`, and for the GDEF and FeatureVariations data it rebuilds. Every piece
+left out is reported in `SubsetOutput::warnings` (or `InstancedOutput::warnings`) with
+its table, byte offset, and reason.
 
 The output is deterministic: the same face and glyph set always give the same bytes.
 

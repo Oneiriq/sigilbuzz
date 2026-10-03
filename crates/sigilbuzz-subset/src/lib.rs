@@ -41,9 +41,10 @@
 //! `vhea` or `vmtx` it cannot read is left out with its partner, a
 //! `VVAR` it cannot read is left out without its deltas being applied,
 //! and a malformed `VORG` is left out. So is a malformed GDEF piece or
-//! FeatureVariations record it rebuilds, and, in a partial instance, an
-//! `avar`, `HVAR`, `VVAR` or `MVAR` it cannot rebuild. Each is reported
-//! in [`InstancedOutput::warnings`]. Tables an instance passes through
+//! FeatureVariations record it rebuilds, a `BASE` whose variations it
+//! cannot apply, and, in a partial instance, an `avar`, `HVAR`, `VVAR`
+//! or `MVAR` it cannot rebuild. Each is reported in
+//! [`InstancedOutput::warnings`]. Tables an instance passes through
 //! unchanged are not read, so they are neither checked nor reported.
 //!
 //! # What happens to each table
