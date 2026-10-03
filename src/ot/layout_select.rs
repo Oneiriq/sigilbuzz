@@ -129,11 +129,13 @@ fn lang_sys_lookups(
     features: &ActiveFeatures<'_>,
     tag: [u8; 4],
 ) -> Option<Vec<u16>> {
+    // The tag first: only a feature with the tag needs its
+    // substitutions looked up.
     let with_tag = |index: u16| {
-        features
-            .get(index)
-            .filter(|(feature_tag, _)| *feature_tag == tag)
-            .map(|(_, feature)| feature)
+        if features.tag(index) != Some(tag) {
+            return None;
+        }
+        features.get(index).map(|(_, feature)| feature)
     };
     let required = lang_sys.required_feature_index().and_then(with_tag);
     let regular = lang_sys.feature_indices().find_map(with_tag);

@@ -756,28 +756,38 @@ impl<'a> FeatureTableSubstitution<'a> {
     /// past the last record. A null alternate has no lookups.
     #[must_use]
     pub fn get(&self, index: u16) -> Option<(u16, Feature<'a>)> {
-        if index >= self.count {
-            return None;
-        }
-        let at = SUBSTITUTION_HEADER_SIZE + usize::from(index) * SUBSTITUTION_RECORD_SIZE;
-        let feature_index = u16_at(self.data, at)?;
-        let offset = u32_at(self.data, at + 2)?;
-        let feature = if offset == 0 {
-            Feature::empty()
-        } else {
-            Feature::parse_alternate(self.data, offset).unwrap_or(Feature::empty())
-        };
-        Some((feature_index, feature))
+        Some((self.feature_index(index)?, self.alternate(index)?))
     }
 
     /// The alternate for feature `feature_index`: that of the first
     /// record with the index, as HarfBuzz's `find_substitute` scans.
+    /// Only that record's alternate is read.
     #[must_use]
     pub fn find(&self, feature_index: u16) -> Option<Feature<'a>> {
         (0..self.count)
-            .filter_map(|i| self.get(i))
-            .find(|&(index, _)| index == feature_index)
-            .map(|(_, feature)| feature)
+            .filter(|&i| self.feature_index(i) == Some(feature_index))
+            .find_map(|i| self.alternate(i))
+    }
+
+    /// Where record `index` starts, or `None` past the last record.
+    fn record_at(&self, index: u16) -> Option<usize> {
+        (index < self.count)
+            .then(|| SUBSTITUTION_HEADER_SIZE + usize::from(index) * SUBSTITUTION_RECORD_SIZE)
+    }
+
+    /// The `featureIndex` of record `index`.
+    fn feature_index(&self, index: u16) -> Option<u16> {
+        u16_at(self.data, self.record_at(index)?)
+    }
+
+    /// The alternate Feature table of record `index`.
+    fn alternate(&self, index: u16) -> Option<Feature<'a>> {
+        let offset = u32_at(self.data, self.record_at(index)? + 2)?;
+        Some(if offset == 0 {
+            Feature::empty()
+        } else {
+            Feature::parse_alternate(self.data, offset).unwrap_or(Feature::empty())
+        })
     }
 }
 
@@ -832,6 +842,13 @@ impl<'a> ActiveFeatures<'a> {
         variation: Option<(FeatureVariations<'a>, u32)>,
     ) -> Self {
         Self { list, variation }
+    }
+
+    /// The tag of feature `index`, which a substitution leaves alone.
+    /// `None` when the index is out of range. Cheaper than
+    /// [`Self::get`], which also scans the substitutions.
+    pub(crate) fn tag(&self, index: u16) -> Option<[u8; 4]> {
+        self.list.tag(index)
     }
 
     /// Feature `index` as `(tag, Feature)`: the FeatureList's tag and
