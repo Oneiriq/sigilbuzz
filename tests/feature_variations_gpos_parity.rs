@@ -445,7 +445,18 @@ fn normalize_wght(face: &Face<'_>, value: f32) -> Vec<f32> {
 /// sigilbuzz's output at user-space `wght` `user`, or else at the
 /// normalized coordinates `coords`.
 fn sigilbuzz_rows(user: Option<f32>, coords: &[f32], text: &str, features: &[Feature]) -> Vec<Row> {
-    let blob = Blob::new(FONT);
+    font_rows(FONT, user, coords, text, features)
+}
+
+/// [`sigilbuzz_rows`] for the font `data`.
+fn font_rows(
+    data: &[u8],
+    user: Option<f32>,
+    coords: &[f32],
+    text: &str,
+    features: &[Feature],
+) -> Vec<Row> {
+    let blob = Blob::new(data);
     let face = Face::parse(&blob, 0).unwrap();
     let user_coords = user.map(|w| normalize_wght(&face, w));
     let coords = user_coords.as_deref().unwrap_or(coords);
@@ -530,5 +541,50 @@ fn the_default_instance_keeps_the_default_lookups() {
 fn a_substituted_feature_that_is_off_applies_nothing() {
     for &(text, expected) in NO_PALT {
         assert_eq!(sigilbuzz_rows(Some(900.0), &[], text, &[]), expected);
+    }
+}
+
+/// A copy of `font` with the tables of `overrides` in place of its own
+/// or added to it.
+fn with_tables(font: &[u8], overrides: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let face = Face::parse_bytes(font, 0).unwrap();
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = face
+        .records()
+        .iter()
+        .filter(|r| overrides.iter().all(|(tag, _)| *tag != r.tag))
+        .map(|r| (r.tag, face.table_bytes(r.tag).unwrap().to_vec()))
+        .collect();
+    tables.extend(overrides.iter().cloned());
+    tables.sort_by_key(|(tag, _)| *tag);
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + 16 * tables.len();
+    for (tag, body) in &tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        offset += body.len().next_multiple_of(4);
+    }
+    for (_, body) in &tables {
+        out.extend_from_slice(body);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    out
+}
+
+#[test]
+fn a_gpos_whose_1_1_header_is_cut_short_is_left_out() {
+    // A 12-byte GPOS 1.1 whose ScriptList, FeatureList, and LookupList
+    // share the empty list at byte 10, where `featureVariationsOffset`
+    // would start, with no room for that field. HarfBuzz 14.5.0
+    // rejects the table and shapes without it, as sigilbuzz did before
+    // it read FeatureVariations.
+    let short = vec![0, 1, 0, 1, 0, 10, 0, 10, 0, 10, 0, 0];
+    let font = with_tables(FONT, &[(*b"GPOS", short)]);
+    for &(text, expected) in NO_PALT {
+        assert_eq!(font_rows(&font, Some(900.0), &[], text, &[PALT]), expected);
     }
 }
