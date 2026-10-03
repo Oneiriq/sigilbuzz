@@ -61,7 +61,13 @@
 //! dropped. Sources without `VVAR` pass `vmtx` through unchanged.
 //! When `VVAR` also maps vertical origin deltas, they fold into `VORG`
 //! the same way, entries added for glyphs whose origin moves off the
-//! default. A malformed `VORG` is then left out and reported.
+//! default.
+//!
+//! As in a subset, a malformed vertical table does not fail the
+//! instance. A `vhea` or `vmtx` that cannot be read is left out with
+//! its partner, a `VVAR` that cannot be read is left out and its
+//! deltas are not applied, and a malformed `VORG` is left out; each is
+//! reported in [`InstancedOutput::warnings`].
 //!
 //! # MVAR-aware OS/2 / hhea / post / vhea
 //!
@@ -313,7 +319,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // vmtx bake (when the source carries vmtx). VVAR deltas fold in
     // here; vmtx-without-VVAR rides through unchanged. The VVAR
     // vertical origin deltas fold into VORG.
-    let vmtx_bake_result = bake_vmtx(face, &coords, num_glyphs)?;
+    let vmtx_bake_result = bake_vmtx(face, &coords, num_glyphs, &warnings);
     let vorg_bake = bake_vorg(face, &coords, num_glyphs, &warnings);
 
     // MVAR-aware bake of OS/2, hhea, post, vhea (when MVAR is present).
@@ -354,24 +360,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         (tag::LOCA, glyf_loca.loca),
         (tag::GLYF, glyf_loca.glyf),
     ];
-    // vmtx + vhea: when the source carries vmtx, emit the rebuilt
-    // table and patch vhea's numberOfLongVerMetrics to the count
-    // `bake_vmtx` computed (which may extend the long range to cover
-    // VVAR-induced trailing-advance differences).
-    if let Some(vmtx_bytes) = vmtx_bake_result.vmtx_bytes.clone() {
-        tables.push((tag::VMTX, vmtx_bytes));
-        let mut vhea_out = match mvar_bake.vhea.clone() {
-            Some(bytes) => bytes,
-            None => face
-                .table_bytes(tag::VHEA)
-                .map_err(SubsetError::from)?
-                .to_vec(),
-        };
-        util::write_vhea_metrics_count(&mut vhea_out, vmtx_bake_result.number_of_long_ver_metrics)?;
-        tables.push((tag::VHEA, vhea_out));
-    } else if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
-        tables.push((tag::VHEA, vhea_bytes));
-    }
+    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, &mut tables)?;
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
@@ -440,8 +429,11 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
-        // A VORG the bake could not read is left out.
-        if rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped {
+        // A VORG the bake could not read is left out, and so are the
+        // vertical metrics and VVAR the vmtx bake could not read.
+        if (rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped)
+            || vmtx_bake_result.left_out.contains(&rec.tag)
+        {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
@@ -453,6 +445,37 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         bytes,
         warnings: warnings.into_sorted(),
     })
+}
+
+/// Appends the rebuilt `vmtx` with `vhea` (MVAR-baked when `MVAR`
+/// varies it) patched to its `numberOfLongVerMetrics`, which may
+/// extend the long range to cover VVAR-induced trailing-advance
+/// differences. Without a rebuilt `vmtx`, appends an MVAR-baked `vhea`
+/// unless the bake left `vhea` out; an unbaked one rides through with
+/// the other tables.
+fn push_vertical_metrics(
+    face: &Face<'_>,
+    vmtx_bake: &metrics::VmtxBake,
+    mvar_bake: &metrics::MvarBake,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) -> Result<(), SubsetError> {
+    if let Some(vmtx_bytes) = vmtx_bake.vmtx_bytes.clone() {
+        tables.push((tag::VMTX, vmtx_bytes));
+        let mut vhea_out = match mvar_bake.vhea.clone() {
+            Some(bytes) => bytes,
+            None => face
+                .table_bytes(tag::VHEA)
+                .map_err(SubsetError::from)?
+                .to_vec(),
+        };
+        util::write_vhea_metrics_count(&mut vhea_out, vmtx_bake.number_of_long_ver_metrics)?;
+        tables.push((tag::VHEA, vhea_out));
+    } else if !vmtx_bake.left_out.contains(&tag::VHEA) {
+        if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
+            tables.push((tag::VHEA, vhea_bytes));
+        }
+    }
+    Ok(())
 }
 
 /// CFF2 path: rebuild the CFF2 table with `blend` resolved at `coords`,
@@ -471,7 +494,7 @@ fn cff2_bake(
     let new_cff2 = crate::cff2::bake_at_coords(cff2_bytes, coords)?;
 
     let hmtx_out = bake_hmtx(face, coords, num_glyphs)?;
-    let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs)?;
+    let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, &warnings);
     let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
     let mvar_bake = bake_mvar_metrics(face, coords)?;
 
@@ -501,20 +524,7 @@ fn cff2_bake(
         (tag::HMTX, hmtx_out.bytes),
         (tag::CFF2, new_cff2),
     ];
-    if let Some(vmtx_bytes) = vmtx_bake_result.vmtx_bytes.clone() {
-        tables.push((tag::VMTX, vmtx_bytes));
-        let mut vhea_out = match mvar_bake.vhea.clone() {
-            Some(bytes) => bytes,
-            None => face
-                .table_bytes(tag::VHEA)
-                .map_err(SubsetError::from)?
-                .to_vec(),
-        };
-        util::write_vhea_metrics_count(&mut vhea_out, vmtx_bake_result.number_of_long_ver_metrics)?;
-        tables.push((tag::VHEA, vhea_out));
-    } else if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
-        tables.push((tag::VHEA, vhea_bytes));
-    }
+    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, &mut tables)?;
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
@@ -566,7 +576,9 @@ fn cff2_bake(
         if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
-        if rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped {
+        if (rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped)
+            || vmtx_bake_result.left_out.contains(&rec.tag)
+        {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
