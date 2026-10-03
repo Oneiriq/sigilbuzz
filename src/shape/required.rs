@@ -21,7 +21,11 @@
 //! [`apply_stage_zero`] runs `rvrn` unless the caller turned it off,
 //! and the required feature when no pass of the segment's pipeline
 //! will apply its tag, as one stage: each lookup once, in lookup-index
-//! order.
+//! order. A value the caller gives `rvrn` picks the alternate of an
+//! AlternateSubst lookup, as it would for any other feature.
+//!
+//! HarfBuzz enables `rvrn` in GPOS too, where it joins the one GPOS
+//! stage with the other features (see [`super::gpos`]).
 
 use alloc::vec::Vec;
 
@@ -177,22 +181,40 @@ pub(super) fn apply_stage_zero(
         )
         .unwrap_or_default()
     };
-    let mut indices: Vec<u16> = required.into_iter().chain(rvrn).collect();
-    if indices.is_empty() {
+    if required.is_empty() && rvrn.is_empty() {
         return;
     }
-    indices.sort_unstable();
-    indices.dedup();
-    let stage: Vec<StageLookup> = indices
+    // The caller's `rvrn` value picks the glyph an AlternateSubst lookup
+    // of `rvrn` substitutes, 1 for the first alternate, as for any
+    // feature. The required feature always picks the first.
+    let rvrn_alternate = rvrn_alternate(plan.features);
+    let mut stage: Vec<StageLookup> = required
         .into_iter()
-        .map(|index| StageLookup {
+        .filter(|index| !rvrn.contains(index))
+        .map(|index| (index, 0))
+        .chain(rvrn.iter().map(|&index| (index, rvrn_alternate)))
+        .map(|(index, alternate)| StageLookup {
             index,
             flags: FeatureFlags::AUTO,
-            alternate: 0,
+            alternate,
             masked: false,
         })
         .collect();
+    stage.sort_unstable_by_key(|l| l.index);
     apply_gsub_stage(gsub, &stage, glyphs, gdef, None, budget);
+}
+
+/// The alternate an AlternateSubst lookup of `rvrn` picks: the last
+/// value the caller gave `rvrn`, less 1, and the first alternate when
+/// the caller gave none.
+fn rvrn_alternate(features: &[Feature]) -> u16 {
+    features
+        .iter()
+        .rev()
+        .find(|f| f.tag == RVRN)
+        .map_or(0, |f| {
+            f.value.saturating_sub(1).min(u32::from(u16::MAX)) as u16
+        })
 }
 
 #[cfg(test)]
@@ -249,6 +271,21 @@ mod tests {
             value: 0,
         }];
         assert!(!plan(Script::Latin, &off, &[]).applies(RVRN));
+    }
+
+    #[test]
+    fn the_last_rvrn_value_picks_the_alternate() {
+        let rvrn = |value| Feature { tag: RVRN, value };
+        assert_eq!(rvrn_alternate(&[]), 0);
+        assert_eq!(rvrn_alternate(&[rvrn(1)]), 0);
+        assert_eq!(rvrn_alternate(&[rvrn(3)]), 2);
+        let liga = Feature {
+            tag: *b"liga",
+            value: 5,
+        };
+        assert_eq!(rvrn_alternate(&[rvrn(3), liga, rvrn(2)]), 1);
+        assert_eq!(rvrn_alternate(&[liga]), 0);
+        assert_eq!(rvrn_alternate(&[rvrn(u32::MAX)]), u16::MAX);
     }
 
     #[test]
