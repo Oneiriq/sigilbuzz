@@ -11,17 +11,25 @@
 //! feature's stage, on every glyph, with automatic joiner handling and
 //! across syllables, as HarfBuzz adds them with the global mask.
 //!
+//! Which stages run depends on the shaper HarfBuzz picks, not on the
+//! script alone: an Indic or Myanmar script whose font has only `DFLT`,
+//! `dflt` or `latn` lookups (or `mymr` for Myanmar) takes the default
+//! shaper, and a required feature then runs in that shaper's stages.
+//!
 //! None of the vendored fonts has a required feature, so each test
-//! patches one at run time. Every expectation is HarfBuzz 14.5.0's
-//! output (uharfbuzz, `guess_segment_properties`) on the same patched
-//! bytes: glyph id, cluster, x advance, x offset, y offset.
+//! patches one at run time, or builds a GSUB of one lookup. Every
+//! expectation is HarfBuzz 14.5.0's output (uharfbuzz,
+//! `guess_segment_properties`) on the same patched bytes: glyph id,
+//! cluster, x advance (y advance in vertical text), x offset, y offset.
 
-use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Face, Feature, Font};
+use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Direction, Face, Feature, Font};
 
 const DEVANAGARI: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 const MALAYALAM: &[u8] = include_bytes!("fonts/NotoSansMalayalam-Regular.ttf");
 const KHMER: &[u8] = include_bytes!("fonts/NotoSansKhmer-Regular.ttf");
 const TIRHUTA: &[u8] = include_bytes!("fonts/NotoSansTirhuta-Regular.ttf");
+const MYANMAR: &[u8] = include_bytes!("fonts/NotoSansMyanmar-Regular.ttf");
+const OLD_HANGUL: &[u8] = include_bytes!("fonts/NotoSansOldHangul-Subset.ttf");
 
 type Row = (u32, u32, i32, i32, i32);
 
@@ -38,6 +46,24 @@ fn rows(font: &[u8], text: &str, features: &[Feature]) -> Vec<Row> {
         .glyphs
         .iter()
         .map(|g| (g.glyph_id, g.cluster, g.x_advance, g.x_offset, g.y_offset))
+        .collect()
+}
+
+/// [`rows`] for vertical text, with the y advance for the x advance.
+fn vertical_rows(font: &[u8], text: &str, features: &[Feature]) -> Vec<Row> {
+    let blob = Blob::new(font);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.push_str(text);
+    buffer.guess_segment_properties();
+    buffer.set_direction(Direction::Ttb);
+    buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
+    shape(&font, &buffer, features)
+        .expect("shape")
+        .glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.cluster, g.y_advance, g.x_offset, g.y_offset))
         .collect()
 }
 
@@ -268,6 +294,53 @@ fn khmer_required_liga() -> Vec<u8> {
     retag(&mut gsub, b"clig", b"liga");
     make_required(&mut gsub, b"liga");
     with_gsub(KHMER, gsub)
+}
+
+/// The glyph `font` maps `c` to.
+fn glyph(font: &[u8], c: char) -> u16 {
+    let face = Face::parse_bytes(font, 0).unwrap();
+    face.cmap().unwrap().glyph_id(c).unwrap()
+}
+
+/// A GSUB with one script, `script`, whose default language system
+/// lists no feature and has a feature tagged `required` as its required
+/// feature. Its one lookup swaps glyphs `a` and `b` (a single
+/// substitution, format 2), so it shows how often it ran.
+fn swap_gsub(script: &[u8; 4], required: &[u8; 4], a: u16, b: u16) -> Vec<u8> {
+    fn words(out: &mut Vec<u8>, values: &[u16]) {
+        for v in values {
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+    let (lo, hi) = (a.min(b), a.max(b));
+    let mut out = Vec::new();
+    // Header: version 1.0, then the ScriptList, FeatureList and
+    // LookupList offsets.
+    words(&mut out, &[1, 0, 10, 28, 42]);
+    // ScriptList at 10: one record. Its Script at 18 has its default
+    // language system at 22: no lookup order, required feature 0, and
+    // no listed features.
+    words(&mut out, &[1]);
+    out.extend_from_slice(script);
+    words(&mut out, &[8, 4, 0, 0, 0, 0]);
+    // FeatureList at 28: one record, whose Feature at 36 has lookup 0.
+    words(&mut out, &[1]);
+    out.extend_from_slice(required);
+    words(&mut out, &[8, 0, 1, 0]);
+    // LookupList at 42: one Lookup at 46, of type 1 with no flags and
+    // one subtable at 54, which maps the coverage at 64 (`lo`, `hi`) to
+    // `hi`, `lo`.
+    words(
+        &mut out,
+        &[1, 4, 1, 0, 1, 8, 2, 10, 2, hi, lo, 1, 2, lo, hi],
+    );
+    out
+}
+
+/// `font` with a [`swap_gsub`] that swaps the glyphs of `a` and `b`.
+fn with_swap(font: &[u8], script: &[u8; 4], required: &[u8; 4], a: char, b: char) -> Vec<u8> {
+    let gsub = swap_gsub(script, required, glyph(font, a), glyph(font, b));
+    with_gsub(font, gsub)
 }
 
 #[test]
@@ -549,6 +622,136 @@ fn a_required_liga_runs_in_stage_zero_in_khmer() {
                     "\u{1781}\u{17B6}\u{17C6}",
                     &[(214, 0, 923, 0, 0), (113, 0, 0, 47, -29)],
                 ),
+            ],
+        );
+    }
+}
+
+fn feature(tag: &[u8; 4], value: u32) -> Feature {
+    Feature { tag: *tag, value }
+}
+
+#[test]
+fn a_required_liga_runs_once_when_devanagari_takes_the_default_shaper() {
+    // A GSUB whose only script is `DFLT` sends Devanagari to HarfBuzz's
+    // default shaper. That shaper runs `liga`, so the required `liga`
+    // runs once, in the stage of `liga`, or in stage 0 when the caller
+    // turns `liga` off. It used to run in both, which swapped ka back.
+    // With a `dev2` script the Indic shaper turns `liga` off, so the
+    // required `liga` runs once, in stage 0.
+    let off = [feature(b"liga", 0)];
+    let on = [feature(b"liga", 1)];
+    for script in [b"DFLT", b"dev2"] {
+        let font = with_swap(DEVANAGARI, script, b"liga", '\u{0915}', '\u{0916}');
+        for features in [&[][..], &off, &on] {
+            check_with(
+                &font,
+                features,
+                &[
+                    ("\u{0915}", &[(57, 0, 818, 0, 0)]),
+                    ("\u{0916}", &[(56, 0, 768, 0, 0)]),
+                    (
+                        "\u{0915}\u{0916}",
+                        &[(57, 0, 818, 0, 0), (56, 3, 768, 0, 0)],
+                    ),
+                ],
+            );
+        }
+    }
+}
+
+#[test]
+fn a_required_liga_runs_in_stage_zero_in_vertical_text() {
+    // Vertical text has no `liga` unless the caller turns it on, so the
+    // required `liga` of a `DFLT` font runs in stage 0 there, and in
+    // the stage of `liga` with `liga=1`.
+    let font = with_swap(DEVANAGARI, b"DFLT", b"liga", '\u{0915}', '\u{0916}');
+    let off = [feature(b"liga", 0)];
+    let on = [feature(b"liga", 1)];
+    for features in [&[][..], &off, &on] {
+        let text = "\u{0915}\u{0916}";
+        assert_eq!(
+            vertical_rows(&font, text, features),
+            [(57, 0, -1304, -409, -963), (56, 3, -1304, -384, -963)],
+            "{text:?} {features:?}"
+        );
+    }
+}
+
+#[test]
+fn a_required_rphf_runs_in_stage_zero_when_devanagari_takes_the_default_shaper() {
+    // HarfBuzz's default shaper has no `rphf`, so with a `DFLT` or
+    // `latn` script the required `rphf` runs in stage 0. It used to run
+    // nowhere. With `dev2` it runs in the Indic shaper's `rphf` stage,
+    // or in stage 0 when the caller turns `rphf` off.
+    let off = [feature(b"rphf", 0)];
+    for script in [b"DFLT", b"latn", b"dev2"] {
+        let font = with_swap(DEVANAGARI, script, b"rphf", '\u{0915}', '\u{0916}');
+        for features in [&[][..], &off] {
+            check_with(
+                &font,
+                features,
+                &[
+                    ("\u{0915}", &[(57, 0, 818, 0, 0)]),
+                    (
+                        "\u{0930}\u{094D}\u{0915}",
+                        &[(82, 0, 409, 0, 0), (103, 0, 0, 0, 0), (57, 6, 818, 0, 0)],
+                    ),
+                ],
+            );
+        }
+    }
+}
+
+#[test]
+fn a_required_pref_runs_in_stage_zero_when_myanmar_takes_the_default_shaper() {
+    // HarfBuzz sends Myanmar to the default shaper when the GSUB script
+    // is `DFLT`, or `mymr`, the tag of fonts made before the Myanmar
+    // shaping model. That shaper has no `pref`, so the required `pref`
+    // runs in stage 0, before anything moves. It used to run nowhere.
+    // With `mym2` the Myanmar shaper runs it in its `pref` stage, after
+    // medial ra moves before the consonant.
+    let off = [feature(b"pref", 0)];
+    for script in [b"DFLT", b"mymr", b"mym2"] {
+        let font = with_swap(MYANMAR, script, b"pref", '\u{1000}', '\u{1001}');
+        let medial_ra: &[Row] = if script == b"mym2" {
+            &[(47, 0, 229, 0, 0), (5, 0, 676, 0, 0)]
+        } else {
+            &[(5, 0, 676, 0, 0), (47, 0, 229, 0, 0)]
+        };
+        for features in [&[][..], &off] {
+            check_with(
+                &font,
+                features,
+                &[
+                    ("\u{1000}", &[(5, 0, 676, 0, 0)]),
+                    ("\u{1001}", &[(4, 0, 1124, 0, 0)]),
+                    ("\u{1000}\u{103C}", medial_ra),
+                ],
+            );
+        }
+    }
+}
+
+#[test]
+fn a_required_ljmo_runs_once_on_hangul_syllables() {
+    // The Hangul shaper has `ljmo`, so a required `ljmo` runs once, in
+    // its stage, on syllables as on jamo, which compose to a syllable
+    // first. When no jamo was left it used to run in stage 0 too, which
+    // swapped the syllable back. With `ljmo=0` it runs in stage 0.
+    let font = with_swap(OLD_HANGUL, b"hang", b"ljmo", '\u{AC00}', '\u{AC01}');
+    for features in [&[][..], &[feature(b"ljmo", 0)]] {
+        check_with(
+            &font,
+            features,
+            &[
+                ("\u{AC00}", &[(341, 0, 920, 0, 0)]),
+                ("\u{AC01}", &[(340, 0, 920, 0, 0)]),
+                (
+                    "\u{AC00}\u{AC01}",
+                    &[(341, 0, 920, 0, 0), (340, 3, 920, 0, 0)],
+                ),
+                ("\u{1100}\u{1161}", &[(341, 0, 920, 0, 0)]),
             ],
         );
     }
