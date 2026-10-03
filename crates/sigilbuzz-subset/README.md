@@ -42,8 +42,9 @@ such as `COLR`, `CPAL`, `MVAR` and `DSIG`, stay, since no glyph ID changes, but 
 `instance` handles variable fonts. It bakes a set of axis coordinates into a static
 font, or pins some axes and leaves the rest variable. It moves `glyf` outlines (inferred
 points and composite offsets included), the advances and side bearings their phantom
-points give, and the `BASE` coordinates the store varies, the way HarfBuzz's instancer
-does.
+points give, the `cvt ` values `cvar` varies, and the `BASE` coordinates the store
+varies, the way HarfBuzz's instancer does. Glyph instructions stay, as they do in
+HarfBuzz unless it is asked to drop hinting.
 
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
 a Device table, an anchor), or a malformed vertical metrics table (`vhea`, `vmtx`,

@@ -24,6 +24,8 @@
 //!   flag-driven SHORT / SAME compression. Hinting instructions ride
 //!   through unchanged, with the `cvt `, `fpgm` and `prep` they use, as
 //!   HarfBuzz keeps them unless asked to drop hinting.
+//! - The `cvar` deltas at the coordinates are added to `cvt `, which
+//!   those instructions read (see the `cvar` submodule).
 //! - A composite glyph's components placed by offset move by their
 //!   deltas, and their arguments widen to words when the moved offset
 //!   no longer fits a byte. Components placed by matching points keep
@@ -46,8 +48,8 @@
 //! When [`InstanceInput::drop_var_tables`] is true (the recommended
 //! default for the "ship as static" workflow):
 //!
-//! - `fvar`, `avar`, `gvar`, `HVAR`, `VVAR`, `MVAR` are dropped from
-//!   the directory.
+//! - `fvar`, `avar`, `gvar`, `cvar`, `HVAR`, `VVAR`, `MVAR` are
+//!   dropped from the directory.
 //! - `GDEF` keeps every subtable but its `ItemVariationStore`, which is
 //!   pruned once the GPOS bake (see below) and the LigCaretList caret
 //!   fold have resolved every `VariationIndex` that pointed into it.
@@ -149,6 +151,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 mod axes;
+mod cvar;
 mod gdef_store;
 mod glyf;
 mod ivs;
@@ -391,6 +394,12 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         BaseBake::Unchanged
     };
 
+    // cvt: the cvar deltas at the instance, which the glyph
+    // instructions read.
+    if let Some(cvt) = cvar::bake_cvt(face, &coords, &[], &warnings).and_then(|b| b.cvt) {
+        tables.push((cvar::CVT, cvt));
+    }
+
     // Carry every other table through verbatim, with a drop list for
     // the variable-font tables when `drop_var_tables` is true.
     for rec in face.records() {
@@ -400,7 +409,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         if input.drop_var_tables
             && matches!(
                 rec.tag,
-                tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR | tag::VVAR | tag::MVAR
+                tag::FVAR | tag::AVAR | tag::GVAR | cvar::CVAR | tag::HVAR | tag::VVAR | tag::MVAR
             )
         {
             continue;

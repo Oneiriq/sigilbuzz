@@ -8,6 +8,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use super::axes::{bake_avar_partial, bake_fvar_partial};
+use super::cvar;
 use super::gdef_store::GdefBake;
 use super::ivs::PinnedOnly;
 use super::metrics::{bake_vorg, MvarBake, VorgBake};
@@ -43,19 +44,22 @@ use crate::SubsetError;
 ///   those tables now, so the variation tables drop them,
 /// - moves the `BASE` coordinates varied through its store to the new
 ///   default and projects the store,
+/// - adds the `cvar` tuples left on the pinned axes only to `cvt ` and
+///   rebuilds `cvar` for the kept axes from the rest (see
+///   [`cvar`](super::cvar)),
 /// - rides `maxp` and the rest of the layout and other tables through
 ///   verbatim. The Keep-axis variations stay live; the Pin-axis
 ///   dimensions fold into the trimmed deltas so a shaper at
 ///   `(Keep coords)` produces what the source produced at
 ///   `(Keep coords, Pin coords)`, within rounding.
 ///
-/// An `avar`, `HVAR`, `VVAR` or `MVAR` that cannot be rebuilt for the
-/// kept axes (malformed, or an `avar` other than version 1) is left
-/// out, never carried through with regions that still count the pinned
-/// axes, and reported in [`InstancedOutput::warnings`]. The bakes check
-/// every Offset32 and every count-times-size product, so a crafted
-/// table cannot wrap a 32-bit `usize`; a rebuilt table that outgrows
-/// its own offsets is an error.
+/// An `avar`, `cvar`, `HVAR`, `VVAR` or `MVAR` that cannot be rebuilt
+/// for the kept axes (malformed, or an `avar` other than version 1) is
+/// left out, never carried through with regions that still count the
+/// pinned axes, and reported in [`InstancedOutput::warnings`]. The
+/// bakes check every Offset32 and every count-times-size product, so a
+/// crafted table cannot wrap a 32-bit `usize`; a rebuilt table that
+/// outgrows its own offsets is an error.
 ///
 /// `input.drop_var_tables` is not read here. The output keeps live
 /// axes, so the trimmed variation tables always stay: they drive
@@ -232,6 +236,18 @@ pub(super) fn partial_instance(
     // BASE: the coordinates its store varies move to the new default,
     // and the store keeps the kept axes.
     let base_bake = push_base(face, &post_avar_coords, pins, &warnings, &mut tables);
+
+    // cvt takes the cvar tuples left on the pinned axes only; cvar
+    // keeps the rest, for the kept axes.
+    if let Some(bake) = cvar::bake_cvt(face, &post_avar_coords, pins, &warnings) {
+        if let Some(cvt) = bake.cvt {
+            tables.push((cvar::CVT, cvt));
+        }
+        match bake.cvar {
+            Some(new) => tables.push((cvar::CVAR, new)),
+            None => dropped.push(cvar::CVAR),
+        }
+    }
 
     // Carry every other table through verbatim.
     for rec in face.records() {

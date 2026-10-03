@@ -63,7 +63,7 @@ use crate::util::round_half_up;
 use crate::SubsetError;
 
 mod iup;
-mod tuple;
+pub(crate) mod tuple;
 
 use iup::SparseTuple;
 use tuple::{
