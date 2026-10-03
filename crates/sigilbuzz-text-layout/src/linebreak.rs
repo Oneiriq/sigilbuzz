@@ -54,7 +54,12 @@ pub enum BreakOpportunity {
 /// // KeepAll breaks only at the space (and at the end).
 /// assert_eq!(breaks(WordBreak::KeepAll), [10, 16]);
 /// ```
+///
+/// CSS adds values to `word-break` over time (CSS Text 4 has
+/// `auto-phrase`), so the enum is `#[non_exhaustive]`: a `match` on it
+/// outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum WordBreak {
     /// The default rules of UAX #14 (CSS `word-break: normal`).
     /// Ideographs and Hangul syllables break between characters, and
