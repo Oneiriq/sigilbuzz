@@ -34,8 +34,37 @@
 //! identically to the static default instance, and so does one whose
 //! coords all round to zero.
 
+use alloc::vec::Vec;
+
 use crate::error::Result;
 use crate::face::Face;
+use crate::tables::parse::hb_round_to;
+
+/// `coords` rounded to F2DOT14 as HarfBuzz stores a font's coords: each
+/// a multiple of 1/16384, rounded halves up, with NaN read as zero.
+/// Empty when every coordinate rounds to zero, the default instance.
+/// Shaping and the face's outline and bounds methods read coords
+/// through this, so they agree with each other and with HarfBuzz.
+///
+/// For a coordinate from [`crate::tables::Fvar::normalize_coords`] and
+/// [`crate::tables::Avar::remap_all`], a multiple `k / 65536`, this is
+/// HarfBuzz's `(k + 2) >> 2`.
+pub(crate) fn f2dot14_coords(coords: &[f32]) -> Vec<f32> {
+    let rounded: Vec<f32> = coords
+        .iter()
+        .map(|&c| {
+            if c.is_nan() {
+                0.0
+            } else {
+                hb_round_to(c, 16384.0)
+            }
+        })
+        .collect();
+    if rounded.iter().all(|&c| c == 0.0) {
+        return Vec::new();
+    }
+    rounded
+}
 
 /// A face bound to a render size (and optional variation coords).
 #[derive(Debug, Clone)]
@@ -180,5 +209,19 @@ mod tests {
         let font = Font::new(face, 16.0).with_coords(&coords);
         let rescaled = font.with_size(32.0);
         assert_eq!(rescaled.coords(), &coords[..]);
+    }
+
+    #[test]
+    fn coords_round_to_f2dot14_like_harfbuzz() {
+        // HarfBuzz's `(k + 2) >> 2` for a 16.16 coordinate k / 65536.
+        for k in [-65536i32, -39322, -6, -3, -2, 2, 3, 6, 39322, 65536] {
+            let got = f2dot14_coords(&[k as f32 / 65536.0, 1.0]);
+            assert_eq!(got[0], ((k + 2) >> 2) as f32 / 16384.0, "{k}");
+        }
+        // Coordinates that all round to zero are the default instance.
+        assert!(f2dot14_coords(&[2.0 / 65536.0 - 1e-9, -2.0 / 65536.0]).is_empty());
+        assert!(f2dot14_coords(&[f32::NAN, 0.0]).is_empty());
+        assert!(f2dot14_coords(&[]).is_empty());
+        assert_eq!(f2dot14_coords(&[f32::NAN, 0.5]), [0.0, 0.5]);
     }
 }

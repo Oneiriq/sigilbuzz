@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use super::Face;
 use crate::error::{Error, Result};
+use crate::font::f2dot14_coords;
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::hb_roundf;
@@ -66,6 +67,11 @@ impl<'a> Face<'a> {
     /// Returns the design-unit bounding box for `glyph_id` at the
     /// given normalized axis coords.
     ///
+    /// The coords are first rounded to F2DOT14, multiples of 1/16384
+    /// with halves rounded up, as HarfBuzz stores a font's coords and
+    /// as shaping reads them, so the box is the one shaping uses.
+    /// Coords that all round to zero give the default instance.
+    ///
     /// When the font varies (`gvar` is present and some coord is not
     /// zero), the box is the extent of the varied outline's points,
     /// off-curve points included, each edge rounded as HarfBuzz's
@@ -83,7 +89,8 @@ impl<'a> Face<'a> {
         let Some(base) = self.glyph_bounds(glyph_id)? else {
             return Ok(None);
         };
-        if coords.iter().all(|&c| c == 0.0) {
+        let coords = f2dot14_coords(coords);
+        if coords.is_empty() {
             return Ok(Some(base));
         }
         let Some(gvar) = self.gvar()? else {
@@ -103,7 +110,7 @@ impl<'a> Face<'a> {
             vmtx: Some(&vmtx),
         };
         let tables = (&glyf, &loca, &gvar);
-        varied_glyph_bounds(tables, glyph_id, coords, &metrics, base.num_contours).map(Some)
+        varied_glyph_bounds(tables, glyph_id, &coords, &metrics, base.num_contours).map(Some)
     }
 
     /// The vertical metrics the phantom points of the glyphs of a walk
@@ -150,6 +157,15 @@ impl<'a> Face<'a> {
     /// table's own Variation Store via the `blend` charstring
     /// operator. An empty `coords` slice is equivalent to the static
     /// outline and is the cheap path taken by [`Face::glyph_outline`].
+    ///
+    /// The coords are first rounded to F2DOT14, multiples of 1/16384
+    /// with halves rounded up: HarfBuzz rounds a font's coords to that
+    /// precision when they are set, and shaping reads them the same
+    /// way, so a glyph drawn here at a `Font`'s coords is the glyph
+    /// shaping measured and HarfBuzz draws. Coords that all round to
+    /// zero draw the default instance. The table-level methods
+    /// ([`Glyf::outline_at_coords`], [`Cff2::outline`]) take coords as
+    /// given.
     pub fn glyph_outline_at_coords(
         &self,
         glyph_id: u16,
@@ -159,7 +175,8 @@ impl<'a> Face<'a> {
             components_left: MAX_VARC_COMPONENTS,
             ops_left: MAX_VARC_OPS,
         };
-        self.glyph_outline_at_coords_inner(glyph_id, coords, 0, &mut budget)
+        let coords = f2dot14_coords(coords);
+        self.glyph_outline_at_coords_inner(glyph_id, &coords, 0, &mut budget)
     }
 
     /// Recursive entry point used by VARC composite resolution.
@@ -449,6 +466,40 @@ mod tests {
 
     fn edges(b: GlyphBounds) -> [i16; 4] {
         [b.x_min, b.y_min, b.x_max, b.y_max]
+    }
+
+    #[test]
+    fn outlines_and_bounds_read_coords_at_f2dot14_precision() {
+        // A subset of Hahmlet, whose `wght` axis runs from 100 to 900.
+        let data = include_bytes!("../../tests/fixtures/hahmlet_gvar_subset.ttf");
+        let blob = crate::Blob::new(data);
+        let face = Face::parse(&blob, 0).unwrap();
+        // Glyph 4 is `O`. 0.3 is no multiple of 1/16384: HarfBuzz keeps
+        // it as round(0.3 * 16384) = 4915, and so does shaping.
+        let o = 4;
+        let rounded = [4915.0 / 16384.0];
+        let outline = face.glyph_outline_at_coords(o, &[0.3]).unwrap();
+        assert_eq!(outline, face.glyph_outline_at_coords(o, &rounded).unwrap());
+        assert_eq!(
+            face.glyph_bounds_at_coords(o, &[0.3]).unwrap(),
+            face.glyph_bounds_at_coords(o, &rounded).unwrap()
+        );
+        // The table-level walk takes 0.3 as given, and draws another
+        // outline.
+        let (loca, glyf, gvar) = (
+            face.loca().unwrap(),
+            face.glyf().unwrap(),
+            face.gvar().unwrap(),
+        );
+        let mut exact = Outline::new();
+        glyf.outline_at_coords(&loca, o, gvar.as_ref(), &[0.3], None, &mut exact)
+            .unwrap();
+        assert_ne!(outline, Some(exact));
+        // A coord under half a unit is the default instance.
+        assert_eq!(
+            face.glyph_outline_at_coords(o, &[1.0 / 40000.0]).unwrap(),
+            face.glyph_outline(o).unwrap()
+        );
     }
 
     #[test]
