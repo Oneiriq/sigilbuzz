@@ -148,7 +148,7 @@ impl<'a> Cff2<'a> {
             return Ok(false);
         }
         let cs = self.char_strings.get(gid)?;
-        let local_subrs = self.local_subrs(gid)?;
+        let private = self.private(gid)?;
 
         // Parse the variation store. CFF2 charstrings call `blend`
         // even at the default instance (empty coords). The operator
@@ -176,13 +176,15 @@ impl<'a> Cff2<'a> {
             None
         };
 
+        // The Private DICT may name the ItemVariationData subtable that
+        // the glyph blends with until its charstring picks another.
         let blend = ivs.as_ref().map(|ivs| BlendContext {
             coords,
             ivs,
-            vsindex: 0,
+            vsindex: private.vsindex,
         });
         let mut interp =
-            crate::tables::cff::Interp2::new(self.global_subrs, local_subrs, sink, blend);
+            crate::tables::cff::Interp2::new(self.global_subrs, private.local_subrs, sink, blend);
         interp.run(cs, 0)?;
         // CFF2 has no endchar, so the last contour is still open when
         // the charstring runs out. Close it here.
@@ -190,20 +192,20 @@ impl<'a> Cff2<'a> {
         Ok(true)
     }
 
-    /// The Local Subrs INDEX for glyph `gid`, from the Private DICT of
-    /// the Font DICT that FDSelect picks. A glyph whose FD has no Font
-    /// DICT, or whose Font DICT has no Private DICT, gets an empty one.
-    fn local_subrs(&self, gid: usize) -> Result<Index<'a>> {
+    /// The Private DICT of glyph `gid`, from the Font DICT that FDSelect
+    /// picks. A glyph whose FD has no Font DICT, or whose Font DICT has
+    /// no Private DICT, gets the defaults: no Local Subrs and vsindex 0.
+    fn private(&self, gid: usize) -> Result<Private<'a>> {
         let fd = usize::from(self.fd_select.map_or(0, |s| s.fd_for_glyph(gid)));
         if fd >= self.fd_array.len() {
-            return Ok(Index::default());
+            return Ok(Private::default());
         }
         let font_dict = Cff2TopDict::parse(self.fd_array.get(fd)?)?;
         let Some((size, off)) = font_dict.private else {
-            return Ok(Index::default());
+            return Ok(Private::default());
         };
         let priv_bytes = slice_at(self.data, off as usize, size as usize)?;
-        read_local_subrs(self.data, priv_bytes, off as usize)
+        read_private(self.data, priv_bytes, off as usize)
     }
 }
 
@@ -226,6 +228,9 @@ struct Cff2TopDict {
     private: Option<(u32, u32)>,
     /// Operator 19: Local Subrs offset (relative to Private DICT).
     local_subrs_off: Option<u32>,
+    /// Operator 22: vsindex. Private DICTs only. Out-of-range values
+    /// saturate the way the charstring operator's do.
+    vsindex: Option<u16>,
 }
 
 impl Cff2TopDict {
@@ -257,6 +262,11 @@ impl Cff2TopDict {
                         }
                     }
                     19 => out.local_subrs_off = operands.last().map(|v| (*v).max(0) as u32),
+                    22 => {
+                        out.vsindex = operands
+                            .last()
+                            .map(|v| u16::try_from((*v).max(0)).unwrap_or(u16::MAX));
+                    }
                     24 => out.vstore = operands.last().map(|v| (*v).max(0) as u32),
                     0x0C24 => out.fd_array = operands.last().map(|v| (*v).max(0) as u32),
                     0x0C25 => out.fd_select = operands.last().map(|v| (*v).max(0) as u32),
@@ -323,21 +333,36 @@ fn slice_at(data: &[u8], off: usize, len: usize) -> Result<&[u8]> {
     Ok(&data[off..end])
 }
 
-fn read_local_subrs<'a>(
-    data: &'a [u8],
-    priv_bytes: &'a [u8],
-    priv_off: usize,
-) -> Result<Index<'a>> {
+/// What a glyph's Private DICT gives its charstring.
+#[derive(Default)]
+struct Private<'a> {
+    /// Local Subrs. Operator 19, relative to the Private DICT.
+    local_subrs: Index<'a>,
+    /// The ItemVariationData subtable `blend` uses until the charstring
+    /// sets its own `vsindex`. Operator 22, default 0.
+    vsindex: u16,
+}
+
+/// Reads the Private DICT at `priv_off`, whose bytes are `priv_bytes`,
+/// and the Local Subrs INDEX it names.
+fn read_private<'a>(data: &'a [u8], priv_bytes: &'a [u8], priv_off: usize) -> Result<Private<'a>> {
     let priv_dict = Cff2TopDict::parse(priv_bytes)?;
+    let vsindex = priv_dict.vsindex.unwrap_or(0);
     let Some(off) = priv_dict.local_subrs_off else {
-        return Ok(Index::default());
+        return Ok(Private {
+            local_subrs: Index::default(),
+            vsindex,
+        });
     };
     let subr_off = priv_off.checked_add(off as usize).ok_or(Error::Malformed {
         offset: priv_off,
         context: "CFF2 Local Subrs offset overflow",
     })?;
     let mut r = Reader::at(data, subr_off)?;
-    read_index2(&mut r)
+    Ok(Private {
+        local_subrs: read_index2(&mut r)?,
+        vsindex,
+    })
 }
 
 #[cfg(test)]
@@ -688,6 +713,50 @@ mod tests {
             out.extend(privates);
             out
         }
+    }
+
+    /// Draws glyph 0 of a CFF2 table whose only Font DICT has a Private
+    /// DICT made of `private`, blending against
+    /// [`build_two_subtable_ivs`] at coord 0.5, and returns the x of its
+    /// moveto.
+    fn moveto_x_with_private_dict(private: Vec<u8>, cs: &[u8]) -> f32 {
+        let table = TestCff2 {
+            charstrings: alloc::vec![cs.to_vec()],
+            font_dicts: alloc::vec![Some(TestPrivate {
+                dict: private,
+                subrs: Vec::new(),
+            })],
+            ivs: Some(build_two_subtable_ivs()),
+            ..TestCff2::default()
+        }
+        .build();
+        let cff2 = Cff2::parse(&table).unwrap();
+        let mut out = Outline::new();
+        assert!(cff2.outline(0, &[0.5], &mut out).unwrap());
+        match out.ops() {
+            [PathOp::MoveTo { x, y: 0.0 }, PathOp::Close] => *x,
+            ops => panic!("unexpected ops {ops:?}"),
+        }
+    }
+
+    #[test]
+    fn cff2_private_dict_vsindex_is_the_default_for_blend() {
+        // `100 20 1 blend 0 rmoveto`. At coord 0.5 subtable 0's region
+        // scales its delta by 0.5 and subtable 1's by 1.0, so x is 110
+        // through vsindex 0 and 120 through vsindex 1.
+        let cs = [239, 159, 140, op_code::BLEND, 139, op_code::RMOVETO];
+        // No vsindex in the Private DICT: subtable 0.
+        assert_eq!(moveto_x_with_private_dict(Vec::new(), &cs), 110.0);
+        // `1 vsindex` (operator 22) in the Private DICT: subtable 1. It
+        // used to be ignored, so every glyph blended with subtable 0.
+        assert_eq!(moveto_x_with_private_dict(alloc::vec![140, 22], &cs), 120.0);
+        // A charstring `0 vsindex` overrides the Private DICT.
+        let mut overridden = alloc::vec![139, op_code::VSINDEX];
+        overridden.extend_from_slice(&cs);
+        assert_eq!(
+            moveto_x_with_private_dict(alloc::vec![140, 22], &overridden),
+            110.0
+        );
     }
 
     #[test]
