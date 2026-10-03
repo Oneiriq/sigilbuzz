@@ -33,18 +33,23 @@
 //! Pass 2 walks the contour list and dispatches to the caller's
 //! [`OutlineSink`].
 //!
-//! The intermediate point list is what supports
+//! Pass 1 follows HarfBuzz's `Glyph::get_points`: each glyph's points
+//! land at the end of one running point list in the glyph's own frame,
+//! followed by its four phantom points, and a composite then places
+//! each component's points (phantom points included) in its own frame
+//! before it drops them. The running list is what supports
 //! `ARGS_ARE_XY_VALUES`-clear *anchor-mode* components: when the
-//! component flag bit is clear, `arg1` and `arg2` are point indices
-//! into the parent's already-flattened points and the child's own
-//! flattened points respectively. The translation is implied:
-//! `parent[arg1] - child[arg2]`, so we need both sides as concrete
-//! coordinates before we can emit the child's ops.
+//! component flag bit is clear, `arg2` is a point of the component
+//! and `arg1` a point of the running list, which holds every point the
+//! walk has placed so far, in whatever composite it was placed, then
+//! the component's own points and its phantom points. The component
+//! moves by `list[arg1] - component[arg2]`, so both sides must be
+//! concrete before the child's ops can be emitted.
 //!
-//! Phantom-point references are resolved against hmtx (and vmtx if
-//! present) at flatten time. The phantom-anchor branch is covered by
-//! the `phantom_anchor_fixture_outlines_match_ttf_parser` integration
-//! test (hand-crafted ~1 KB fixture under `tests/fixtures/`).
+//! The phantom points come from hmtx (and vmtx if present). The
+//! `phantom_anchor_fixture_outlines_match_harfbuzz` integration test
+//! covers an anchor past the points before the component
+//! (hand-crafted ~1 KB fixture under `tests/fixtures/`).
 
 mod composite;
 mod simple;
@@ -88,9 +93,9 @@ pub struct GlyphBounds {
 /// - `pp4 = (0, yMax + tsb - advanceHeight)`: advance-height origin.
 ///
 /// Composite components in anchor-mode (`ARGS_ARE_XY_VALUES` clear)
-/// can index past the contour-point count into these four slots; real
-/// fonts use this to align components to the parent's advance-width
-/// origin without hard-coded offsets.
+/// can match a component's phantom point, which follows the
+/// component's points in the running point list of the walk (see the
+/// module docs), and `gvar` moves the phantom points.
 ///
 /// `vmtx` is optional: horizontal-only fonts have no `vmtx` and the
 /// vertical phantoms collapse to `(0, 0)`. Real-world anchor-mode
@@ -170,21 +175,62 @@ impl FlattenBudget {
         }
     }
 
-    fn take_glyph(&mut self) -> Result<()> {
+    /// Takes one glyph visit, or fails with `offset`, the byte offset in
+    /// `glyf` of the glyph that would overspend the cap.
+    fn take_glyph(&mut self, offset: usize) -> Result<()> {
         self.glyphs = self.glyphs.checked_sub(1).ok_or(Error::Malformed {
-            offset: 0,
+            offset,
             context: "glyf composite visits too many glyphs",
         })?;
         Ok(())
     }
 
-    fn take_points(&mut self, n: usize) -> Result<()> {
+    /// Takes `n` points, or fails with `offset`, the byte offset in
+    /// `glyf` of the simple glyph whose points would overspend the cap.
+    fn take_points(&mut self, n: usize, offset: usize) -> Result<()> {
         self.points = self.points.checked_sub(n).ok_or(Error::Malformed {
-            offset: 0,
+            offset,
             context: "glyf composite expands to too many points",
         })?;
         Ok(())
     }
+}
+
+/// A glyph's four phantom points, in its own frame, from its header's
+/// `xMin` and `yMax` and its metrics (see [`PhantomMetrics`]); without
+/// `vmtx` the vertical ones are `(0, 0)`.
+fn phantom_points_from(
+    glyph_id: u16,
+    metrics: &PhantomMetrics<'_>,
+    x_min: i16,
+    y_max: i16,
+) -> PhantomPoints {
+    let advance_w = f32::from(metrics.hmtx.advance(glyph_id).unwrap_or(0));
+    let lsb = f32::from(metrics.hmtx.lsb(glyph_id).unwrap_or(0));
+    let pp1_x = f32::from(x_min) - lsb;
+    let pp2_x = pp1_x + advance_w;
+
+    let (pp3_y, pp4_y) = if let Some(vmtx) = metrics.vmtx {
+        let advance_h = f32::from(vmtx.advance(glyph_id).unwrap_or(0));
+        let tsb = f32::from(vmtx.tsb(glyph_id).unwrap_or(0));
+        let pp3 = f32::from(y_max) + tsb;
+        (pp3, pp3 - advance_h)
+    } else {
+        (0.0, 0.0)
+    };
+
+    [(pp1_x, 0.0), (pp2_x, 0.0), (0.0, pp3_y), (0.0, pp4_y)]
+}
+
+/// A glyph's four phantom points: left and right side bearing origins
+/// in x, top and bottom origins in y.
+type PhantomPoints = [(f32, f32); 4];
+
+/// The byte offset in `glyf` where `loca` puts `glyph_id`, which errors
+/// about the glyph report; 0, the start of the table, for a glyph id
+/// past the end of `loca`.
+fn glyph_offset(loca: &Loca<'_>, glyph_id: u16) -> usize {
+    loca.range(glyph_id).map_or(0, |(start, _)| start as usize)
 }
 
 /// Rounds a float to the nearest `i16`, saturating at the type bounds.
@@ -263,7 +309,7 @@ impl<'a> Glyf<'a> {
         };
         if body.len() < 10 {
             return Err(Error::Truncated {
-                offset: 0,
+                offset: glyph_offset(loca, glyph_id),
                 context: "glyf header shorter than 10 bytes",
             });
         }
@@ -289,10 +335,8 @@ impl<'a> Glyf<'a> {
     /// when available; horizontal-only fonts get `(0, 0)` for both,
     /// which matches every in-the-wild glyph we've checked: anchor
     /// indices for vertical phantoms only show up in CJK fonts that
-    /// also ship `vmtx`. Glyphs without a `glyf` body get all-zero
-    /// phantoms, which collapses anchor mode to a zero translation
-    /// like the legacy fallback before phantom resolution
-    /// landed.
+    /// also ship `vmtx`. Glyphs without a `glyf` body take their box
+    /// as `(0, 0)`.
     fn phantom_points(
         &self,
         loca: &Loca<'_>,
@@ -301,24 +345,10 @@ impl<'a> Glyf<'a> {
     ) -> Result<[(f32, f32); 4]> {
         let bounds = self.bounds(loca, glyph_id)?;
         let (x_min, y_max) = match bounds {
-            Some(b) => (f32::from(b.x_min), f32::from(b.y_max)),
-            None => (0.0, 0.0),
+            Some(b) => (b.x_min, b.y_max),
+            None => (0, 0),
         };
-        let advance_w = f32::from(metrics.hmtx.advance(glyph_id).unwrap_or(0));
-        let lsb = f32::from(metrics.hmtx.lsb(glyph_id).unwrap_or(0));
-        let pp1_x = x_min - lsb;
-        let pp2_x = pp1_x + advance_w;
-
-        let (pp3_y, pp4_y) = if let Some(vmtx) = metrics.vmtx {
-            let advance_h = f32::from(vmtx.advance(glyph_id).unwrap_or(0));
-            let tsb = f32::from(vmtx.tsb(glyph_id).unwrap_or(0));
-            let pp3 = y_max + tsb;
-            (pp3, pp3 - advance_h)
-        } else {
-            (0.0, 0.0)
-        };
-
-        Ok([(pp1_x, 0.0), (pp2_x, 0.0), (0.0, pp3_y), (0.0, pp4_y)])
+        Ok(phantom_points_from(glyph_id, metrics, x_min, y_max))
     }
 
     /// Returns the glyph's raw points in glyf-natural order: every
@@ -355,20 +385,9 @@ impl<'a> Glyf<'a> {
             metrics: Some(&metrics),
             var: None,
         };
-        let mut flat = FlatGlyph::default();
-        let identity = Transform::identity();
-        let drew = self.flatten(
-            &cx,
-            glyph_id,
-            None,
-            &identity,
-            &mut flat,
-            0,
-            &mut FlattenBudget::new(),
-        )?;
-        if !drew {
+        let Some(flat) = self.flatten_root(&cx, glyph_id, None, &mut FlattenBudget::new())? else {
             return Ok(None);
-        }
+        };
         let pp = self.phantom_points(loca, glyph_id, &metrics)?;
         let mut out = Vec::with_capacity(flat.points.len() + 4);
         for &(x, y) in &flat.points {
@@ -388,13 +407,12 @@ impl<'a> Glyf<'a> {
     /// path. To draw a variable font at given coords, use
     /// [`Glyf::outline_at_coords`], which also varies components.
     ///
-    /// `metrics` supplies `hmtx` (and optionally `vmtx`) so anchor-mode
-    /// composites whose anchor index points past the parent's contour
-    /// points can resolve against the four phantom points (LSB origin,
-    /// advance-width origin, TSB origin, advance-height origin).
-    /// Passing `None` keeps the legacy zero-translation fallback for
-    /// the rare phantom case, useful for unit tests of synthetic
-    /// composites that don't ship metrics.
+    /// `metrics` supplies `hmtx` (and optionally `vmtx`) for the four
+    /// phantom points (LSB origin, advance-width origin, TSB origin,
+    /// advance-height origin) an anchor-mode component can match (see
+    /// the module docs). Passing `None` leaves a component anchored to
+    /// a phantom point where its offset puts it, useful for unit tests
+    /// of synthetic composites that don't ship metrics.
     ///
     /// Returns `Ok(false)` when the glyph id is valid but has no
     /// outline data (whitespace glyph), `Ok(true)` otherwise.
@@ -559,25 +577,11 @@ impl<'a> Glyf<'a> {
         // composite children) into a flat point list with absolute
         // coordinates; pass 2 emits ops contour by contour. The
         // intermediate point list is what lets composite components
-        // resolve `ARGS_ARE_XY_VALUES`-clear anchor-point matching:
-        // arg1 indexes into the parent's already-flattened points
-        // and arg2 into the freshly-flattened child, so we need both
-        // sets of concrete coordinates before we know the child's
-        // translation.
-        let mut flat = FlatGlyph::default();
-        let identity = Transform::identity();
-        let drew = self.flatten(
-            cx,
-            glyph_id,
-            deltas,
-            &identity,
-            &mut flat,
-            0,
-            &mut FlattenBudget::new(),
-        )?;
-        if !drew {
+        // resolve `ARGS_ARE_XY_VALUES`-clear anchor-point matching,
+        // which reads points already placed.
+        let Some(flat) = self.flatten_root(cx, glyph_id, deltas, &mut FlattenBudget::new())? else {
             return Ok(false);
-        }
+        };
         flat.emit(sink);
         Ok(true)
     }
@@ -621,13 +625,14 @@ impl<'a> Glyf<'a> {
         budget: &mut FlattenBudget,
         path: &mut Vec<u16>,
     ) -> Result<[(f32, f32); 4]> {
+        let offset = glyph_offset(cx.loca, glyph_id);
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(Error::Malformed {
-                offset: 0,
+                offset,
                 context: "glyf composite recursion exceeded cap",
             });
         }
-        budget.take_glyph()?;
+        budget.take_glyph(offset)?;
         let mut pp = self.phantom_points(cx.loca, glyph_id, metrics)?;
         // The glyph's own gvar points come first: contour points for a
         // simple glyph, components for a composite, none when empty.
@@ -679,52 +684,90 @@ impl<'a> Glyf<'a> {
         Ok(pp)
     }
 
-    /// Flattens `glyph_id` (transformed by `tf`) into `out`. Returns
-    /// `Ok(false)` for empty / out-of-range glyphs. Recurses through
-    /// composite components, with `depth` capped by
-    /// [`MAX_COMPOSITE_DEPTH`] and the total work capped by `budget`.
+    /// Walks `glyph_id` into a [`FlatGlyph`] of its contour points,
+    /// without its phantom points, or `None` for a glyph without outline
+    /// data. See [`Glyf::flatten`].
+    fn flatten_root(
+        &self,
+        cx: &FlattenCtx<'_>,
+        glyph_id: u16,
+        deltas: Option<&[(f32, f32)]>,
+        budget: &mut FlattenBudget,
+    ) -> Result<Option<FlatGlyph>> {
+        let mut flat = FlatGlyph::default();
+        let drew = self.flatten(cx, glyph_id, deltas, &mut flat, 0, budget, &mut Vec::new())?;
+        flat.pop_phantoms();
+        Ok(drew.then_some(flat))
+    }
+
+    /// Appends `glyph_id`'s points to `out`, in the glyph's own frame,
+    /// and then its four phantom points, as HarfBuzz's
+    /// `Glyph::get_points` appends them to its running point list. A
+    /// composite places its components' points, phantom points
+    /// included, before it returns (see [`Glyf::flatten_composite`]),
+    /// so the points it leaves are in its own frame too. Returns
+    /// `Ok(false)` for an empty or out-of-range glyph, which still
+    /// leaves its phantom points. Recurses through composite
+    /// components, with `depth` capped by [`MAX_COMPOSITE_DEPTH`] and
+    /// the total work capped by `budget`.
     ///
     /// `deltas` are dense per-point deltas for a simple root glyph
-    /// ([`Glyf::outline`]); variations in `cx` take their place.
-    // The walk threads its tables, transform, output, and limits
-    // through every level of the recursion.
+    /// ([`Glyf::outline`]); variations in `cx` take their place. `path`
+    /// holds the components the composites on the way down are
+    /// visiting, for the cycle check of [`Glyf::phantom_walk`].
+    // The walk threads its tables, output, and limits through every
+    // level of the recursion.
     #[allow(clippy::too_many_arguments)]
     fn flatten(
         &self,
         cx: &FlattenCtx<'_>,
         glyph_id: u16,
         deltas: Option<&[(f32, f32)]>,
-        tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
         budget: &mut FlattenBudget,
+        path: &mut Vec<u16>,
     ) -> Result<bool> {
+        let offset = glyph_offset(cx.loca, glyph_id);
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(Error::Malformed {
-                offset: 0,
+                offset,
                 context: "glyf composite recursion exceeded cap",
             });
         }
-        budget.take_glyph()?;
-        let Some(body) = self.glyph_bytes(cx.loca, glyph_id)? else {
+        budget.take_glyph(offset)?;
+        // HarfBuzz reads a glyph shorter than its header as empty.
+        let Some(body) = self
+            .glyph_bytes(cx.loca, glyph_id)?
+            .filter(|b| b.len() >= 10)
+        else {
+            let deltas = match cx.var {
+                Some(var) => var
+                    .gvar
+                    .phantom_deltas(glyph_id, var.coords, 0, &mut budget.work)?,
+                None => [(0.0, 0.0); 4],
+            };
+            out.push_phantoms(cx.phantoms(glyph_id, (0, 0), &deltas));
             return Ok(false);
         };
-        if body.len() < 10 {
-            return Ok(false);
-        }
         let mut r = Reader::new(body);
         let num_contours = r.read_i16()?;
-        r.skip(8)?; // bbox
+        let x_min = r.read_i16()?;
+        r.skip(4)?; // yMin, xMax
+        let y_max = r.read_i16()?;
         if num_contours >= 0 {
             let var = cx.var.map(|v| (v, glyph_id));
-            flatten_simple_glyph(&mut r, num_contours as u16, deltas, var, tf, out, budget)?;
+            let glyph = (r, offset);
+            let deltas =
+                flatten_simple_glyph(glyph, num_contours as u16, deltas, var, out, budget)?;
+            out.push_phantoms(cx.phantoms(glyph_id, (x_min, y_max), &deltas));
         } else {
-            self.flatten_composite(&mut r, cx, glyph_id, tf, out, depth, budget)?;
+            let glyph = (&mut r, glyph_id, (x_min, y_max));
+            self.flatten_composite(glyph, cx, out, depth, budget, path)?;
         }
         Ok(true)
     }
 }
-
 /// Variation inputs for one outline walk: the `gvar` table and the
 /// normalized coords to evaluate it at.
 #[derive(Debug, Clone, Copy)]
@@ -752,16 +795,30 @@ struct FlattenCtx<'c> {
     var: Option<Variation<'c>>,
 }
 
-/// A 2x2 + translation affine transform. Used to flatten composite
-/// glyphs without monomorphizing a nested sink tower.
+impl FlattenCtx<'_> {
+    /// The phantom points of `glyph_id`, whose header holds `xMin` and
+    /// `yMax` in `header`, moved by `deltas`. Without metrics they are
+    /// the origin, moved; anchors do not read them then.
+    fn phantoms(&self, glyph_id: u16, header: (i16, i16), deltas: &PhantomPoints) -> PhantomPoints {
+        let mut pp = self.metrics.map_or([(0.0, 0.0); 4], |m| {
+            phantom_points_from(glyph_id, m, header.0, header.1)
+        });
+        for (p, d) in pp.iter_mut().zip(deltas) {
+            p.0 += d.0;
+            p.1 += d.1;
+        }
+        pp
+    }
+}
+
+/// A composite component's 2x2 matrix: `x' = xx * x + xy * y`,
+/// `y' = yx * x + yy * y`.
 #[derive(Debug, Clone, Copy)]
 struct Transform {
     xx: f32,
     xy: f32,
     yx: f32,
     yy: f32,
-    tx: f32,
-    ty: f32,
 }
 
 impl Transform {
@@ -771,34 +828,17 @@ impl Transform {
             xy: 0.0,
             yx: 0.0,
             yy: 1.0,
-            tx: 0.0,
-            ty: 0.0,
         }
     }
 
+    fn is_identity(&self) -> bool {
+        self.xx == 1.0 && self.xy == 0.0 && self.yx == 0.0 && self.yy == 1.0
+    }
+
+    /// Applies the matrix with HarfBuzz's operations in HarfBuzz's
+    /// order (`contour_point_t::transform`), so the floats agree.
     fn apply(&self, x: f32, y: f32) -> (f32, f32) {
-        (
-            self.xx * x + self.xy * y + self.tx,
-            self.yx * x + self.yy * y + self.ty,
-        )
-    }
-
-    /// `self ∘ other`: apply `other` first, then `self`. Used by
-    /// composites to chain parent * child matrices.
-    fn compose(&self, other: &Self) -> Self {
-        let xx = self.xx * other.xx + self.xy * other.yx;
-        let xy = self.xx * other.xy + self.xy * other.yy;
-        let yx = self.yx * other.xx + self.yy * other.yx;
-        let yy = self.yx * other.xy + self.yy * other.yy;
-        let (tx, ty) = self.apply(other.tx, other.ty);
-        Self {
-            xx,
-            xy,
-            yx,
-            yy,
-            tx,
-            ty,
-        }
+        (x * self.xx + y * self.xy, x * self.yx + y * self.yy)
     }
 }
 
@@ -832,6 +872,21 @@ struct FlatGlyph {
 }
 
 impl FlatGlyph {
+    /// Appends four phantom points, which no contour holds.
+    fn push_phantoms(&mut self, phantoms: PhantomPoints) {
+        self.points.extend_from_slice(&phantoms);
+        self.flags
+            .extend_from_slice(&[FlatPoint { on_curve: false }; 4]);
+    }
+
+    /// Drops the four phantom points [`FlatGlyph::push_phantoms`] put
+    /// last.
+    fn pop_phantoms(&mut self) {
+        let len = self.points.len().saturating_sub(4);
+        self.points.truncate(len);
+        self.flags.truncate(len);
+    }
+
     fn emit<S: OutlineSink>(&self, sink: &mut S) {
         for c in &self.contours {
             // `flatten_simple_glyph` guarantees `start..=end` is in

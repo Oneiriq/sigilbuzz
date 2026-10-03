@@ -4,10 +4,10 @@
 use alloc::vec::Vec;
 
 use super::{
-    Contour, FlatGlyph, FlattenBudget, FlattenCtx, Glyf, Transform, COMP_ARGS_ARE_XY_VALUES,
+    FlatGlyph, FlattenBudget, FlattenCtx, Glyf, Transform, COMP_ARGS_ARE_XY_VALUES,
     COMP_ARG_1_AND_2_ARE_WORDS, COMP_MORE_COMPONENTS, COMP_SCALED_COMPONENT_OFFSET,
-    COMP_UNSCALED_COMPONENT_OFFSET, COMP_WE_HAVE_AN_X_AND_Y_SCALE, COMP_WE_HAVE_A_SCALE,
-    COMP_WE_HAVE_A_TWO_BY_TWO,
+    COMP_UNSCALED_COMPONENT_OFFSET, COMP_USE_MY_METRICS, COMP_WE_HAVE_AN_X_AND_Y_SCALE,
+    COMP_WE_HAVE_A_SCALE, COMP_WE_HAVE_A_TWO_BY_TWO,
 };
 use crate::error::Result;
 use crate::tables::parse::Reader;
@@ -19,9 +19,11 @@ pub(super) struct Component {
     pub(super) flags: u16,
     /// The glyph the component draws.
     pub(super) glyph_id: u16,
-    /// `arg1`: the x offset, or in anchor mode the parent's point.
+    /// `arg1`: the x offset, or in anchor mode the point to match, an
+    /// index into the walk's running point list.
     arg1: i32,
-    /// `arg2`: the y offset, or in anchor mode the component's point.
+    /// `arg2`: the y offset, or in anchor mode the component's point
+    /// to put on it.
     arg2: i32,
     /// The component's 2x2 matrix, with no translation.
     matrix: Transform,
@@ -51,6 +53,34 @@ impl Component {
             (self.arg1, self.arg2)
         }
     }
+
+    /// Places the component's `points`, in its glyph's frame, in the
+    /// composite's: through the matrix and moved by `offset`, the
+    /// component's gvar point with its delta, HarfBuzz's
+    /// `transform_points`. A scaled offset moves the points before the
+    /// matrix, an unscaled one after.
+    fn place(&self, points: &mut [(f32, f32)], offset: (f32, f32)) {
+        let transform = |points: &mut [(f32, f32)]| {
+            if !self.matrix.is_identity() {
+                for p in points.iter_mut() {
+                    *p = self.matrix.apply(p.0, p.1);
+                }
+            }
+        };
+        let translate = |points: &mut [(f32, f32)]| {
+            for p in points.iter_mut() {
+                p.0 += offset.0;
+                p.1 += offset.1;
+            }
+        };
+        if self.scales_offset() {
+            translate(points);
+            transform(points);
+        } else {
+            transform(points);
+            translate(points);
+        }
+    }
 }
 
 /// Reads the component records of a composite glyph, starting at `r`
@@ -61,26 +91,15 @@ pub(super) fn read_components(r: &mut Reader<'_>) -> Result<Vec<Component>> {
         let flags = r.read_u16()?;
         let glyph_id = r.read_u16()?;
 
-        // Arg width is flag-driven. We read the raw values first
-        // and decide later whether they are xy offsets or anchor
-        // point indices.
-        let (arg1, arg2): (i32, i32) = if flags & COMP_ARG_1_AND_2_ARE_WORDS != 0 {
-            let a = r.read_i16()?;
-            let b = r.read_i16()?;
-            (i32::from(a), i32::from(b))
-        } else {
-            // Anchor mode uses unsigned point indices when args
-            // are not WORDS; xy mode uses signed bytes. The
-            // distinction is the ARGS_ARE_XY_VALUES flag.
-            if flags & COMP_ARGS_ARE_XY_VALUES != 0 {
-                let a = r.read_i8()?;
-                let b = r.read_i8()?;
-                (i32::from(a), i32::from(b))
-            } else {
-                let a = r.read_u8()?;
-                let b = r.read_u8()?;
-                (i32::from(a), i32::from(b))
-            }
+        // Arg width is flag-driven, and so is the sign: offsets are
+        // signed, anchor point numbers unsigned, as HarfBuzz reads
+        // them (`get_anchor_points`).
+        let words = flags & COMP_ARG_1_AND_2_ARE_WORDS != 0;
+        let (arg1, arg2): (i32, i32) = match (words, flags & COMP_ARGS_ARE_XY_VALUES != 0) {
+            (true, true) => (i32::from(r.read_i16()?), i32::from(r.read_i16()?)),
+            (true, false) => (i32::from(r.read_u16()?), i32::from(r.read_u16()?)),
+            (false, true) => (i32::from(r.read_i8()?), i32::from(r.read_i8()?)),
+            (false, false) => (i32::from(r.read_u8()?), i32::from(r.read_u8()?)),
         };
 
         // OpenType stores the 2x2 in column-major order
@@ -125,19 +144,38 @@ pub(super) fn read_components(r: &mut Reader<'_>) -> Result<Vec<Component>> {
 }
 
 impl Glyf<'_> {
-    /// Flattens the composite glyph `parent_glyph_id`, whose component
-    /// records start at `r`, into `out`.
-    #[allow(clippy::too_many_arguments)] // `flatten`'s parameters plus the reader.
+    /// Appends the composite glyph `glyph`, a reader past its header,
+    /// its glyph id, and its header's `xMin` and `yMax`, to `out`, as
+    /// HarfBuzz's `Glyph::get_points` does for a composite:
+    ///
+    /// - Each component is walked onto the end of `out`, in its own
+    ///   frame, its phantom points last (see [`Glyf::flatten`]).
+    /// - Its points, phantom points included, go through its matrix
+    ///   and move by its offset plus the composite's `gvar` delta for
+    ///   it (an anchored component's offset is its delta alone).
+    /// - An anchored component then moves so that its point `arg2`
+    ///   lands on point `arg1` of the walk's running point list: every
+    ///   point placed so far in the whole walk, the component's own
+    ///   points and phantom points included. HarfBuzz indexes that list,
+    ///   not the composite's own points; an index past either end skips
+    ///   the move. Without metrics no phantom point can be matched.
+    /// - The component's phantom points are dropped, after a
+    ///   `USE_MY_METRICS` component has handed its unplaced ones to the
+    ///   composite.
+    ///
+    /// The composite's own phantom points, moved by its deltas, go last.
+    /// A component that would close a cycle is skipped where HarfBuzz's
+    /// decycler skips it (see [`Glyf::phantom_walk`]).
     pub(super) fn flatten_composite(
         &self,
-        r: &mut Reader<'_>,
+        glyph: (&mut Reader<'_>, u16, (i16, i16)),
         cx: &FlattenCtx<'_>,
-        parent_glyph_id: u16,
-        parent_tf: &Transform,
         out: &mut FlatGlyph,
         depth: u8,
         budget: &mut FlattenBudget,
+        path: &mut Vec<u16>,
     ) -> Result<()> {
+        let (r, glyph_id, header) = glyph;
         let components = read_components(r)?;
 
         // A composite's gvar points are its components, one each,
@@ -148,7 +186,7 @@ impl Glyf<'_> {
                 let points: Vec<(i32, i32)> =
                     components.iter().map(Component::gvar_point).collect();
                 var.gvar.glyph_point_deltas_with(
-                    parent_glyph_id,
+                    glyph_id,
                     var.coords,
                     &points,
                     &[],
@@ -157,147 +195,61 @@ impl Glyf<'_> {
             }
             None => Vec::new(),
         };
-
-        for (index, c) in components.iter().enumerate() {
-            let (dx, dy) = deltas.get(index).copied().unwrap_or((0.0, 0.0));
-
-            // Snapshot the parent's point count *before* this
-            // component is laid down. Anchor-mode arg1 indexes into
-            // exactly those points (the parent contour points already
-            // emitted by previous siblings, transformed into the
-            // composite's frame).
-            let parent_point_count = out.points.len();
-
-            // First flatten the child into a scratch buffer with the
-            // 2x2 applied but no translation yet. Both anchor-mode
-            // and xy-mode branches need access to the child's
-            // pre-translation absolute points.
-            let child_combined = parent_tf.compose(&c.matrix);
-            let mut child_flat = FlatGlyph::default();
-            self.flatten(
-                cx,
-                c.glyph_id,
-                None,
-                &child_combined,
-                &mut child_flat,
-                depth + 1,
-                budget,
-            )?;
-
-            // The offset with its delta, in the composite's frame:
-            // HarfBuzz's `transform_points` translates by it before
-            // the matrix when the offset is scaled, after it otherwise.
-            // An anchored component's offset is its delta alone.
-            let (ox, oy) = c.gvar_point();
-            let (lx, ly) = (ox as f32 + dx, oy as f32 + dy);
-            let (lx, ly) = if c.scales_offset() {
-                c.matrix.apply(lx, ly)
-            } else {
-                (lx, ly)
-            };
-            // The translation lives in the parent's coordinate frame,
-            // so route it through the parent's linear part before
-            // applying it on top of the already-transformed child
-            // points.
-            let offset = (
-                parent_tf.xx * lx + parent_tf.xy * ly,
-                parent_tf.yx * lx + parent_tf.yy * ly,
-            );
-
-            // Resolve the translation. Anchor-mode (ARGS_ARE_XY_VALUES
-            // clear) computes `parent[arg1] - child[arg2]` so the
-            // child's anchor point lands on the parent's, which cancels
-            // the component's delta. Otherwise the offset applies.
-            let (tx, ty) = if c.is_anchored() {
-                let p_idx = c.arg1 as usize;
-                let c_idx = c.arg2 as usize;
-                let parent_anchor = resolve_anchor_point(
-                    p_idx,
-                    parent_point_count,
-                    &out.points,
-                    || -> Result<Option<(f32, f32)>> {
-                        let Some(m) = cx.metrics else { return Ok(None) };
-                        let phantom_idx = p_idx - parent_point_count;
-                        if phantom_idx >= 4 {
-                            return Ok(None);
-                        }
-                        let pp = self.varied_phantoms(cx, m, parent_glyph_id, depth, budget)?;
-                        let (px, py) = pp[phantom_idx];
-                        // Parent's phantoms live in the parent's frame
-                        // which is the same frame as the points already in
-                        // `out.points`, which were transformed by
-                        // `parent_tf` on insertion. Apply the same
-                        // transform so the subtraction below cancels
-                        // out cleanly.
-                        Ok(Some(parent_tf.apply(px, py)))
-                    },
-                )?;
-                let child_point_count = child_flat.points.len();
-                let child_anchor = resolve_anchor_point(
-                    c_idx,
-                    child_point_count,
-                    &child_flat.points,
-                    || -> Result<Option<(f32, f32)>> {
-                        let Some(m) = cx.metrics else { return Ok(None) };
-                        let phantom_idx = c_idx - child_point_count;
-                        if phantom_idx >= 4 {
-                            return Ok(None);
-                        }
-                        let pp = self.varied_phantoms(cx, m, c.glyph_id, depth + 1, budget)?;
-                        let (cx_, cy_) = pp[phantom_idx];
-                        // Child's phantoms share the frame of the
-                        // freshly-flattened child points, which had
-                        // `child_combined` baked in.
-                        Ok(Some(child_combined.apply(cx_, cy_)))
-                    },
-                )?;
-                match (parent_anchor, child_anchor) {
-                    (Some((px, py)), Some((cx_, cy_))) => (px - cx_, py - cy_),
-                    // Out-of-range phantom index, or no metrics passed
-                    // through. Match HarfBuzz, which skips the anchor
-                    // translation and keeps the component's delta.
-                    _ => offset,
-                }
-            } else {
-                offset
-            };
-
-            // Splice the child into the parent. Contour ends shift by
-            // the parent's running point count; coordinates shift by
-            // the resolved translation; flags follow each point.
-            let point_offset = out.points.len();
-            debug_assert_eq!(child_flat.points.len(), child_flat.flags.len());
-            for (i, &(px, py)) in child_flat.points.iter().enumerate() {
-                out.points.push((px + tx, py + ty));
-                out.flags.push(child_flat.flags[i]);
-            }
-            for contour in &child_flat.contours {
-                out.contours.push(Contour {
-                    start: contour.start + point_offset,
-                    end: contour.end + point_offset,
-                });
-            }
+        let mut own_deltas = [(0.0, 0.0); 4];
+        for (slot, d) in own_deltas
+            .iter_mut()
+            .zip(deltas.iter().skip(components.len()))
+        {
+            *slot = *d;
         }
+        let mut phantoms = cx.phantoms(glyph_id, header, &own_deltas);
+
+        let node = path.len();
+        path.push(glyph_id);
+        for (index, c) in components.iter().enumerate() {
+            path[node] = c.glyph_id;
+            if node > 0 && path[node / 2] == c.glyph_id {
+                continue;
+            }
+            let start = out.points.len();
+            self.flatten(cx, c.glyph_id, None, out, depth + 1, budget, path)?;
+            let end = out.points.len();
+            let Some(placed) = out.points.get_mut(start..) else {
+                continue;
+            };
+            if c.flags & COMP_USE_MY_METRICS != 0 {
+                if let Some(last) = placed.get(placed.len().saturating_sub(4)..) {
+                    for (p, q) in phantoms.iter_mut().zip(last) {
+                        *p = *q;
+                    }
+                }
+            }
+            let (dx, dy) = deltas.get(index).copied().unwrap_or((0.0, 0.0));
+            let (ox, oy) = c.gvar_point();
+            c.place(placed, (ox as f32 + dx, oy as f32 + dy));
+            if c.is_anchored() {
+                let (to, from) = (c.arg1 as usize, c.arg2 as usize);
+                let count = end - start;
+                // The last four points of the list, and of the
+                // component, are its phantom points.
+                let phantom = |i: usize, len: usize| i + 4 >= len;
+                let known = cx.metrics.is_some() || !(phantom(to, end) || phantom(from, count));
+                if let (true, Some(&(ax, ay)), Some(&(bx, by))) =
+                    (known, out.points.get(to), out.points.get(start + from))
+                {
+                    if from < count {
+                        let (mx, my) = (ax - bx, ay - by);
+                        for p in &mut out.points[start..] {
+                            p.0 += mx;
+                            p.1 += my;
+                        }
+                    }
+                }
+            }
+            out.pop_phantoms();
+        }
+        path.truncate(node);
+        out.push_phantoms(phantoms);
         Ok(())
     }
-}
-
-/// Resolves an anchor-point index to a concrete `(x, y)` pair.
-/// Indices below `real_point_count` index into `points`; indices at
-/// or above that boundary are phantom-point references and route
-/// through `phantom`, which is invoked lazily so non-anchor-mode
-/// components pay nothing.
-fn resolve_anchor_point<F>(
-    idx: usize,
-    real_point_count: usize,
-    points: &[(f32, f32)],
-    phantom: F,
-) -> Result<Option<(f32, f32)>>
-where
-    F: FnOnce() -> Result<Option<(f32, f32)>>,
-{
-    if idx < real_point_count {
-        return Ok(Some(points[idx]));
-    }
-    phantom()
 }

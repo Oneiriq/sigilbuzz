@@ -140,7 +140,8 @@ impl Anchor {
     /// `ItemVariationStore`.
     ///
     /// `VariationIndex` deltas are evaluated at `coords` and rounded to
-    /// the nearest integer exactly like `ValueRecord` device slots.
+    /// the nearest integer exactly like `ValueRecord` device slots,
+    /// halves up as in HarfBuzz.
     /// Plain `Device` (hinting) tables, a missing store, empty
     /// `coords`, and malformed or out-of-range device tables all
     /// contribute zero. The additions saturate instead of wrapping.
@@ -346,13 +347,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rounds_half_away_from_zero() {
+    fn resolve_rounds_halves_up_like_harfbuzz() {
         let ivs_bytes = build_ivs(&[5, -5]);
         let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
         let bytes = build_format3_varidx(0, 0, Some(0), Some(1));
         let a = Anchor::parse(&bytes).unwrap();
-        // 5 * 0.5 = 2.5 -> 3; -2.5 -> -3.
-        assert_eq!(a.resolve(&bytes, Some(&store), &[0.5]), (3, -3));
+        // 5 * 0.5 = 2.5 -> 3; -2.5 -> -2, as HarfBuzz's roundf
+        // (floor(x + 0.5)) rounds it.
+        assert_eq!(a.resolve(&bytes, Some(&store), &[0.5]), (3, -2));
     }
 
     #[test]

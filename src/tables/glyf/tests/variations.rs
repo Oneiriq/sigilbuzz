@@ -429,17 +429,10 @@ fn an_outline_walk_charges_every_visit_to_one_budget() {
         var: Variation::new(Some(&gvar), &[1.0]),
     };
     let mut budget = FlattenBudget::new();
-    let mut flat = FlatGlyph::default();
-    glyf.flatten(
-        &cx,
-        2,
-        None,
-        &Transform::identity(),
-        &mut flat,
-        0,
-        &mut budget,
-    )
-    .unwrap();
+    let flat = glyf
+        .flatten_root(&cx, 2, None, &mut budget)
+        .unwrap()
+        .unwrap();
     assert_eq!(flat.points.len(), 9 * 4);
     assert_eq!(MAX_TUPLE_WORK - budget.work, 4 * 16 + 9 * 18);
 }
@@ -487,18 +480,13 @@ fn a_composite_tree_shares_its_gvar_budget() {
             "{r:?}"
         );
     };
-    let identity = Transform::identity();
-    let mut flat = FlatGlyph::default();
-    let drawn = glyf.flatten(&cx, 2, None, &identity, &mut flat, 0, &mut small());
+    let drawn = glyf.flatten_root(&cx, 2, None, &mut small());
     assert_cap(drawn.map(drop));
     let phantoms = glyf.varied_phantoms(&cx, &metrics, 2, 0, &mut small());
     assert_cap(phantoms.map(drop));
     // The full cap covers the tree.
-    let mut flat = FlatGlyph::default();
     let mut budget = FlattenBudget::new();
-    assert!(glyf
-        .flatten(&cx, 2, None, &identity, &mut flat, 0, &mut budget)
-        .is_ok());
+    assert!(glyf.flatten_root(&cx, 2, None, &mut budget).is_ok());
 }
 
 // The expected points and advances below match HarfBuzz 14.5.0 on the

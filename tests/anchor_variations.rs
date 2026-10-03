@@ -3,15 +3,20 @@
 //! VariationIndex rows, so the attachment points of its combining
 //! marks move with the weight. These tests shape marked text at
 //! several weights and compare every glyph's advance and offset with
-//! rustybuzz at the same axis value, in both directions.
+//! HarfBuzz 14.5.0 at the same axis value, in both directions.
+//!
+//! `tests/fixtures/rubik_variable_shaping.expected` holds HarfBuzz's
+//! output; `tests/tools/variable_shaping_expected.py` regenerates it.
+//! rustybuzz rounds the anchor deltas half away from zero, where
+//! HarfBuzz rounds halves up, so it is not the reference here.
 //!
 //! Clusters are left out of the comparison: HarfBuzz merges a mark's
 //! cluster into its base's, which sigilbuzz does not do yet.
 
-use rustybuzz::ttf_parser::Tag;
 use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
 
 const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
+const EXPECTED: &str = include_str!("fixtures/rubik_variable_shaping.expected");
 
 /// `(glyph_id, x_advance, y_advance, x_offset, y_offset)`.
 type Pos = (u32, i32, i32, i32, i32);
@@ -61,34 +66,43 @@ fn sigilbuzz_positions(wght: Option<f32>, text: &str, rtl: bool) -> Vec<Pos> {
         .collect()
 }
 
-fn rustybuzz_positions(wght: f32, text: &str, rtl: bool) -> Vec<Pos> {
-    let mut face = rustybuzz::Face::from_slice(RUBIK, 0).unwrap();
-    face.set_variations(&[rustybuzz::Variation {
-        tag: Tag::from_bytes(b"wght"),
-        value: wght,
-    }]);
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
-    buffer.set_direction(if rtl {
-        rustybuzz::Direction::RightToLeft
-    } else {
-        rustybuzz::Direction::LeftToRight
-    });
-    let out = rustybuzz::shape(&face, &[], buffer);
-    out.glyph_infos()
-        .iter()
-        .zip(out.glyph_positions())
-        .map(|(i, p)| (i.glyph_id, p.x_advance, p.y_advance, p.x_offset, p.y_offset))
+/// HarfBuzz's positions for `text` at `wght`, from the expected file.
+fn harfbuzz_positions(wght: f32, text: &str, rtl: bool) -> Vec<Pos> {
+    let cps: Vec<String> = text.chars().map(|c| format!("{:04X}", c as u32)).collect();
+    let key = format!(
+        "anchors {wght} {} {}",
+        if rtl { "rtl" } else { "ltr" },
+        cps.join(",")
+    );
+    let line = EXPECTED
+        .lines()
+        .find(|l| {
+            l.strip_prefix(&key)
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+        .unwrap_or_else(|| panic!("no HarfBuzz record for {key}"));
+    line[key.len()..]
+        .split_whitespace()
+        .map(|g| {
+            let v: Vec<i64> = g.split(',').map(|n| n.parse().unwrap()).collect();
+            (
+                v[0] as u32,
+                v[1] as i32,
+                v[2] as i32,
+                v[3] as i32,
+                v[4] as i32,
+            )
+        })
         .collect()
 }
 
 #[test]
-fn marks_match_rustybuzz_across_the_weight_axis() {
+fn marks_match_harfbuzz_across_the_weight_axis() {
     for &wght in &[300.0f32, 450.0, 600.0, 750.0, 900.0] {
         for &(text, rtl) in CASES {
             assert_eq!(
                 sigilbuzz_positions(Some(wght), text, rtl),
-                rustybuzz_positions(wght, text, rtl),
+                harfbuzz_positions(wght, text, rtl),
                 "wght={wght} rtl={rtl} {text:?}"
             );
         }

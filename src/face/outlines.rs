@@ -3,10 +3,11 @@
 
 use alloc::vec::Vec;
 
-use super::{round_f32_to_i16, Face};
+use super::Face;
 use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::outline::OutlineSink;
+use crate::tables::parse::hb_roundf;
 use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Loca, Outline, PathOp};
 
 impl<'a> Face<'a> {
@@ -67,8 +68,9 @@ impl<'a> Face<'a> {
     ///
     /// When the font varies (`gvar` is present and some coord is not
     /// zero), the box is the extent of the varied outline's points,
-    /// off-curve points included, each edge rounded half away from
-    /// zero, as HarfBuzz computes glyph extents. A glyph whose varied
+    /// off-curve points included, each edge rounded as HarfBuzz's
+    /// `roundf` rounds (`floor(x + 0.5)`, halves up), as HarfBuzz
+    /// computes glyph extents. A glyph whose varied
     /// outline has no points, or whose box has no width or no height,
     /// gets an all-zero box, as in HarfBuzz. Otherwise the box
     /// is the static one from [`Face::glyph_bounds`]. `num_contours`
@@ -292,9 +294,10 @@ impl PointBox {
         self.max = (self.max.0.max(x), self.max.1.max(y));
     }
 
-    /// The box rounded half away from zero, or all zeros when it is
-    /// empty: no point was seen, or it has no width or no height, as
-    /// HarfBuzz's `contour_bounds_t::empty` decides before rounding.
+    /// The box rounded as HarfBuzz's `roundf` rounds, halves up, or all
+    /// zeros when it is empty: no point was seen, or it has no width or
+    /// no height, as HarfBuzz's `contour_bounds_t::empty` decides before
+    /// rounding.
     fn bounds(&self, num_contours: i16) -> GlyphBounds {
         if self.min.0 >= self.max.0 || self.min.1 >= self.max.1 {
             return GlyphBounds {
@@ -305,11 +308,12 @@ impl PointBox {
                 num_contours,
             };
         }
+        let round = |v: f32| hb_roundf(v).clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
         GlyphBounds {
-            x_min: round_f32_to_i16(self.min.0),
-            y_min: round_f32_to_i16(self.min.1),
-            x_max: round_f32_to_i16(self.max.0),
-            y_max: round_f32_to_i16(self.max.1),
+            x_min: round(self.min.0),
+            y_min: round(self.min.1),
+            x_max: round(self.max.0),
+            y_max: round(self.max.1),
             num_contours,
         }
     }
@@ -415,9 +419,10 @@ mod tests {
     }
 
     #[test]
-    fn a_point_box_rounds_its_edges_half_away_from_zero() {
+    fn a_point_box_rounds_its_edges_halves_up() {
+        // HarfBuzz's roundf is floor(x + 0.5): -10.5 goes up to -10.
         let b = bounds(&[(-10.5, 0.4), (99.5, 200.6)]);
-        assert_eq!(edges(b), [-11, 0, 100, 201]);
+        assert_eq!(edges(b), [-10, 0, 100, 201]);
         assert_eq!(b.num_contours, 1);
     }
 

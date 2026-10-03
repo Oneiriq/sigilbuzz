@@ -1,13 +1,19 @@
 //! Variable-font integration: Rubik Variable (`wght` axis) exercises
-//! the full fvar -> avar -> Font::with_coords -> shape() pipeline, and
-//! checks that the resulting per-glyph advances match rustybuzz with
-//! the same axis coordinate.
+//! the full `fvar`, `avar`, `Font::with_coords`, `shape` pipeline, and
+//! checks that the resulting per-glyph advances match HarfBuzz 14.5.0
+//! at the same axis coordinate, and rustybuzz at the default instance.
+//!
+//! `tests/fixtures/rubik_variable_shaping.expected` holds HarfBuzz's
+//! output; `tests/tools/variable_shaping_expected.py` regenerates it.
+//! rustybuzz maps the unrounded `fvar` coordinate through `avar` and
+//! rounds deltas half away from zero, so its varied advances can be a
+//! unit off HarfBuzz's.
 
-use rustybuzz::ttf_parser::Tag;
-use rustybuzz::{Face as RbFace, UnicodeBuffer, Variation};
+use rustybuzz::{Face as RbFace, UnicodeBuffer};
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 
 const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
+const EXPECTED: &str = include_str!("fixtures/rubik_variable_shaping.expected");
 
 fn normalize_wght(face: &Face<'_>, user_value: f32) -> Vec<f32> {
     let fvar = face.fvar().unwrap().expect("rubik has fvar");
@@ -29,20 +35,56 @@ fn sigilbuzz_advances(bytes: &[u8], coords: &[f32], text: &str) -> Vec<i32> {
     shaped.glyphs.iter().map(|g| g.x_advance).collect()
 }
 
-fn rustybuzz_advances(bytes: &[u8], user_wght: f32, text: &str) -> Vec<i32> {
-    let mut face = RbFace::from_slice(bytes, 0).unwrap();
-    if user_wght > 0.0 {
-        face.set_variations(&[Variation {
-            tag: Tag::from_bytes(b"wght"),
-            value: user_wght,
-        }]);
-    }
+fn rustybuzz_default_advances(bytes: &[u8], text: &str) -> Vec<i32> {
+    let face = RbFace::from_slice(bytes, 0).unwrap();
     let mut buf = UnicodeBuffer::new();
     buf.push_str(text);
     let out = rustybuzz::shape(&face, &[], buf);
     out.glyph_positions().iter().map(|p| p.x_advance).collect()
 }
 
+/// `(glyph_id, x_advance, y_advance, x_offset, y_offset)`.
+type Pos = (u32, i32, i32, i32, i32);
+
+/// HarfBuzz's glyphs for `text` at `wght`, from the expected file.
+fn harfbuzz_positions(wght: f32, text: &str) -> Vec<Pos> {
+    let cps: Vec<String> = text.chars().map(|c| format!("{:04X}", c as u32)).collect();
+    let key = format!("advances {wght} ltr {}", cps.join(","));
+    let line = EXPECTED
+        .lines()
+        .find(|l| {
+            l.strip_prefix(&key)
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+        .unwrap_or_else(|| panic!("no HarfBuzz record for {key}"));
+    line[key.len()..]
+        .split_whitespace()
+        .map(|g| {
+            let v: Vec<i64> = g.split(',').map(|n| n.parse().unwrap()).collect();
+            (
+                v[0] as u32,
+                v[1] as i32,
+                v[2] as i32,
+                v[3] as i32,
+                v[4] as i32,
+            )
+        })
+        .collect()
+}
+
+fn sigilbuzz_positions(coords: &[f32], text: &str) -> Vec<Pos> {
+    let blob = Blob::new(RUBIK);
+    let face = Face::parse(&blob, 0).unwrap();
+    let font = Font::new(face, 1000.0).with_coords(coords);
+    let mut buf = Buffer::new();
+    buf.push_str(text);
+    let shaped = shape(&font, &buf, &[]).unwrap();
+    shaped
+        .glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.x_advance, g.y_advance, g.x_offset, g.y_offset))
+        .collect()
+}
 #[test]
 fn font_coords_slice_is_preserved() {
     let blob = Blob::new(RUBIK);
@@ -78,45 +120,32 @@ fn heavy_weight_differs_from_default_weight_at_least_once() {
 }
 
 #[test]
-fn advance_deltas_match_rustybuzz_across_wght_axis() {
-    // Compare (heavy - default) advance deltas between sigilbuzz and
-    // rustybuzz. This isolates the HVAR contribution from any
-    // pre-existing GPOS differences between the two shapers, which
-    // is all the variable-font wiring is responsible for.
+fn advances_match_harfbuzz_across_wght_axis() {
+    // The coordinates go through `fvar` and `avar` the way HarfBuzz
+    // takes them: rounded to 16.16 before `avar` and to F2DOT14 after.
+    // At 700 the F2DOT14 rounding moves some advances by a unit, and
+    // at 493.75 both roundings matter.
     let blob = Blob::new(RUBIK);
     let face = Face::parse(&blob, 0).unwrap();
-
-    // Corpus chosen to avoid GPOS pair adjustments that rustybuzz
-    // varies with weight via feature-variations. That layer is
-    // orthogonal to HVAR advance deltas. With un-kerning-varying
-    // glyphs, all measured divergence between the two shapers is
-    // HVAR drift alone.
-    for &wght in &[500.0f32, 700.0, 900.0] {
+    let texts = [
+        "A",
+        "Hello",
+        "o",
+        "Hello variable world",
+        "AV To Yo",
+        "\u{0413}\u{043E}",
+    ];
+    for &wght in &[350.0f32, 493.75, 500.0, 613.0, 700.0, 777.7, 900.0] {
         let coords = normalize_wght(&face, wght);
-        for text in &["A", "Hello", "o"] {
-            let sig_default = sigilbuzz_advances(RUBIK, &[], text);
-            let sig_heavy = sigilbuzz_advances(RUBIK, &coords, text);
-            let rb_default = rustybuzz_advances(RUBIK, 0.0, text);
-            let rb_heavy = rustybuzz_advances(RUBIK, wght, text);
-            assert_eq!(sig_default.len(), sig_heavy.len());
-            assert_eq!(rb_default.len(), rb_heavy.len());
-            assert_eq!(sig_default.len(), rb_default.len());
-            for i in 0..sig_default.len() {
-                let sig_delta = sig_heavy[i] - sig_default[i];
-                let rb_delta = rb_heavy[i] - rb_default[i];
-                // Tolerance of 1 design unit: sigilbuzz uses f32
-                // math, rustybuzz fixed-point f2dot14. Drift stays at
-                // or under 1 unit on this corpus.
-                assert!(
-                    (sig_delta - rb_delta).abs() <= 1,
-                    "HVAR delta diverged at wght={wght} text={text:?} pos={i}: \
-                     sigilbuzz_delta={sig_delta} rustybuzz_delta={rb_delta}"
-                );
-            }
+        for text in texts {
+            assert_eq!(
+                sigilbuzz_positions(&coords, text),
+                harfbuzz_positions(wght, text),
+                "wght={wght} text={text:?}"
+            );
         }
     }
 }
-
 #[test]
 fn default_instance_matches_rustybuzz_without_coords() {
     // When Font::with_coords is not called, sigilbuzz must produce
@@ -127,7 +156,7 @@ fn default_instance_matches_rustybuzz_without_coords() {
     let corpus = ["A", "Hello", "o", "AV", "To", "Yo", "\u{0413}\u{043E}"];
     for text in &corpus {
         let sig = sigilbuzz_advances(RUBIK, &[], text);
-        let rb = rustybuzz_advances(RUBIK, 0.0, text);
+        let rb = rustybuzz_default_advances(RUBIK, text);
         assert_eq!(sig, rb, "default-instance advance mismatch for {text:?}");
     }
 }

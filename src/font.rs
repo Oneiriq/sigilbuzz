@@ -22,9 +22,17 @@
 //!   let font = Font::new(face, 16.0).with_coords(&coords);
 //! ```
 //!
+//! These are the steps of HarfBuzz's `hb_ot_var_normalize_coords`:
+//! `normalize_coords` rounds each coord to 16.16 fixed point and
+//! `remap_all` maps it through `avar` and rounds it to 16.16 again.
+//! Shaping then rounds every coord to F2DOT14 (a multiple of 1/16384,
+//! halves up), the precision HarfBuzz stores coords in, so the same
+//! design-space values give the same instance as in HarfBuzz.
+//!
 //! The coord slice is borrowed for the `Font`'s lifetime, so callers
 //! own the storage. A `Font` with an empty coord slice behaves
-//! identically to the static default instance.
+//! identically to the static default instance, and so does one whose
+//! coords all round to zero.
 
 use crate::error::Result;
 use crate::face::Face;
@@ -87,7 +95,9 @@ impl<'a> Font<'a> {
 
     /// Returns a new `Font` bound to the supplied normalized variation
     /// coords. Each entry corresponds to one axis from the face's
-    /// `fvar` table, in file order, in `[-1.0, 1.0]`.
+    /// `fvar` table, in file order, in `[-1.0, 1.0]`. Shaping rounds
+    /// each coord to F2DOT14 (a multiple of 1/16384, halves up), as
+    /// HarfBuzz stores coords; [`Font::coords`] returns them as given.
     ///
     /// **User-space values are not accepted here.** If the caller has
     /// raw design-space values (e.g. `wght = 700.0`), they must first

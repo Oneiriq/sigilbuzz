@@ -8,11 +8,11 @@ use crate::tables::PathOp;
 /// HarfBuzz's `hb_glyph_extents_t`, in font design units: the left and
 /// top edges, the width, and the height (negative, since y grows up).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct Extents {
-    pub(super) x_bearing: i32,
-    pub(super) y_bearing: i32,
-    pub(super) width: i32,
-    pub(super) height: i32,
+pub(in crate::shape) struct Extents {
+    pub(in crate::shape) x_bearing: i32,
+    pub(in crate::shape) y_bearing: i32,
+    pub(in crate::shape) width: i32,
+    pub(in crate::shape) height: i32,
 }
 
 /// The extents of glyph `gid`, or `None` when the font has no outline
@@ -27,7 +27,11 @@ pub(super) struct Extents {
 /// - `CFF ` and `CFF2`: the box of every outline point, control points
 ///   included, rounded to whole units, as HarfBuzz's charstring
 ///   extents are.
-pub(super) fn glyph_extents(face: &Face<'_>, coords: &[f32], gid: u16) -> Result<Option<Extents>> {
+pub(in crate::shape) fn glyph_extents(
+    face: &Face<'_>,
+    coords: &[f32],
+    gid: u16,
+) -> Result<Option<Extents>> {
     let bounds = if coords.is_empty() {
         face.glyph_bounds(gid)
     } else {
@@ -98,7 +102,8 @@ fn control_box(ops: &[PathOp]) -> Extents {
             add(x, y);
         }
     }
-    let round = |v: f32| super::super::position::round_half_away(v);
+    // HarfBuzz's `roundf`: halves round up.
+    let round = crate::tables::parse::hb_round;
     let mut e = Extents::default();
     if min.0 < max.0 {
         e.x_bearing = round(min.0);
