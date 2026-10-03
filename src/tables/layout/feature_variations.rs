@@ -79,26 +79,45 @@
 //! that check: it drops the whole GSUB or GPOS, and the shaper does
 //! the same.
 //!
-//! One limit differs from HarfBuzz. `parse` makes at most
-//! [`CHECK_BUDGET`] checks and rejects a table that needs more, so
-//! conditions that share subtrees cannot make it take exponential
-//! time. HarfBuzz instead allows 64 checks per byte of the whole GSUB
-//! or GPOS.
+//! One limit differs from HarfBuzz. `parse` counts a check for every
+//! ConditionSet, condition, FeatureTableSubstitution, and alternate
+//! Feature table each record reaches, a shared subtable once for every
+//! path to it, and rejects a table that needs more than 8 checks per
+//! byte (from the start of the table to the end of its GSUB or GPOS),
+//! or 16384 for a table under 2 KB. HarfBuzz instead allows 64 checks
+//! per byte of the whole GSUB or GPOS. A real font needs a few checks
+//! per record. The limit matters because the conditions are evaluated
+//! on every shaping call: with it, conditions that share subtrees can
+//! make neither `parse` nor [`FeatureVariations::find_index`] take
+//! more time than the table's size allows.
 
 use crate::error::{Error, Result};
 use crate::tables::layout::{Feature, FeatureList};
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 /// HarfBuzz's `HB_MAX_NESTING_LEVEL`: the deepest a condition can be,
 /// counting the conditions a ConditionSet names as depth 1.
 pub const MAX_CONDITION_DEPTH: u8 = 64;
 
-/// The most ConditionSets, conditions, FeatureTableSubstitutions, and
-/// alternate Feature tables [`FeatureVariations::parse`] checks. A real
-/// font has a few records of a few conditions each.
-pub const CHECK_BUDGET: u32 = 1 << 18;
+/// The fewest checks [`FeatureVariations::parse`] allows a table,
+/// HarfBuzz's `HB_SANITIZE_MAX_OPS_MIN`.
+const MIN_CHECK_BUDGET: u32 = 16_384;
+
+/// The checks [`FeatureVariations::parse`] allows per byte of a table
+/// larger than `MIN_CHECK_BUDGET / CHECKS_PER_BYTE` bytes.
+const CHECKS_PER_BYTE: u32 = 8;
+
+/// The checks [`FeatureVariations::parse`] allows a table of `len`
+/// bytes.
+fn check_budget(len: usize) -> u32 {
+    u32::try_from(len)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(CHECKS_PER_BYTE)
+        .max(MIN_CHECK_BUDGET)
+}
 
 /// `VarIdx::NO_VARIATION`: a value condition with this index has no
 /// delta.
@@ -134,7 +153,8 @@ impl<'a> FeatureVariations<'a> {
     /// [`Error::Truncated`] when a subtable does not fit, and
     /// [`Error::Malformed`] for a major version other than 1, conditions
     /// nested more than [`MAX_CONDITION_DEPTH`] deep, or a table that
-    /// needs more than [`CHECK_BUDGET`] checks.
+    /// needs more checks than its size allows (see the
+    /// [module documentation](self)).
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u16()?;
@@ -157,7 +177,7 @@ impl<'a> FeatureVariations<'a> {
         let table = Self { data, record_count };
         let mut check = Check {
             data,
-            budget: CHECK_BUDGET,
+            budget: check_budget(data.len()),
         };
         for index in 0..record_count {
             // The records fit, so neither the slot nor its fields
@@ -232,9 +252,11 @@ impl<'a> FeatureVariations<'a> {
         coords: &[f32],
         store: Option<&ItemVariationStore<'_>>,
     ) -> Option<u32> {
-        let cx = EvalContext::new(coords, store);
-        (0..self.record_count)
-            .find(|&index| self.condition_set(index).is_some_and(|set| set.holds(&cx)))
+        let mut cx = EvalContext::new(coords, store);
+        (0..self.record_count).find(|&index| {
+            self.condition_set(index)
+                .is_some_and(|set| set.holds(&mut cx))
+        })
     }
 
     /// The alternate Feature table record `record` puts in place of
@@ -484,10 +506,10 @@ impl<'a> ConditionSet<'a> {
     /// `coords` (see [`FeatureVariations::find_index`]).
     #[must_use]
     pub fn matches(&self, coords: &[f32], store: Option<&ItemVariationStore<'_>>) -> bool {
-        self.holds(&EvalContext::new(coords, store))
+        self.holds(&mut EvalContext::new(coords, store))
     }
 
-    fn holds(&self, cx: &EvalContext<'_>) -> bool {
+    fn holds(&self, cx: &mut EvalContext<'_>) -> bool {
         (0..self.count).all(|i| self.get(i).is_some_and(|c| c.holds(cx, 1)))
     }
 }
@@ -593,14 +615,14 @@ impl<'a> Condition<'a> {
     /// `coords` (see [`FeatureVariations::find_index`]).
     #[must_use]
     pub fn matches(&self, coords: &[f32], store: Option<&ItemVariationStore<'_>>) -> bool {
-        self.holds(&EvalContext::new(coords, store), 1)
+        self.holds(&mut EvalContext::new(coords, store), 1)
     }
 
     /// Evaluates the condition at nesting depth `depth`, where the
     /// conditions of a ConditionSet are depth 1. `parse` rules out
     /// anything deeper than [`MAX_CONDITION_DEPTH`], and the check here
     /// keeps the recursion bounded whatever the data.
-    fn holds(&self, cx: &EvalContext<'_>, depth: u8) -> bool {
+    fn holds(&self, cx: &mut EvalContext<'_>, depth: u8) -> bool {
         if depth > MAX_CONDITION_DEPTH {
             return false;
         }
@@ -842,6 +864,9 @@ struct EvalContext<'s> {
     /// The same coordinates as floats, which the variation store reads.
     normalized: Vec<f32>,
     store: Option<&'s ItemVariationStore<'s>>,
+    /// The deltas read so far, by `varIndex`: conditions that share a
+    /// value condition, or name the same index, read the store once.
+    deltas: BTreeMap<u32, f32>,
 }
 
 impl<'s> EvalContext<'s> {
@@ -852,6 +877,7 @@ impl<'s> EvalContext<'s> {
             coords,
             normalized,
             store,
+            deltas: BTreeMap::new(),
         }
     }
 
@@ -865,14 +891,21 @@ impl<'s> EvalContext<'s> {
 
     /// The delta of `var_index` at the coordinates: 0 without
     /// coordinates or a store, and for `NO_VARIATION_INDEX`.
-    fn delta(&self, var_index: u32) -> f32 {
+    fn delta(&mut self, var_index: u32) -> f32 {
         if self.coords.is_empty() || var_index == NO_VARIATION_INDEX {
             return 0.0;
         }
+        let Some(store) = self.store else {
+            return 0.0;
+        };
+        if let Some(&delta) = self.deltas.get(&var_index) {
+            return delta;
+        }
         let outer = (var_index >> 16) as u16;
         let inner = (var_index & 0xFFFF) as u16;
-        self.store
-            .map_or(0.0, |store| store.delta(outer, inner, &self.normalized))
+        let delta = store.delta(outer, inner, &self.normalized);
+        self.deltas.insert(var_index, delta);
+        delta
     }
 }
 

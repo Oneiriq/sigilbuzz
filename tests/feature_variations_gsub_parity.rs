@@ -15,6 +15,8 @@
 //! FeatureVariations condition format 1, agrees on the user-space
 //! cases, and the tests check that too.
 
+use std::time::{Duration, Instant};
+
 use rustybuzz::ttf_parser::Tag;
 use rustybuzz::{Face as RbFace, UnicodeBuffer, Variation};
 use sigilbuzz::{shape, Blob, Buffer, Face, Feature, Font};
@@ -641,3 +643,98 @@ fn a_gsub_whose_1_1_header_is_cut_short_is_left_out() {
         [(861, 0, 690, 0, 0), (1022, 1, 820, 0, 0)]
     );
 }
+
+/// A one-record FeatureVariations whose ConditionSet names an "and" of
+/// two entries that both name the next "and", `levels` deep, over one
+/// value condition that holds whatever the delta of varIndex 0:
+/// `2^levels` paths to it, and `2^(levels + 1)` checks counting the
+/// ConditionSet. The record substitutes nothing.
+fn shared_ands(levels: usize) -> Vec<u8> {
+    let mut out = vec![0, 1, 0, 0, 0, 0, 0, 1];
+    out.extend_from_slice(&16u32.to_be_bytes()); // ConditionSet
+    out.extend_from_slice(&0u32.to_be_bytes()); // no substitution
+    out.extend_from_slice(&1u16.to_be_bytes()); // conditionCount
+    out.extend_from_slice(&6u32.to_be_bytes()); // the first "and"
+    for _ in 0..levels {
+        // Format 3, two entries, both naming the condition 9 bytes on.
+        out.extend_from_slice(&[0, 3, 2, 0, 0, 9, 0, 0, 9]);
+    }
+    // Format 2: defaultValue 32767, varIndex 0.
+    out.extend_from_slice(&[0, 2, 0x7F, 0xFF, 0, 0, 0, 0]);
+    out
+}
+
+/// Rubik with `variations` in place of its GSUB FeatureVariations, at
+/// the end of the GSUB.
+fn rubik_with_feature_variations(variations: &[u8]) -> Vec<u8> {
+    let face = Face::parse_bytes(RUBIK, 0).unwrap();
+    let mut gsub = face.table_bytes(*b"GSUB").unwrap().to_vec();
+    let offset = gsub.len() as u32;
+    gsub[10..14].copy_from_slice(&offset.to_be_bytes());
+    gsub.extend_from_slice(variations);
+    with_tables(RUBIK, &[(*b"GSUB", gsub)])
+}
+
+#[test]
+fn shared_conditions_cost_no_more_than_the_table_size_allows() {
+    // 13 levels make 2^14 checks, which any table may need. Every one
+    // of the 2^13 paths ends in a value condition that holds, so every
+    // shaping call evaluates them all.
+    let heavy = rubik_with_feature_variations(&shared_ands(13));
+    let face = Face::parse_bytes(&heavy, 0).unwrap();
+    let gsub = face.gsub().unwrap().unwrap();
+    let variations = gsub.feature_variations().unwrap().unwrap();
+    assert_eq!(variations.find_index(&[1.0], None), Some(0));
+    // 17 levels make 2^18 checks. A 183-byte table may not need more
+    // than 16384, so the GSUB is left out. HarfBuzz 14.5.0 leaves it
+    // out too: its sanitizer runs out of operations on this 6 KB GSUB.
+    // Both outputs below are HarfBuzz's.
+    let runaway = rubik_with_feature_variations(&shared_ands(17));
+    let face = Face::parse_bytes(&runaway, 0).unwrap();
+    let gsub = face.gsub().unwrap().unwrap();
+    assert!(matches!(
+        gsub.feature_variations(),
+        Err(sigilbuzz::Error::Malformed {
+            context: "FeatureVariations need more checks than sigilbuzz makes",
+            ..
+        })
+    ));
+    let numr = [Feature {
+        tag: *b"numr",
+        value: 1,
+    }];
+    let text = "5\u{20AC}";
+    // The record substitutes nothing, so `rvrn` swaps nothing in.
+    assert_eq!(
+        font_rows(&heavy, None, Some(900.0), text, &numr),
+        [(893, 0, 365, 0, 0), (1022, 1, 820, 0, 0)]
+    );
+    assert_eq!(
+        font_rows(&runaway, None, Some(900.0), text, &numr),
+        [(861, 0, 690, 0, 0), (1022, 1, 820, 0, 0)]
+    );
+    // Every shaping call parses and evaluates the conditions again.
+    // In a debug build the heavy font takes about 30 times as long as
+    // Rubik itself, the most a table of its size can cost. Without the
+    // size limit and the cached deltas, it took 180 times as long, and
+    // the runaway font over 2000 times.
+    let time = |font: &[u8]| {
+        let start = Instant::now();
+        for _ in 0..ROUNDS {
+            font_rows(font, None, Some(900.0), text, &numr);
+        }
+        start.elapsed()
+    };
+    let plain = time(RUBIK);
+    let budget = plain * 60 + Duration::from_secs(1);
+    for (label, font) in [("heavy", &heavy), ("runaway", &runaway)] {
+        let took = time(font);
+        assert!(
+            took < budget,
+            "{label}: {took:?} for {ROUNDS} calls, budget {budget:?}"
+        );
+    }
+}
+
+/// Shaping calls each timing makes.
+const ROUNDS: u32 = 20;
