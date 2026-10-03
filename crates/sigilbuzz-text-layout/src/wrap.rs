@@ -21,10 +21,25 @@ use alloc::vec::Vec;
 
 use sigilbuzz::Glyph;
 
-use crate::class::LineBreakClass;
-use crate::linebreak::{line_break_opportunities, BreakOpportunity};
+use crate::class::{line_break_class, LineBreakClass};
+use crate::linebreak::{line_break_opportunities_with, BreakOpportunity, WordBreak};
 
 /// Inputs to [`wrap_lines`].
+///
+/// The default has no width limit, keeps words whole, and uses the
+/// default UAX 14 rules ([`WordBreak::Normal`]). Override single fields
+/// with struct update syntax:
+///
+/// ```
+/// use sigilbuzz_text_layout::{WordBreak, WrapOptions};
+///
+/// let options = WrapOptions {
+///     max_width: 320.0,
+///     word_break: WordBreak::KeepAll,
+///     ..WrapOptions::default()
+/// };
+/// assert!(options.break_at_word_boundaries);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct WrapOptions {
     /// Maximum advance width per line, in the same units as
@@ -38,6 +53,10 @@ pub struct WrapOptions {
     /// keeps at least one cluster, so a single cluster wider than the
     /// budget still gets a line of its own.
     pub break_at_word_boundaries: bool,
+    /// How the UAX 14 opportunities treat letters, as CSS `word-break`
+    /// does. [`WordBreak::KeepAll`] wraps Korean between words instead
+    /// of between syllables.
+    pub word_break: WordBreak,
 }
 
 impl Default for WrapOptions {
@@ -45,6 +64,7 @@ impl Default for WrapOptions {
         Self {
             max_width: f32::INFINITY,
             break_at_word_boundaries: true,
+            word_break: WordBreak::Normal,
         }
     }
 }
@@ -58,8 +78,8 @@ pub struct LineRange {
     /// End byte offset (exclusive) into the source text.
     pub end_byte: usize,
     /// Total advance width consumed by the glyphs of this line, with
-    /// trailing UAX 14 space-class characters and the line's own
-    /// mandatory break characters ignored (LB7: trailing spaces hang
+    /// trailing spaces and tabs and the line's own mandatory break
+    /// characters ignored (LB7: trailing spaces hang
     /// into the right margin and do not count toward the line's
     /// measured width). This matches the budget the wrapper enforced
     /// when picking the break.
@@ -81,7 +101,7 @@ pub struct LineRange {
 ///
 /// ```
 /// use sigilbuzz::Glyph;
-/// use sigilbuzz_text_layout::{wrap_lines, WrapOptions};
+/// use sigilbuzz_text_layout::{wrap_lines, WordBreak, WrapOptions};
 ///
 /// // One glyph per letter, each 10 units wide.
 /// let text = "abcdef";
@@ -103,11 +123,19 @@ pub struct LineRange {
 ///     .collect();
 ///
 /// // The word stays whole by default.
-/// let whole = WrapOptions { max_width: 20.0, break_at_word_boundaries: true };
+/// let whole = WrapOptions {
+///     max_width: 20.0,
+///     break_at_word_boundaries: true,
+///     word_break: WordBreak::Normal,
+/// };
 /// assert_eq!(wrap_lines(&glyphs, text, whole).len(), 1);
 ///
 /// // Without word-boundary breaking it splits between clusters.
-/// let split = WrapOptions { max_width: 20.0, break_at_word_boundaries: false };
+/// let split = WrapOptions {
+///     max_width: 20.0,
+///     break_at_word_boundaries: false,
+///     word_break: WordBreak::Normal,
+/// };
 /// assert_eq!(wrap_lines(&glyphs, text, split).len(), 3);
 /// ```
 #[must_use]
@@ -130,7 +158,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     // is at the *current* prev character's tail, so the offsets are
     // already aligned with `text`.
     let mut opportunities: Vec<(usize, BreakOpportunity)> =
-        line_break_opportunities(text).collect();
+        line_break_opportunities_with(text, options.word_break).collect();
     if opportunities.last().map(|(p, _)| *p) != Some(text.len()) {
         opportunities.push((text.len(), BreakOpportunity::Mandatory));
     }
@@ -149,11 +177,9 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     // UAX 14 LB7: trailing spaces hang into the right margin and do
     // not count toward the line's measured width. `hang_end[i]` is `i`
     // with the run of hanging characters directly before it removed.
-    // Hanging characters are the UAX 14 `SP` class (U+0020, U+1680,
-    // U+2000..=U+200A, U+205F, U+3000), tab, which the classifier
-    // puts in `BA` but which acts as a soft break point in practice,
-    // and the mandatory break classes `BK`, `CR`, `LF`, and `NL`,
-    // which end a line without being drawn on it.
+    // Hanging characters are the spaces (see `hangs`), and the
+    // mandatory break classes `BK`, `CR`, `LF`, and `NL`, which end a
+    // line without being drawn on it.
     // The table is built in one forward pass, so a long whitespace run
     // costs linear time instead of one backward walk per break
     // opportunity. Only char boundaries are filled in. Every offset
@@ -163,16 +189,7 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     let mut hang_end = vec![0usize; text.len() + 1];
     for (b, ch) in text.char_indices() {
         let next = b + ch.len_utf8();
-        let hangs = ch == '\t'
-            || matches!(
-                crate::class::line_break_class(ch),
-                LineBreakClass::SP
-                    | LineBreakClass::BK
-                    | LineBreakClass::CR
-                    | LineBreakClass::LF
-                    | LineBreakClass::NL
-            );
-        hang_end[next] = if hangs { hang_end[b] } else { next };
+        hang_end[next] = if hangs(ch) { hang_end[b] } else { next };
     }
 
     // Width of `[from, to)` without trailing hanging characters. The
@@ -246,6 +263,21 @@ pub fn wrap_lines(glyphs: &[Glyph], text: &str, options: WrapOptions) -> Vec<Lin
     }
 
     lines
+}
+
+/// Whether `ch` hangs into the right margin at the end of a line: tab,
+/// the breaking space separators (U+0020, U+1680, U+2000..=U+200A,
+/// U+205F, U+3000), and the mandatory break characters. UAX 14 puts
+/// most of these spaces in class BA rather than SP, so the test is by
+/// code point.
+fn hangs(ch: char) -> bool {
+    matches!(
+        ch,
+        '\t' | ' ' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{205F}' | '\u{3000}'
+    ) || matches!(
+        line_break_class(ch),
+        LineBreakClass::BK | LineBreakClass::CR | LineBreakClass::LF | LineBreakClass::NL
+    )
 }
 
 /// Builds the [`LineRange`] for `[from, to)`.
@@ -337,6 +369,7 @@ mod tests {
             WrapOptions {
                 max_width: 1000.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert_eq!(lines.len(), 1);
@@ -356,6 +389,7 @@ mod tests {
         let options = WrapOptions {
             max_width: 90.0,
             break_at_word_boundaries: true,
+            ..WrapOptions::default()
         };
         assert_eq!(
             wrap_lines(&visual, text, options),
@@ -375,6 +409,7 @@ mod tests {
             WrapOptions {
                 max_width: 90.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert!(lines.len() >= 2, "got {} lines: {:?}", lines.len(), lines);
@@ -400,6 +435,7 @@ mod tests {
             WrapOptions {
                 max_width: 1000.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert_eq!(lines.len(), 2);
@@ -419,6 +455,7 @@ mod tests {
             WrapOptions {
                 max_width: 20.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert!(lines.len() >= 3);
@@ -440,6 +477,7 @@ mod tests {
             WrapOptions {
                 max_width: 30.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert_eq!(lines.len(), 1);
@@ -466,6 +504,7 @@ mod tests {
             WrapOptions {
                 max_width: 100.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert_eq!(lines.len(), 1);
@@ -487,6 +526,7 @@ mod tests {
             WrapOptions {
                 max_width: 1000.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert_eq!(wide.len(), 1);
@@ -498,6 +538,7 @@ mod tests {
             WrapOptions {
                 max_width: 50.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert!(narrow.len() >= 2);
@@ -509,11 +550,89 @@ mod tests {
         let options = WrapOptions {
             max_width,
             break_at_word_boundaries,
+            ..WrapOptions::default()
         };
+        wrap_texts_with(text, options)
+    }
+
+    /// Wraps `text` with one 10-unit glyph per char under `options` and
+    /// returns the text of each line.
+    fn wrap_texts_with(text: &str, options: WrapOptions) -> Vec<&str> {
         wrap_lines(&shape_uniform(text, 10), text, options)
             .iter()
             .map(|line| &text[line.start_byte..line.end_byte])
             .collect()
+    }
+
+    /// "한국어를 공부해요." ("I study Korean.")
+    const STUDY: &str = "\u{D55C}\u{AD6D}\u{C5B4}\u{B97C} \u{ACF5}\u{BD80}\u{D574}\u{C694}.";
+
+    fn word_break_options(max_width: f32, word_break: WordBreak) -> WrapOptions {
+        WrapOptions {
+            max_width,
+            word_break,
+            ..WrapOptions::default()
+        }
+    }
+
+    #[test]
+    fn keep_all_wraps_korean_between_words() {
+        // Each word is 40 units wide (the period adds 10), and the
+        // space between them 10. A trailing space hangs.
+        let normal = wrap_texts_with(STUDY, word_break_options(60.0, WordBreak::Normal));
+        assert_eq!(
+            normal,
+            [
+                "\u{D55C}\u{AD6D}\u{C5B4}\u{B97C} \u{ACF5}",
+                "\u{BD80}\u{D574}\u{C694}."
+            ]
+        );
+        let keep_all = wrap_texts_with(STUDY, word_break_options(60.0, WordBreak::KeepAll));
+        assert_eq!(
+            keep_all,
+            [
+                "\u{D55C}\u{AD6D}\u{C5B4}\u{B97C} ",
+                "\u{ACF5}\u{BD80}\u{D574}\u{C694}."
+            ]
+        );
+    }
+
+    #[test]
+    fn keep_all_word_wider_than_the_line_overflows_or_splits() {
+        // At 30 units neither word fits. Kept whole by default, split
+        // between clusters when word-boundary breaking is off.
+        let options = word_break_options(30.0, WordBreak::KeepAll);
+        assert_eq!(
+            wrap_texts_with(STUDY, options),
+            [
+                "\u{D55C}\u{AD6D}\u{C5B4}\u{B97C} ",
+                "\u{ACF5}\u{BD80}\u{D574}\u{C694}."
+            ]
+        );
+        let split = WrapOptions {
+            break_at_word_boundaries: false,
+            ..options
+        };
+        assert_eq!(
+            wrap_texts_with(STUDY, split),
+            [
+                "\u{D55C}\u{AD6D}\u{C5B4}",
+                "\u{B97C} ",
+                "\u{ACF5}\u{BD80}\u{D574}",
+                "\u{C694}."
+            ]
+        );
+    }
+
+    #[test]
+    fn break_all_splits_latin_words_to_fit() {
+        let options = word_break_options(30.0, WordBreak::BreakAll);
+        assert_eq!(
+            wrap_texts_with("abcdef ghi", options),
+            ["abc", "def ", "ghi"]
+        );
+        let normal = word_break_options(30.0, WordBreak::Normal);
+        assert_eq!(wrap_texts_with("abcdef ghi", normal), ["abcdef ", "ghi"]);
     }
 
     #[test]
@@ -533,6 +652,7 @@ mod tests {
             WrapOptions {
                 max_width: 90.0,
                 break_at_word_boundaries: true,
+                ..WrapOptions::default()
             },
         );
         assert_eq!(lines.len(), 2);
@@ -582,6 +702,7 @@ mod tests {
             WrapOptions {
                 max_width: 10.0,
                 break_at_word_boundaries: false,
+                ..WrapOptions::default()
             },
         );
         let texts: Vec<&str> = lines

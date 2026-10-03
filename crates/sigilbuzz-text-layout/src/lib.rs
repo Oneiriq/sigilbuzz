@@ -1,18 +1,25 @@
-//! `sigilbuzz-text-layout`: line-breaking and word-wrap for sigilbuzz.
+//! `sigilbuzz-text-layout`: line breaking, word wrap, and word
+//! boundaries for sigilbuzz.
 //!
-//! This companion crate implements a curated subset of
-//! [UAX #14 *Unicode Line Breaking Algorithm*][uax14] sufficient to
-//! wrap English, other European scripts, and CJK text correctly. It
-//! also offers a simplified [UAX #29][uax29] word-segmentation iterator
-//! for callers that need word boundaries (cursor movement, double-click
-//! selection) without pulling in a full Unicode segmentation crate.
+//! This companion crate implements the
+//! [UAX #14 *Unicode Line Breaking Algorithm*][uax14] (revision 55,
+//! Unicode 17.0.0) and the word boundary rules of
+//! [UAX #29 *Unicode Text Segmentation*][uax29] (revision 47), from
+//! tables generated out of the Unicode Character Database. Both pass
+//! every case of the Unicode conformance files `LineBreakTest.txt` and
+//! `WordBreakTest.txt`.
 //!
 //! The headline entry points are:
 //!
-//! - [`line_break_opportunities`]: UAX 14 break iterator over a `&str`.
+//! - [`line_break_opportunities`]: the UAX 14 break iterator over a
+//!   `&str`, and [`line_break_opportunities_with`] for the CSS
+//!   `word-break` tailorings in [`WordBreak`] (`keep-all` keeps Korean
+//!   words whole, `break-all` breaks inside any word).
 //! - [`wrap_lines`]: walks a slice of shaped [`sigilbuzz::Glyph`]s
 //!   and a width budget to produce [`LineRange`]s.
-//! - [`word_breaks`]: simplified UAX 29 word-segmentation iterator.
+//! - [`word_breaks`]: the UAX 29 word boundary iterator, for cursor
+//!   movement and double-click selection.
+//! - [`line_break_class`]: the `Line_Break` property of a character.
 //!
 //! `wrap_lines` and the iterators need only `alloc`. The crate still
 //! depends on `sigilbuzz` with its default `std` feature, so even with
@@ -20,13 +27,13 @@
 //!
 //! # Coverage
 //!
-//! The line-break classifier covers the high-impact UAX 14 classes:
-//! `BK`, `CR`, `LF`, `NL`, `WJ`, `CL`, `CP`, `OP`, `QU`, `GL`, `NS`,
-//! `CM`, `SP`, `BA`, `BB`, `HY`, `AL`, `NU`, `PR`, `PO`, `ID`, `EX`,
-//! `ZW`, `EB`, and `EM`. Brahmic combining marks, Korean Jamo
-//! clustering, complex line-breaking for Southeast-Asian scripts, and
-//! the UAX 14 LB30a regional-indicator pair logic are deferred to a
-//! future release.
+//! Every UAX 14 rule is implemented, LB1 through LB31, including the
+//! Korean syllable blocks of conjoining jamo (LB26, LB27), the Brahmic
+//! orthographic syllables (LB28a), and regional indicator pairs
+//! (LB30a). Southeast Asian scripts (class SA: Thai, Lao, Khmer,
+//! Myanmar, and others) need a dictionary to find word boundaries,
+//! which this crate does not have. They resolve to AL as LB1 directs,
+//! so a run of them breaks only at spaces and punctuation.
 //!
 //! [uax14]: https://www.unicode.org/reports/tr14/
 //! [uax29]: https://www.unicode.org/reports/tr29/
@@ -38,11 +45,18 @@
 extern crate alloc;
 
 mod class;
+#[rustfmt::skip]
+mod line_break_table;
 mod linebreak;
 mod word;
+#[rustfmt::skip]
+mod word_break_table;
 mod wrap;
 
-pub use class::LineBreakClass;
-pub use linebreak::{line_break_opportunities, BreakOpportunity, LineBreakIter};
-pub use word::word_breaks;
+pub use class::{line_break_class, LineBreakClass};
+pub use linebreak::{
+    line_break_opportunities, line_break_opportunities_with, BreakOpportunity, LineBreakIter,
+    WordBreak,
+};
+pub use word::{word_breaks, WordBreakIter};
 pub use wrap::{wrap_lines, LineRange, WrapOptions};
