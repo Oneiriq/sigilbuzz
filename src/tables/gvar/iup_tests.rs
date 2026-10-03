@@ -4,7 +4,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::testing::{build_gvar, Tuple};
+use super::testing::{build_gvar, build_gvar_shared, Tuple};
 use super::*;
 
 fn assert_deltas(got: &[(f32, f32)], want: &[(f32, f32)]) {
@@ -88,6 +88,50 @@ fn unlisted_points_take_inferred_deltas() {
             (0.0, 0.0),
         ],
     );
+}
+
+#[test]
+fn shared_point_numbers_work_like_private_ones() {
+    // The tuple of [`three_contours`], its points listed once for the
+    // glyph, then a second tuple with points of its own. The shared
+    // list stands for the first tuple's points only.
+    let tuple = |points: Option<Vec<u16>>, deltas: Vec<(i16, i16)>| Tuple {
+        peak: vec![1.0],
+        points,
+        deltas,
+    };
+    let first = vec![(10, 20), (30, -20), (5, -7), (3, 3), (40, 0), (1000, 1000)];
+    let shared = build_gvar_shared(
+        1,
+        &[(
+            vec![0, 2, 6, 10, 12, 99],
+            vec![
+                tuple(None, first.clone()),
+                tuple(Some(vec![8]), vec![(1, 2)]),
+            ],
+        )],
+    );
+    let private = build_gvar(
+        1,
+        &[vec![
+            tuple(Some(vec![0, 2, 6, 10, 12, 99]), first),
+            tuple(Some(vec![8]), vec![(1, 2)]),
+        ]],
+    );
+    assert_ne!(shared, private);
+    let deltas = |bytes: &[u8]| {
+        let gvar = Gvar::parse(bytes).unwrap();
+        gvar.glyph_point_deltas(0, &[1.0], POINTS, END_POINTS)
+            .unwrap()
+    };
+    let got = deltas(&shared);
+    assert_deltas(&got, &deltas(&private));
+    // The second tuple moves contour C, points 8 and 9, rigidly.
+    assert_deltas(&got[8..10], &[(1.0, 2.0), (1.0, 2.0)]);
+
+    // An empty shared list means every point.
+    let all = build_gvar_shared(1, &[(vec![], vec![tuple(None, vec![(1, 1); 15])])]);
+    assert_deltas(&deltas(&all), &[(1.0, 1.0); 15]);
 }
 
 #[test]
