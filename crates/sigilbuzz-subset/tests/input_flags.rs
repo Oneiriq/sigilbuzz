@@ -4,6 +4,9 @@
 use sigilbuzz::Face;
 use sigilbuzz_subset::{subset, SubsetError, SubsetInput};
 
+#[path = "support/sfnt.rs"]
+mod support;
+
 const OPEN_SANS: &[u8] = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
 
 const HINTING_TABLES: [[u8; 4]; 3] = [*b"cvt ", *b"fpgm", *b"prep"];
@@ -143,12 +146,16 @@ fn cff_passthrough_drops_what_the_flags_drop() {
 }
 
 /// In strict mode a table without a subset implementation is an error.
-/// The CFF path used to drop such tables (here `BASE`) silently even
-/// in strict mode.
+/// The CFF path used to drop such tables silently even in strict mode.
+/// The fixture's `BASE` used to be one; it is kept now, so a `DSIG` is
+/// grafted on to stand in for the tables that still are not.
 #[test]
 fn cff_strict_mode_rejects_unhandled_tables() {
-    let face = Face::parse_bytes(SOURCE_CODE_PRO, 0).unwrap();
-    assert!(face.record(*b"BASE").is_some(), "fixture carries BASE");
+    let font = support::edit_tables(
+        SOURCE_CODE_PRO,
+        &[(*b"DSIG", Some(vec![0, 0, 0, 1, 0, 0, 0, 0]))],
+    );
+    let face = Face::parse_bytes(&font, 0).unwrap();
     let strict = SubsetInput {
         gids: gids_for(&face, "Hi"),
         drop_unhandled: false,
@@ -164,5 +171,24 @@ fn cff_strict_mode_rejects_unhandled_tables() {
     };
     let out = subset(&face, &permissive).unwrap();
     let sub = Face::parse_bytes(&out.bytes, 0).unwrap();
-    assert!(sub.record(*b"BASE").is_none());
+    assert!(sub.record(*b"DSIG").is_none());
+}
+
+/// `BASE` has a subset implementation, so strict mode keeps it. Source
+/// Code Pro's has no reference glyphs and passes through.
+#[test]
+fn cff_strict_mode_keeps_base() {
+    let face = Face::parse_bytes(SOURCE_CODE_PRO, 0).unwrap();
+    assert!(face.record(*b"BASE").is_some(), "fixture carries BASE");
+    let strict = SubsetInput {
+        gids: gids_for(&face, "Hi"),
+        drop_unhandled: false,
+        ..SubsetInput::default()
+    };
+    let out = subset(&face, &strict).unwrap();
+    let sub = Face::parse_bytes(&out.bytes, 0).unwrap();
+    assert_eq!(
+        sub.table_bytes(*b"BASE").unwrap(),
+        face.table_bytes(*b"BASE").unwrap()
+    );
 }

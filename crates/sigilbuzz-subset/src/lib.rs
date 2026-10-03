@@ -31,7 +31,8 @@
 //! # Malformed data
 //!
 //! A malformed layout structure (a GDEF list or entry, a GSUB or GPOS
-//! lookup or subtable, a Device table, an anchor) is left out of the
+//! lookup or subtable, a Device table, an anchor), vertical metrics
+//! table (`vhea`, `vmtx`, `VORG`, `VVAR`), or `BASE` is left out of the
 //! output, the way HarfBuzz's sanitizer neuters it, instead of failing
 //! the subset. Every piece left out this way is reported in
 //! [`SubsetOutput::warnings`] with its table, byte offset and reason;
@@ -43,7 +44,16 @@
 //!
 //! - Rebuilt: `cmap` (as format 4), `glyf` and `loca`, `hmtx` and `hhea`,
 //!   `maxp`, `head`, and `post` (as format 3, without glyph names).
-//! - Passed through: `name` and `OS/2`.
+//! - Vertical metrics: `vmtx` is rebuilt for the kept glyphs with
+//!   `vhea.numberOfLongVerMetrics` patched to match, and `VORG` keeps
+//!   its default and the kept glyphs' entries, renumbered. A malformed
+//!   `vhea`, `vmtx` or `VORG` (or a `vhea` or `vmtx` without its
+//!   partner) is left out and reported in [`SubsetOutput::warnings`].
+//! - Passed through: `name`, `OS/2`, and `STAT`, which names no glyphs.
+//! - `BASE`: kept, with the reference glyph of each format 2
+//!   `BaseCoord` renumbered. A coordinate whose reference glyph is not
+//!   kept becomes format 1 with the same value. A `BASE` that cannot be
+//!   walked is left out and reported in [`SubsetOutput::warnings`].
 //! - Layout (`GSUB`, `GPOS`, `GDEF`): kept verbatim when every glyph
 //!   survives, rewritten at the byte level when glyph IDs change. Set
 //!   [`SubsetInput::retain_layout`] to `false` to drop them. A rebuilt
@@ -54,15 +64,23 @@
 //!   FeatureVariations (GSUB and GPOS 1.1) are kept, their feature and
 //!   lookup indices remapped with the rest.
 //! - Variations: `fvar` and `avar` pass through. `gvar` is rebuilt with one
-//!   entry per kept glyph, `HVAR` around a fresh `DeltaSetIndexMap` and a
-//!   deduplicated `ItemVariationStore`, and `VARC` around the kept
-//!   composites. The GDEF `ItemVariationStore` that GPOS kerning, anchors,
-//!   and ligature carets vary through is carried verbatim. Set
+//!   entry per kept glyph, `HVAR` and `VVAR` around fresh
+//!   `DeltaSetIndexMap`s and a deduplicated `ItemVariationStore`, and
+//!   `VARC` around the kept composites. `VVAR` keeps every map the
+//!   source has (advance height, top and bottom side bearings, and the
+//!   vertical origin) and goes with `vmtx`: a subset without `vmtx`
+//!   has no `VVAR`, and a `VVAR` that cannot be rebuilt is left out with
+//!   a warning. The GDEF `ItemVariationStore` that GPOS kerning,
+//!   anchors, and ligature carets vary through is carried verbatim. Set
 //!   [`SubsetInput::retain_variations`] to `false` to drop them and get a
 //!   static subset at the default instance.
 //! - Dropped when [`SubsetInput::drop_unhandled`] is true (the default):
-//!   `kern`, `vhea`, `vmtx`, `VORG`, `COLR`, `CPAL`, `morx`, and `kerx`.
-//!   With the flag off, any of these returns [`SubsetError::Unsupported`].
+//!   every table without a subset implementation. That is `kern`,
+//!   `kerx`, `morx`, and the other AAT tables; `COLR` and `CPAL`; `MVAR`
+//!   and `cvar`; the bitmap tables (`CBDT`, `CBLC`, `EBDT`, `EBLC`,
+//!   `EBSC`, `sbix`) and `SVG `; `MATH` and `JSTF`; `gasp`, `hdmx`,
+//!   `LTSH`, `VDMX`, and `DSIG`; and any table not named above. With the
+//!   flag off, any of these returns [`SubsetError::Unsupported`].
 //!
 //! For CFF and CFF2 fonts:
 //!
@@ -71,9 +89,10 @@
 //! - Otherwise the CFF or CFF2 table is rebuilt around the kept glyphs.
 //!   That covers non-CID and CID-keyed CFF (FDArray and FDSelect) as well
 //!   as CFF2, with subroutines renumbered and unused ones dropped. `cmap`,
-//!   `hmtx`, `hhea`, `maxp`, and `post` are rebuilt too. Layout and
-//!   variation tables follow the same rules as for `glyf` fonts. A
-//!   `CFF2` table keeps its own variation data.
+//!   `hmtx`, `hhea`, `maxp`, and `post` are rebuilt too. Vertical metrics,
+//!   `BASE`, `STAT`, layout and variation tables, and the drop list
+//!   follow the same rules as for `glyf` fonts. A `CFF2` table keeps
+//!   its own variation data.
 //!
 //! The byte-level building blocks ([`encode_index`], [`encode_dict_int`],
 //! [`emit_charset_auto`], [`emit_encoding_auto`], [`emit_fd_select_auto`],
@@ -117,6 +136,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 mod avar;
+mod base;
 mod cff;
 mod cff2;
 mod classdef;
@@ -144,6 +164,8 @@ mod sfnt;
 mod util;
 mod varc;
 mod variation_store;
+mod vmtx;
+mod vorg;
 mod warnings;
 
 pub use cff::subset_non_identity as subset_cff1_non_identity;
@@ -179,7 +201,19 @@ const LAYOUT_TABLES: [[u8; 4]; 3] = [tag::GSUB, tag::GPOS, tag::GDEF];
 
 /// Variable-font tables that [`SubsetInput::retain_variations`] keeps
 /// or drops.
-const VARIATION_TABLES: [[u8; 4]; 5] = [tag::FVAR, tag::AVAR, tag::GVAR, tag::HVAR, tag::VARC];
+const VARIATION_TABLES: [[u8; 4]; 6] = [
+    tag::FVAR,
+    tag::AVAR,
+    tag::GVAR,
+    tag::HVAR,
+    tag::VVAR,
+    tag::VARC,
+];
+
+/// Tables the subset always keeps unless they are malformed, when it
+/// leaves them out with a warning: the vertical metrics and `BASE`.
+/// Strict mode does not reject one that is missing from the output.
+const KEPT_UNLESS_MALFORMED: [[u8; 4]; 4] = [tag::VHEA, tag::VMTX, tag::VORG, tag::BASE];
 
 /// Subset configuration.
 #[derive(Debug, Clone)]
@@ -207,15 +241,15 @@ pub struct SubsetInput {
     /// PDF font streams) should set this to false.
     pub retain_layout: bool,
     /// If true (the default), retain variable-font tables (`fvar`,
-    /// `avar`, `gvar`, `HVAR`, `VARC`) so the resulting subset still
-    /// varies under axis coordinates. `fvar` and `avar` are passed
-    /// through verbatim; `gvar` is rebuilt with one entry per kept
-    /// gid; `HVAR` is rebuilt around a fresh `DeltaSetIndexMap` plus a
-    /// deduped `ItemVariationStore`. When false, every variable-font
-    /// table is dropped. The resulting subset behaves as a static font
-    /// pinned to the source's default instance. A `CFF2` table keeps
-    /// its own variation store either way, since it is part of the
-    /// outline data.
+    /// `avar`, `gvar`, `HVAR`, `VVAR`, `VARC`) so the resulting subset
+    /// still varies under axis coordinates. `fvar` and `avar` are
+    /// passed through verbatim; `gvar` is rebuilt with one entry per
+    /// kept gid; `HVAR` and `VVAR` are rebuilt around fresh
+    /// `DeltaSetIndexMap`s plus a deduped `ItemVariationStore`. When
+    /// false, every variable-font table is dropped. The resulting
+    /// subset behaves as a static font pinned to the source's default
+    /// instance. A `CFF2` table keeps its own variation store either
+    /// way, since it is part of the outline data.
     pub retain_variations: bool,
 }
 
@@ -453,6 +487,8 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
     }
 
     let warnings = Warnings::default();
+    push_vertical_tables(face, &kept, &gid_map, &warnings, &mut tables);
+    push_base_and_stat(face, &gid_map, &warnings, &mut tables);
     push_layout_and_variation_tables(face, &kept, &gid_map, input, &warnings, &mut tables)?;
 
     // TrueType hinting tables. Kept glyph instructions call functions
@@ -478,6 +514,46 @@ pub fn subset(face: &Face<'_>, input: &SubsetInput) -> Result<SubsetOutput, Subs
         gid_map: gid_map.into_iter().collect(),
         warnings: warnings.into_sorted(),
     })
+}
+
+/// Appends the rebuilt vertical metrics tables (`vhea`, `vmtx`, and
+/// `VORG`) for the kept glyphs. Shared by the `glyf`, CFF, and CFF2
+/// paths. A table that is malformed, or a `vhea` or `vmtx` without its
+/// partner, is left out and recorded in `warnings`; it never fails the
+/// subset.
+fn push_vertical_tables(
+    face: &Face<'_>,
+    kept: &[GlyphId],
+    gid_map: &[(GlyphId, GlyphId)],
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) {
+    if let Some(metrics) = vmtx::subset_vertical_metrics(face, kept, warnings) {
+        tables.push((tag::VHEA, metrics.vhea));
+        tables.push((tag::VMTX, metrics.vmtx));
+    }
+    if let Some(vorg) = vorg::subset_vorg(face, gid_map, warnings) {
+        tables.push((tag::VORG, vorg));
+    }
+}
+
+/// Appends `BASE`, with the glyph ids of its format 2 coordinates
+/// renumbered, and `STAT`, which names no glyphs and passes through.
+/// Shared by the `glyf`, CFF, and CFF2 paths. A `BASE` that cannot be
+/// walked is left out and recorded in `warnings`; it never fails the
+/// subset.
+fn push_base_and_stat(
+    face: &Face<'_>,
+    gid_map: &[(GlyphId, GlyphId)],
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) {
+    if let Some(b) = base::subset_base(face, gid_map, warnings) {
+        tables.push((tag::BASE, b));
+    }
+    if let Some(b) = base::subset_stat(face) {
+        tables.push((base::STAT, b));
+    }
 }
 
 /// Appends the layout and variable-font tables the subset keeps, as
@@ -515,7 +591,7 @@ fn push_layout_and_variation_tables(
     }
 
     // Variable-font tables. fvar/avar pass through verbatim;
-    // gvar/HVAR are rebuilt around the new gid namespace. When
+    // gvar/HVAR/VVAR are rebuilt around the new gid namespace. When
     // `retain_variations` is false we drop them all and the subset
     // becomes a static-instance font.
     if !input.retain_variations {
@@ -532,6 +608,13 @@ fn push_layout_and_variation_tables(
     }
     if let Some(b) = hvar::subset_hvar(face, kept)? {
         tables.push((tag::HVAR, b));
+    }
+    // VVAR varies `vmtx` (and `VORG`), so it stays only next to the
+    // `vmtx` that `push_vertical_tables` emitted.
+    if tables.iter().any(|(t, _)| *t == tag::VMTX) {
+        if let Some(b) = hvar::subset_vvar(face, kept, warnings) {
+            tables.push((tag::VVAR, b));
+        }
     }
     // VARC: re-emit when the source carries the table. Coverage
     // entries renumber per the new gid map and component records
@@ -555,8 +638,10 @@ fn push_layout_and_variation_tables(
 /// In strict mode (`drop_unhandled` false), fails on any source table
 /// the subset did not emit. Layout, variable-font, and hinting tables
 /// are exempt: their own flags decide whether they stay, so dropping
-/// them is intended. In permissive mode the rest are dropped, because
-/// their glyph id references would be stale.
+/// them is intended. So are the vertical metrics tables and `BASE`,
+/// which the subset always keeps unless they are malformed, and then
+/// reports in its warnings. In permissive mode the rest are dropped,
+/// because their glyph id references would be stale.
 fn check_unhandled_tables(
     face: &Face<'_>,
     tables: &[([u8; 4], Vec<u8>)],
@@ -567,12 +652,13 @@ fn check_unhandled_tables(
     }
     for rec in face.records() {
         let emitted = tables.iter().any(|(t, _)| *t == rec.tag);
-        let flag_driven = LAYOUT_TABLES.contains(&rec.tag)
+        let exempt = LAYOUT_TABLES.contains(&rec.tag)
             || VARIATION_TABLES.contains(&rec.tag)
-            || HINTING_TABLES.contains(&rec.tag);
-        if !emitted && !flag_driven {
-            // kern / vhea / vmtx / VORG / COLR / CPAL / morx / kerx
-            // and others have no subset implementation.
+            || HINTING_TABLES.contains(&rec.tag)
+            || KEPT_UNLESS_MALFORMED.contains(&rec.tag);
+        if !emitted && !exempt {
+            // kern / COLR / CPAL / morx / kerx / MVAR and others have
+            // no subset implementation.
             return Err(SubsetError::Unsupported(
                 "table not yet handled by sigilbuzz-subset; pass drop_unhandled=true",
             ));
@@ -587,10 +673,10 @@ fn check_unhandled_tables(
 /// `CFF2` table with [`cff2::subset_non_identity`], around the kept-gid
 /// set. A CFF2 table carries its own variation store, which rides
 /// through inside the rebuilt table. The fresh SFNT directory around
-/// it rebuilds `cmap`, `hmtx` / `hhea`, `maxp`, and `post` for the new
-/// gid namespace, passes `head`, `name`, and `OS/2` through, and keeps
-/// the layout and variable-font tables that `input` asks for, as the
-/// `glyf` path does.
+/// it rebuilds `cmap`, `hmtx` / `hhea`, `vmtx` / `vhea`, `VORG`,
+/// `maxp`, and `post` for the new gid namespace, passes `head`, `name`,
+/// and `OS/2` through, and keeps the layout and variable-font tables
+/// that `input` asks for, as the `glyf` path does.
 fn cff_non_identity(
     face: &Face<'_>,
     kept: &[GlyphId],
@@ -653,6 +739,8 @@ fn cff_non_identity(
     }
 
     let warnings = Warnings::default();
+    push_vertical_tables(face, kept, &gid_map, &warnings, &mut tables);
+    push_base_and_stat(face, &gid_map, &warnings, &mut tables);
     push_layout_and_variation_tables(face, kept, &gid_map, input, &warnings, &mut tables)?;
     check_unhandled_tables(face, &tables, input)?;
 
@@ -671,12 +759,13 @@ fn cff_non_identity(
 /// including its embedded gid references inside charstrings, charset,
 /// Encoding, and Private DICTs, already resolves to the right glyph
 /// in the subset (the gid namespace is unchanged). Likewise for cmap,
-/// hmtx, hhea, maxp, post, name, OS/2, COLR, CPAL, and the layout
-/// tables. We copy every table the source carries except the small
-/// set the rest of the pipeline can't round-trip: `vhea` / `vmtx` /
-/// `VORG` / legacy `kern` / `morx` / `kerx`. Layout and variable-font
-/// tables stay only when `input` asks for them, and strict mode
-/// (`drop_unhandled` false) rejects the tables that cannot be kept.
+/// hmtx, hhea, maxp, post, name, OS/2, vhea, vmtx, VORG, COLR, CPAL,
+/// and the layout tables. We copy every table the source carries
+/// except the small set the rest of the pipeline can't round-trip:
+/// legacy `kern` / `morx` / `kerx`. Layout and variable-font tables
+/// (`VVAR` included) stay only when `input` asks for them, and strict
+/// mode (`drop_unhandled` false) rejects the tables that cannot be
+/// kept.
 ///
 /// Returns the new SFNT bytes plus an identity `gid_map`.
 fn cff_passthrough(
@@ -688,15 +777,12 @@ fn cff_passthrough(
     for rec in face.records() {
         let dropped_by_flag = (!input.retain_layout && LAYOUT_TABLES.contains(&rec.tag))
             || (!input.retain_variations && VARIATION_TABLES.contains(&rec.tag));
-        // Skip the same set the glyf path drops when in
-        // drop_unhandled mode. CFF identity-passthrough is morally a
-        // "preserve everything still relevant" emit, so vertical /
-        // legacy-kern tables that the rest of the pipeline can't
-        // round-trip stay dropped.
-        let unhandled = matches!(
-            &rec.tag,
-            b"vhea" | b"vmtx" | b"VORG" | b"kern" | b"morx" | b"kerx"
-        );
+        // Skip the legacy kerning and AAT tables the rest of the
+        // pipeline can't round-trip. CFF identity-passthrough is
+        // morally a "preserve everything still relevant" emit, so the
+        // vertical metrics tables stay: with every glyph kept their
+        // glyph ids are already right.
+        let unhandled = matches!(&rec.tag, b"kern" | b"morx" | b"kerx");
         if dropped_by_flag || unhandled {
             continue;
         }

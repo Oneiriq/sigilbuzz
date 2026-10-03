@@ -63,10 +63,30 @@ fn flatten_subdivides_a_quadratic_under_default_tolerance() {
         assert!((prev.x1 - next.x0).abs() < 1e-5);
         assert!((prev.y1 - next.y0).abs() < 1e-5);
     }
-    // Endpoints land on (0,0) -> (100,0).
+    // The curve runs from (0,0) to (100,0). The contour has no Close,
+    // so flatten closes it with one more segment back to (0,0).
     assert!(segs[0].x0.abs() < 1e-5);
-    let last = segs[segs.len() - 1];
-    assert!((last.x1 - 100.0).abs() < 1e-5 && last.y1.abs() < 1e-5);
+    let curve_end = segs[segs.len() - 2];
+    assert!((curve_end.x1 - 100.0).abs() < 1e-5 && curve_end.y1.abs() < 1e-5);
+    let close = segs[segs.len() - 1];
+    assert!(close.x1.abs() < 1e-5 && close.y1.abs() < 1e-5);
+}
+
+#[test]
+fn flatten_closes_an_open_contour() {
+    // Fill rules treat an open contour as closed, so flatten emits the
+    // closing edge whether or not the path ends with Close.
+    let open = vec![
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 10.0 },
+    ];
+    let mut closed = open.clone();
+    closed.push(PathOp::Close);
+    let a = flatten(open, &Affine::identity(), DEFAULT_TOLERANCE);
+    let b = flatten(closed, &Affine::identity(), DEFAULT_TOLERANCE);
+    assert_eq!(a.len(), 3);
+    assert_eq!(a, b);
 }
 
 #[test]

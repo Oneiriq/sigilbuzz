@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use super::index::read_index;
+use super::index::{read_index, Index};
 use crate::error::{Error, Result};
 use crate::tables::parse::Reader;
 
@@ -144,13 +144,13 @@ pub(super) fn read_local_subrs<'a>(
     data: &'a [u8],
     priv_bytes: &'a [u8],
     priv_off: usize,
-) -> Result<Vec<&'a [u8]>> {
+) -> Result<Index<'a>> {
     // Private DICT has the same structure as Top DICT. We care only
     // about operator 19 (Subrs), whose operand is an offset relative
     // to the start of the Private DICT.
     let priv_dict = TopDict::parse(priv_bytes)?;
     let Some(off) = priv_dict.local_subrs_off else {
-        return Ok(Vec::new());
+        return Ok(Index::default());
     };
     let subr_off = priv_off.checked_add(off as usize).ok_or(Error::Malformed {
         offset: priv_off,
@@ -164,41 +164,156 @@ pub(super) fn read_local_subrs<'a>(
 // FDSelect.
 // ----------------------------------------------------------------------------
 
-pub(super) fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>> {
-    let mut r = Reader::at(data, off)?;
-    let format = r.read_u8()?;
-    match format {
-        0 => {
-            let mut out = Vec::with_capacity(n_glyphs);
-            for _ in 0..n_glyphs {
-                out.push(r.read_u8()?);
+/// A lazy view of an FDSelect table, which maps each glyph to the
+/// Font DICT in the FDArray that holds its Private DICT. Shared with
+/// CFF2.
+///
+/// Opening it checks only that the table fits. [`Self::fd_for_glyph`]
+/// then reads the one glyph it is asked about, so nothing is expanded
+/// per glyph up front.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FdSelect<'a> {
+    /// Format 0: one FD index byte per glyph, exactly `n_glyphs` bytes.
+    Bytes(&'a [u8]),
+    /// Format 3 (`Range3`: u16 first glyph, u8 FD) or format 4
+    /// (`Range4`: u32 first glyph, u16 FD, `wide`), followed by a
+    /// sentinel glyph id that ends the last range.
+    Ranges {
+        /// The packed range records.
+        ranges: &'a [u8],
+        /// True for format 4 records.
+        wide: bool,
+        /// One past the last glyph of the last range.
+        sentinel: usize,
+        /// Glyph count from the CharStrings INDEX.
+        n_glyphs: usize,
+    },
+}
+
+impl<'a> FdSelect<'a> {
+    /// Opens the FDSelect at `off`. `allow_format4` is set for CFF2;
+    /// CFF1 defines only formats 0 and 3. `unsupported` names the error
+    /// for any other format.
+    pub(crate) fn parse(
+        data: &'a [u8],
+        off: usize,
+        n_glyphs: usize,
+        allow_format4: bool,
+        unsupported: &'static str,
+    ) -> Result<Self> {
+        let mut r = Reader::at(data, off)?;
+        let format = r.read_u8()?;
+        match format {
+            0 => Ok(Self::Bytes(r.read_bytes(n_glyphs)?)),
+            3 => {
+                let n_ranges = usize::from(r.read_u16()?);
+                let ranges = r.read_bytes(n_ranges * 3)?;
+                let sentinel = usize::from(r.read_u16()?);
+                Ok(Self::Ranges {
+                    ranges,
+                    wide: false,
+                    sentinel,
+                    n_glyphs,
+                })
             }
-            Ok(out)
-        }
-        3 => {
-            let n_ranges = r.read_u16()? as usize;
-            let mut ranges = Vec::with_capacity(n_ranges);
-            for _ in 0..n_ranges {
-                let first = r.read_u16()? as usize;
-                let fd = r.read_u8()?;
-                ranges.push((first, fd));
+            4 if allow_format4 => {
+                // Format 4: 32-bit ranges. Used by huge CID fonts.
+                let n_ranges = r.read_u32()? as usize;
+                let len = n_ranges.checked_mul(6).ok_or(Error::Truncated {
+                    offset: r.position(),
+                    context: "CFF FDSelect ranges",
+                })?;
+                let ranges = r.read_bytes(len)?;
+                let sentinel = r.read_u32()? as usize;
+                Ok(Self::Ranges {
+                    ranges,
+                    wide: true,
+                    sentinel,
+                    n_glyphs,
+                })
             }
-            let sentinel = r.read_u16()? as usize;
-            Ok(fill_fd_ranges(&ranges, sentinel, n_glyphs))
+            _ => Err(Error::Unsupported {
+                context: unsupported,
+            }),
         }
-        _ => Err(Error::Unsupported {
-            context: "CFF FDSelect format != 0/3",
-        }),
     }
+
+    /// The FD index for `gid`. A glyph that no range covers maps to
+    /// FD 0.
+    ///
+    /// Ranges are expected to ascend. Unsorted ranges resolve the way
+    /// a front-to-back fill would: range `i` covers glyphs from its
+    /// first glyph up to the next range's first glyph (the sentinel
+    /// for the last range), minus any glyph an earlier range already
+    /// passed. The scan stops at the range that covers `gid`, or as
+    /// soon as no later range can, so for sorted ranges it reads only
+    /// the ranges up to `gid`.
+    pub(crate) fn fd_for_glyph(&self, gid: usize) -> u8 {
+        match *self {
+            Self::Bytes(fds) => fds.get(gid).copied().unwrap_or(0),
+            Self::Ranges {
+                ranges,
+                wide,
+                sentinel,
+                n_glyphs,
+            } => {
+                let stride = if wide { 6 } else { 3 };
+                let first_at = |i: usize| -> usize {
+                    if wide {
+                        be_uint(ranges, i * stride, 4)
+                    } else {
+                        be_uint(ranges, i * stride, 2)
+                    }
+                };
+                let n_ranges = ranges.len() / stride;
+                // Glyphs below `filled` were covered by an earlier
+                // range's span, so no later range may claim them.
+                let mut filled = 0usize;
+                for i in 0..n_ranges {
+                    let end = if i + 1 < n_ranges {
+                        first_at(i + 1)
+                    } else {
+                        sentinel
+                    };
+                    let end = end.min(n_glyphs);
+                    if gid >= first_at(i).max(filled) && gid < end {
+                        // Format 4 stores a u16 FD; only the low byte
+                        // is kept, as FDArray indices fit in a u8 here.
+                        return if wide {
+                            be_uint(ranges, i * stride + 4, 2) as u8
+                        } else {
+                            be_uint(ranges, i * stride + 2, 1) as u8
+                        };
+                    }
+                    filled = filled.max(end);
+                    if filled > gid {
+                        break;
+                    }
+                }
+                0
+            }
+        }
+    }
+}
+
+/// Reads a `width`-byte big-endian unsigned integer at `at`. Out of
+/// range reads give 0; [`FdSelect::parse`] sized the slice so they do
+/// not happen.
+fn be_uint(bytes: &[u8], at: usize, width: usize) -> usize {
+    bytes.get(at..at + width).map_or(0, |b| {
+        b.iter().fold(0usize, |v, &x| (v << 8) | usize::from(x))
+    })
 }
 
 /// Expands FDSelect `(first_glyph, fd)` ranges into one entry per
 /// glyph. Range `i` covers glyphs up to the next range's first glyph,
-/// and the last range ends at `sentinel`. Shared with CFF2.
+/// and the last range ends at `sentinel`. This is the reference that
+/// [`FdSelect::fd_for_glyph`] must agree with.
 ///
-/// Ranges must ascend. `filled` skips glyphs an earlier range already
-/// wrote, so unsorted ranges cannot make the fill quadratic. For
-/// sorted ranges it changes nothing.
+/// `filled` skips glyphs an earlier range already wrote, so unsorted
+/// ranges cannot make the fill quadratic. For sorted ranges it changes
+/// nothing.
+#[cfg(test)]
 pub(crate) fn fill_fd_ranges(ranges: &[(usize, u8)], sentinel: usize, n_glyphs: usize) -> Vec<u8> {
     let mut out = alloc::vec![0u8; n_glyphs];
     let mut filled = 0usize;

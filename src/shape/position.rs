@@ -329,7 +329,7 @@ pub(super) fn has_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8;
 fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Vec<u16> {
     crate::ot::layout_select::feature_lookup_indices(
         gpos.script_list(),
-        gpos.feature_list(),
+        &gpos.features(),
         gpos.language_tags(),
         tag,
         script_priority,
@@ -343,7 +343,7 @@ fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Ve
 fn required_lookups(gpos: &Gpos<'_>, script_priority: &[[u8; 4]]) -> Vec<u16> {
     crate::ot::layout_select::required_feature(
         gpos.script_list(),
-        gpos.feature_list(),
+        &gpos.features(),
         gpos.language_tags(),
         script_priority,
     )

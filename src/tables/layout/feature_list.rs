@@ -68,7 +68,17 @@ impl<'a> FeatureList<'a> {
             return None;
         }
         let (tag, offset) = self.record_at(index);
-        Feature::parse_at(self.data, offset).ok().map(|f| (tag, f))
+        Feature::parse_at(self.data, usize::from(offset))
+            .ok()
+            .map(|f| (tag, f))
+    }
+
+    /// The tag of the feature record at `index`, or `None` if the index
+    /// is out of range. Unlike [`Self::get`], this does not read the
+    /// Feature table, so it answers for a record whose table is damaged.
+    #[must_use]
+    pub(crate) fn tag(&self, index: u16) -> Option<[u8; 4]> {
+        (index < self.feature_count).then(|| self.record_at(index).0)
     }
 
     /// Iterates `(tag, Feature)` pairs in record order.
@@ -109,7 +119,7 @@ impl<'a> Iterator for FeatureIter<'a> {
         while self.idx < self.list.feature_count {
             let (tag, off) = self.list.record_at(self.idx);
             self.idx += 1;
-            if let Ok(f) = Feature::parse_at(self.list.data, off) {
+            if let Ok(f) = Feature::parse_at(self.list.data, usize::from(off)) {
                 return Some((tag, f));
             }
         }
@@ -127,8 +137,28 @@ pub struct Feature<'a> {
 }
 
 impl<'a> Feature<'a> {
-    fn parse_at(data: &'a [u8], offset: u16) -> Result<Self> {
-        let base = offset as usize;
+    /// The alternate Feature table that a `FeatureTableSubstitution`
+    /// record names: `offset` is its Offset32, measured from the start
+    /// of `substitution`, the FeatureTableSubstitution table.
+    pub(crate) fn parse_alternate(substitution: &'a [u8], offset: u32) -> Result<Self> {
+        let base = usize::try_from(offset).map_err(|_| Error::Malformed {
+            offset: 0,
+            context: "alternate feature offset past end of FeatureTableSubstitution",
+        })?;
+        Self::parse_at(substitution, base)
+    }
+
+    /// A feature with no lookups. HarfBuzz reads a null or damaged
+    /// alternate Feature table as this one.
+    pub(crate) const fn empty() -> Self {
+        Self {
+            data: &[],
+            lookup_indices_off: 0,
+            lookup_index_count: 0,
+        }
+    }
+
+    fn parse_at(data: &'a [u8], base: usize) -> Result<Self> {
         if base >= data.len() {
             return Err(Error::Malformed {
                 offset: base,

@@ -40,6 +40,7 @@ fn wraps_mixed_language_paragraph() {
         WrapOptions {
             max_width: 5000.0,
             break_at_word_boundaries: true,
+            ..WrapOptions::default()
         },
     );
     assert!(!lines.is_empty());
@@ -60,6 +61,7 @@ fn ranges_cover_text_without_gaps() {
         WrapOptions {
             max_width: 3000.0,
             break_at_word_boundaries: true,
+            ..WrapOptions::default()
         },
     );
     let mut cursor = 0;
@@ -89,6 +91,7 @@ fn narrowing_width_increases_line_count() {
         WrapOptions {
             max_width: f32::INFINITY,
             break_at_word_boundaries: true,
+            ..WrapOptions::default()
         },
     );
     let narrow = wrap_lines(
@@ -97,6 +100,7 @@ fn narrowing_width_increases_line_count() {
         WrapOptions {
             max_width: 3000.0,
             break_at_word_boundaries: true,
+            ..WrapOptions::default()
         },
     );
     assert_eq!(wide.len(), 1, "infinite width should fit on one line");
@@ -118,6 +122,7 @@ fn hard_breaks_force_a_new_line() {
         WrapOptions {
             max_width: f32::INFINITY,
             break_at_word_boundaries: true,
+            ..WrapOptions::default()
         },
     );
     assert_eq!(lines.len(), 2);

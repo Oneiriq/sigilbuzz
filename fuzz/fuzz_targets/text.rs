@@ -5,13 +5,20 @@
 use libfuzzer_sys::fuzz_target;
 use sigilbuzz::Glyph;
 use sigilbuzz_hyphen::{hyphenate, Language, Patterns};
-use sigilbuzz_text_layout::{line_break_opportunities, word_breaks, wrap_lines, WrapOptions};
+use sigilbuzz_text_layout::{
+    line_break_class, line_break_opportunities, line_break_opportunities_with, word_breaks,
+    wrap_lines, WordBreak, WrapOptions,
+};
 
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
     let text = String::from_utf8_lossy(rest);
 
     let _ = line_break_opportunities(&text).count();
+    for word_break in [WordBreak::Normal, WordBreak::KeepAll, WordBreak::BreakAll] {
+        let _ = line_break_opportunities_with(&text, word_break).count();
+    }
+    let _ = text.chars().map(line_break_class).count();
     let _ = word_breaks(&text).count();
 
     // One fake glyph per char, with clusters pointing at char starts, the
@@ -46,6 +53,11 @@ fuzz_target!(|data: &[u8]| {
             _ => f32::from(mode) * 10.0,
         },
         break_at_word_boundaries: mode & 1 == 0,
+        word_break: match (mode >> 4) % 3 {
+            0 => WordBreak::Normal,
+            1 => WordBreak::KeepAll,
+            _ => WordBreak::BreakAll,
+        },
     };
     let _ = wrap_lines(&glyphs, &text, options);
 

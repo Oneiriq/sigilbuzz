@@ -12,6 +12,8 @@ Fonts used by the integration tests.
   Fischer, OFL 1.1, from the `googlefonts/rubik` repository. `tests/variable_fonts.rs`
   uses it to exercise the `fvar`, `avar`, and `HVAR` advance-delta pipeline and `gvar`
   outline deltas against rustybuzz's output at the same axis coordinate.
+  `tests/feature_variations_gsub_parity.rs` uses its GSUB 1.1 FeatureVariations, which
+  give `rvrn` heavier currency signs from `wght` 500 on.
 - `hahmlet_gvar_subset.ttf`: a 7,908-byte subset of Hahmlet Variable (`wght` 100 to
   900, default 400), version 1.002, Copyright 2020 The Hahmlet Project Authors, SIL Open
   Font License 1.1. Source: <https://github.com/google/fonts/raw/main/ofl/hahmlet/Hahmlet%5Bwght%5D.ttf>
@@ -107,6 +109,25 @@ Fonts used by the integration tests.
 
   The selectors must be in `--unicodes`, or `pyftsubset` drops the format 14 records.
   `tests/cmap14_parity.rs` and the `sigilbuzz-capi` glyph lookup tests use it.
+- `noto_sans_kr_vf_vertical_subset.otf`: a 10 KB, 16-glyph subset of Noto Sans KR
+  Variable (version 2.004) by Adobe and the Noto Project Authors, SIL Open Font License
+  1.1 (Copyright 2014-2021 Adobe, reserved font name "Source", which the subset does not
+  use). Source:
+  <https://github.com/notofonts/noto-cjk/raw/main/Sans/Variable/OTF/Subset/NotoSansKR-VF.otf>
+  (git blob `1c59da9a18539f40f117a32e54f205a447f2815d`), license at
+  <https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE>. It is a CFF2 variable
+  font (`wght` 100 to 900, default 100) that keeps `vhea`, `vmtx`, `VORG` and `VVAR`,
+  including the `VVAR` vertical origin map, plus `BASE` and `STAT`, for the space, the
+  corner brackets U+300C and U+300D, the ideographic comma and full stop, U+AC00, and
+  U+2030 and U+2170, whose vertical origins vary with the weight. No other fixture has
+  vertical metrics or their variations.
+  `crates/sigilbuzz-subset/tests/vertical_round_trip.rs` and the CLI tests use it. Cut
+  with the sigilbuzz subsetter itself (no fontTools needed), from the repository root:
+
+      cargo run --release -p sigilbuzz-cli -- subset NotoSansKR-VF.otf \
+          tests/fixtures/noto_sans_kr_vf_vertical_subset.otf \
+          --unicodes 'U+0020,U+300C,U+300D,U+3001,U+3002,U+AC00,U+2030,U+2170'
+
 - `../fonts/NotoSansKR-HangulTone-Subset.ttf`: an 8 KB subset of Noto Sans KR (OFL 1.1,
   Copyright 2014-2021 Adobe, Reserved Font Name 'Source'), from
   <https://github.com/google/fonts/tree/main/ofl/notosanskr>, instanced at Regular and
@@ -121,3 +142,19 @@ Fonts used by the integration tests.
   other Noto fonts in `tests/fonts/`, whose README has the exact fontTools steps. The
   subsets of Noto Sans Javanese, Chakma, Khudawadi, Takri, Syriac, and Adlam that
   `tests/script_coverage_parity.rs` uses are listed there too.
+- `noto_sans_kr_vf_cff2_subset.otf`: a 4,480-byte subset of Noto Sans KR VF (version
+  2.004) by Adobe, SIL Open Font License 1.1 (reserved font name "Source", which the
+  subset does not use). Source:
+  <https://github.com/notofonts/noto-cjk/raw/main/Sans/Variable/OTF/Subset/NotoSansKR-VF.otf>
+  (SHA-256 `e647f53b18a4823647a51bcbdac866617701a4dd8ce495bac2db5ecea88d8f21`), license
+  at <https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE>. It keeps the
+  `CFF2` outlines, the `wght` axis and the variation tables for `.notdef` and the
+  syllables 귁 (U+ADC1) and 빛 (U+BE5B), whose last contours end away from their start
+  points. CFF2 charstrings have no `endchar`, so the last contour of every glyph used
+  to stay open, and a fill drew streaks across those two syllables. Built with this
+  repository's CLI:
+
+      sigilbuzz subset NotoSansKR-VF.otf noto_sans_kr_vf_cff2_subset.otf \
+          --unicodes "U+ADC1,U+BE5B" --drop-layout
+
+  `tests/cff2_closed_contours.rs` uses it.

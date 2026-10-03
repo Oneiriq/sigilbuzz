@@ -1,13 +1,17 @@
-//! The metric bakes of a full instance: hmtx through HVAR, vmtx through
-//! VVAR, and the OS/2, hhea, vhea and post fields MVAR varies.
+//! The metric bakes of a full instance: hmtx through HVAR, vmtx and
+//! VORG through VVAR, and the OS/2, hhea, vhea and post fields MVAR
+//! varies.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
+use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use super::glyf::clamp_i16;
+use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
+use crate::warnings::Warnings;
 use crate::SubsetError;
 
 // ---------------------------------------------------------------------------
@@ -171,6 +175,85 @@ pub(super) fn emit_vmtx_bytes(advances: &[u16], tsbs: &[i16]) -> (Vec<u8>, u16) 
         out.extend_from_slice(&tsb.to_be_bytes());
     }
     (out, long_count as u16)
+}
+
+// ---------------------------------------------------------------------------
+// VORG bake (VVAR vertical origin deltas)
+// ---------------------------------------------------------------------------
+
+/// What a full instance does with `VORG`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum VorgBake {
+    /// Nothing to fold in: the source table, if any, passes through.
+    Unchanged,
+    /// The table with the `VVAR` vertical origin deltas folded in.
+    Rebuilt(Vec<u8>),
+    /// The `VORG` could not be read; it is left out and reported.
+    Dropped,
+}
+
+/// Folds the `VVAR` vertical origin deltas at `coords` into `VORG`, as
+/// [`bake_vmtx`] folds the advance and top side bearing deltas into
+/// `vmtx`. HarfBuzz adds the same delta to every `VORG` lookup of a
+/// variable font, so a glyph with no `VORG` entry moves too, and gains
+/// one when its origin leaves the default.
+///
+/// The core `VVAR` parser does not read `vorgMappingOffset`, so the
+/// map is read here, from the raw table. A `VVAR` store that cannot be
+/// read leaves `VORG` unchanged, and a malformed `VORG` is dropped;
+/// both are reported in `warnings`.
+pub(super) fn bake_vorg(
+    face: &Face<'_>,
+    coords: &[f32],
+    num_glyphs: u16,
+    warnings: &Warnings,
+) -> VorgBake {
+    if coords.is_empty() {
+        return VorgBake::Unchanged;
+    }
+    let (Ok(vorg_bytes), Ok(vvar_bytes)) =
+        (face.table_bytes(tag::VORG), face.table_bytes(tag::VVAR))
+    else {
+        return VorgBake::Unchanged;
+    };
+    let offset_at = |slot: usize| {
+        vvar_bytes
+            .get(slot..)
+            .and_then(<[u8]>::first_chunk::<4>)
+            .map_or(0, |b| u32::from_be_bytes(*b) as usize)
+    };
+    let map_off = offset_at(VVAR_VORG_SLOT);
+    if map_off == 0 {
+        return VorgBake::Unchanged;
+    }
+    let store_off = offset_at(STORE_SLOT);
+    let store = match vvar_bytes.get(store_off..).map(ItemVariationStore::parse) {
+        Some(Ok(store)) => store,
+        Some(Err(e)) => {
+            warnings.parse_error(tag::VVAR, store_off, &e, "the vertical origin deltas");
+            return VorgBake::Unchanged;
+        }
+        None => {
+            warnings.push(
+                tag::VVAR,
+                STORE_SLOT,
+                "VVAR store offset past end",
+                "the vertical origin deltas",
+            );
+            return VorgBake::Unchanged;
+        }
+    };
+    let delta = |gid: u16| {
+        read_index_map(vvar_bytes, map_off, gid)
+            .map_or(0.0, |(outer, inner)| store.delta(outer, inner, coords))
+    };
+    match crate::vorg::bake_vorg(vorg_bytes, num_glyphs, delta) {
+        Ok(bytes) => VorgBake::Rebuilt(bytes),
+        Err(e) => {
+            warnings.parse_error(tag::VORG, 0, &e, "the whole table");
+            VorgBake::Dropped
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

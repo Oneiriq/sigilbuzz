@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+use super::index::Index;
 use super::op_code;
 use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
@@ -28,8 +29,8 @@ const MAX_CHARSTRING_OPS: u32 = 100_000;
 // ----------------------------------------------------------------------------
 
 pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
-    global: &'b [&'a [u8]],
-    local: &'b [&'a [u8]],
+    global: Index<'a>,
+    local: Index<'a>,
     sink: &'b mut S,
     /// Operand stack. CFF spec caps this at 48 for CFF1, 513 for CFF2.
     stack: Vec<f32>,
@@ -47,14 +48,29 @@ pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
     is_cff2: bool,
     /// True once endchar fires. Outer loop halts.
     done: bool,
-    /// True after the first move operator. Needed to close open
-    /// contours at endchar.
+    /// True while a contour is open, from a move operator until the
+    /// next move operator, endchar, or [`Self::finish`] closes it.
     in_contour: bool,
     /// Operands and operators executed so far, checked against
     /// [`MAX_CHARSTRING_OPS`].
     ops: u32,
     /// CFF2 blend support.
     pub(crate) blend: Option<BlendContext<'b>>,
+    /// Region count and scalars for the blend context's current
+    /// `vsindex`. Every `blend` in a glyph reuses them until `vsindex`
+    /// changes, instead of re-reading the variation store each time.
+    blend_regions: Option<BlendRegions>,
+}
+
+/// Variation store data for one `vsindex`, computed once per outline.
+struct BlendRegions {
+    /// The `vsindex` these values belong to.
+    vsindex: u16,
+    /// Regions per delta row, from the ItemVariationData subtable.
+    /// `None` when the subtable is missing or truncated.
+    count: Option<u16>,
+    /// One scalar per region at the outline's coords.
+    scalars: Vec<f32>,
 }
 
 pub(crate) struct BlendContext<'b> {
@@ -67,12 +83,7 @@ pub(crate) struct BlendContext<'b> {
 }
 
 impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
-    pub(crate) fn new(
-        global: &'b [&'a [u8]],
-        local: &'b [&'a [u8]],
-        sink: &'b mut S,
-        is_cff2: bool,
-    ) -> Self {
+    pub(crate) fn new(global: Index<'a>, local: Index<'a>, sink: &'b mut S, is_cff2: bool) -> Self {
         Self {
             global,
             local,
@@ -87,6 +98,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             in_contour: false,
             ops: 0,
             blend: None,
+            blend_regions: None,
         }
     }
 
@@ -337,18 +349,20 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             }
             op_code::CALLSUBR => {
                 let idx = self.pop()?;
-                let subr = biased_subr(self.local, idx).ok_or(Error::Malformed {
+                let i = biased_subr(&self.local, idx).ok_or(Error::Malformed {
                     offset: 0,
                     context: "CFF callsubr out of range",
                 })?;
+                let subr = self.local.get(i)?;
                 self.run(subr, depth + 1)?;
             }
             op_code::CALLGSUBR => {
                 let idx = self.pop()?;
-                let subr = biased_subr(self.global, idx).ok_or(Error::Malformed {
+                let i = biased_subr(&self.global, idx).ok_or(Error::Malformed {
                     offset: 0,
                     context: "CFF callgsubr out of range",
                 })?;
+                let subr = self.global.get(i)?;
                 self.run(subr, depth + 1)?;
             }
             op_code::RETURN => {
@@ -529,8 +543,8 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         self.y = y;
     }
 
-    // The blend loops index the stack, the deltas, and the scalars in
-    // lockstep, which reads more clearly with explicit indices.
+    // The blend loops index the stack rows and the scalars in lockstep,
+    // which reads more clearly with explicit indices.
     #[allow(clippy::needless_range_loop)]
     fn apply_blend(&mut self) -> Result<()> {
         // Stack layout: n default values, followed by n*nRegions
@@ -556,44 +570,62 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         if n > self.stack.len() {
             return Err(underflow);
         }
-        let n_regions = self
-            .blend
-            .as_ref()
-            .and_then(|b| b.ivs.variation_region_count(b.vsindex))
-            .map_or_else(
-                || {
-                    let extra = self.stack.len().saturating_sub(n);
-                    extra / n
-                },
-                |count| count as usize,
-            );
+        self.refresh_blend_regions();
+        // Set exactly when a BlendContext exists.
+        let regions = self.blend_regions.as_ref();
+        let n_regions = regions.and_then(|r| r.count).map_or_else(
+            || {
+                let extra = self.stack.len().saturating_sub(n);
+                extra / n
+            },
+            usize::from,
+        );
         let total_deltas = n * n_regions;
         if self.stack.len() < n + total_deltas {
             return Err(underflow);
         }
         let start = self.stack.len() - n - total_deltas;
-        let mut deltas = alloc::vec![0.0_f32; n];
-        if let Some(ref b) = self.blend {
-            let scalars = b
-                .ivs
-                .region_scalars(b.vsindex, b.coords)
-                .unwrap_or_default();
-            for i in 0..n {
-                let mut accum = 0.0_f32;
+        // Default value `i` sits below every delta row, so each row is
+        // summed and added in place. The sums and the order of the
+        // additions are the same as summing every row first.
+        for i in 0..n {
+            let mut accum = 0.0_f32;
+            if let Some(r) = regions {
                 for j in 0..n_regions {
                     let d = self.stack[start + n + i * n_regions + j];
-                    if let Some(&s) = scalars.get(j) {
+                    if let Some(&s) = r.scalars.get(j) {
                         accum += s * d;
                     }
                 }
-                deltas[i] = accum;
             }
-        }
-        for i in 0..n {
-            self.stack[start + i] += deltas[i];
+            self.stack[start + i] += accum;
         }
         self.stack.truncate(start + n);
         Ok(())
+    }
+
+    /// Fills [`Self::blend_regions`] for the blend context's current
+    /// `vsindex`, unless it already holds that `vsindex`. Does nothing
+    /// without a blend context.
+    fn refresh_blend_regions(&mut self) {
+        let Some(b) = self.blend.as_ref() else {
+            return;
+        };
+        if self
+            .blend_regions
+            .as_ref()
+            .is_some_and(|r| r.vsindex == b.vsindex)
+        {
+            return;
+        }
+        self.blend_regions = Some(BlendRegions {
+            vsindex: b.vsindex,
+            count: b.ivs.variation_region_count(b.vsindex),
+            scalars: b
+                .ivs
+                .region_scalars(b.vsindex, b.coords)
+                .unwrap_or_default(),
+        });
     }
 
     fn push(&mut self, v: f32) -> Result<()> {
@@ -643,6 +675,17 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             self.in_contour = false;
         }
     }
+
+    /// Closes the contour still open when the charstring runs out.
+    ///
+    /// CFF1 closes its last contour at `endchar`, but CFF2 has no
+    /// `endchar`: a CFF2 charstring simply ends, and without this call
+    /// its final contour would stay open. Call it once after
+    /// [`Self::run`] returns. It is idempotent, so a CFF1 charstring
+    /// that already ended with `endchar` is unaffected.
+    pub(crate) fn finish(&mut self) {
+        self.close_contour();
+    }
 }
 
 /// Thin CFF2 wrapper around [`Interp`] with blend context wired in
@@ -654,8 +697,8 @@ pub(crate) struct Interp2<'a, 'b, S: OutlineSink> {
 
 impl<'a, 'b, S: OutlineSink> Interp2<'a, 'b, S> {
     pub(crate) fn new(
-        global: &'b [&'a [u8]],
-        local: &'b [&'a [u8]],
+        global: Index<'a>,
+        local: Index<'a>,
         sink: &'b mut S,
         blend: Option<BlendContext<'b>>,
     ) -> Self {
@@ -666,6 +709,11 @@ impl<'a, 'b, S: OutlineSink> Interp2<'a, 'b, S> {
 
     pub(crate) fn run(&mut self, code: &'a [u8], depth: u8) -> Result<()> {
         self.inner.run(code, depth)
+    }
+
+    /// Closes the final contour. See [`Interp::finish`].
+    pub(crate) fn finish(&mut self) {
+        self.inner.finish();
     }
 }
 
@@ -679,10 +727,12 @@ pub(super) fn subr_bias(count: usize) -> i32 {
     }
 }
 
-/// Resolves a biased subroutine number popped off the operand stack.
-/// Blended CFF2 operands can hold any float, so the sum is checked
-/// and negative or huge indices resolve to `None`.
-fn biased_subr<'a>(subrs: &[&'a [u8]], idx: f32) -> Option<&'a [u8]> {
+/// Resolves a biased subroutine number popped off the operand stack
+/// to an index into `subrs`. Blended CFF2 operands can hold any
+/// float, so the sum is checked and negative or huge indices resolve
+/// to `None`.
+fn biased_subr(subrs: &Index<'_>, idx: f32) -> Option<usize> {
     let i = (idx as i32).checked_add(subr_bias(subrs.len()))?;
-    subrs.get(usize::try_from(i).ok()?).copied()
+    let i = usize::try_from(i).ok()?;
+    (i < subrs.len()).then_some(i)
 }

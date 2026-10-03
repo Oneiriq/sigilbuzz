@@ -223,12 +223,38 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         .language()
         .map_or(&[], crate::Language::ot_language_tags);
     let concat = flags.contains(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT);
-    let gsub = face.gsub()?.map(|g| {
-        g.with_language_tags(language_tags)
-            .with_cluster_level(level)
-            .with_unsafe_to_concat(concat)
+    // GDEF is consulted up-front: its ItemVariationStore feeds the
+    // FeatureVariations conditions below, and the LookupFlag
+    // skip-iterator needs its classes for every GSUB context match.
+    // GPOS reuses the same handle further down.
+    let gdef = face.gdef()?;
+    // Each table's FeatureVariations record for the font's coordinates
+    // (`hb_ot_layout_table_find_feature_variations`), picked once per
+    // call: there is no shape plan cache. HarfBuzz selects one even at
+    // the default instance, where every axis reads as 0. HarfBuzz
+    // 14.5.0 rejects a GSUB or GPOS whose FeatureVariations fail its
+    // sanitizer, so a table whose FeatureVariations do not parse is
+    // left out here, as if the font had none.
+    let var_store = gdef.as_ref().and_then(|g| g.item_variation_store());
+    let select = |variations| {
+        crate::tables::layout::feature_variations::select(variations, font.coords(), var_store)
+    };
+    let gsub = face.gsub()?.and_then(|g| {
+        let variation = select(g.feature_variations().ok()?);
+        Some(
+            g.with_language_tags(language_tags)
+                .with_cluster_level(level)
+                .with_unsafe_to_concat(concat)
+                .with_feature_variation(variation),
+        )
     });
-    let gpos = face.gpos()?.map(|g| g.with_language_tags(language_tags));
+    let gpos = face.gpos()?.and_then(|g| {
+        let variation = select(g.feature_variations().ok()?);
+        Some(
+            g.with_language_tags(language_tags)
+                .with_feature_variation(variation),
+        )
+    });
 
     // The shaper HarfBuzz would pick for the whole buffer, from its
     // script and the script tag the font's GSUB picks for it. It runs
@@ -364,11 +390,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // Latin-majority mixed runs.
     let dominant_script = buffer_script;
 
-    // GDEF is consulted up-front so the LookupFlag skip-iterator has
-    // it available for every GSUB context match. GPOS reuses the same
-    // handle further down.
-    let gdef = face.gdef()?;
-
     // Arabic joining forms are computed once, over the whole run,
     // because the state machine depends on surrounding letters (the
     // previous/next Arabic joining-type). A segment-local view would
@@ -463,11 +484,12 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
         // their own, so the direction features join the default ones.
         let plain_default = !shaper_ran_defaults && !seg_arabic;
 
-        // A required feature whose tag no later pass applies runs
-        // first, as HarfBuzz runs it in GSUB stage 0. The direction
-        // features (`ltra` and `ltrm`, or `rtla`, then `rtlm` on
-        // backward runs) follow in a stage of their own, except for the
-        // default shaper, which runs them with its default features.
+        // GSUB stage 0 runs first: `rvrn`, and a required feature
+        // whose tag no later pass applies, merged by lookup index as
+        // HarfBuzz merges a stage. The direction features (`ltra` and
+        // `ltrm`, or `rtla`, then `rtlm` on backward runs) follow in a
+        // stage of their own, except for the default shaper, which runs
+        // them with its default features.
         if let Some(ref gsub) = gsub {
             let plan = required::SegmentPlan {
                 script: seg.script,
@@ -482,7 +504,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             };
             let priority = seg.script_priority;
             let gdef = gdef.as_ref();
-            required::apply_unscheduled(gsub, &mut seg_glyphs, gdef, priority, &plan, &mut budget);
+            required::apply_stage_zero(gsub, &mut seg_glyphs, gdef, priority, &plan, &mut budget);
             let direction_tags = rotate::direction_features(target_direction);
             let table = JoinerTable::for_segment(plan.arabic);
             if !plain_default {
