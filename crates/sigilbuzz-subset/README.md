@@ -28,7 +28,9 @@ For TrueType fonts:
 
 CFF and CFF2 fonts are supported too, including CID-keyed CFF. When glyphs are dropped,
 the `CFF ` or `CFF2` table is rebuilt around the kept ones, and every other table follows
-the same rules as above. A `CFF2` table keeps its own variation data.
+the same rules as above. A `CFF2` table keeps its own variation data. A kept `CFF ` glyph
+drawn by `seac` (an accented character) keeps its base and accent glyphs, as `hb-subset`
+does.
 
 When every glyph is kept, a CFF or CFF2 font passes through instead, and only the table
 directory is rebuilt. Every table is copied unchanged except `kern`, `kerx` and `morx`,

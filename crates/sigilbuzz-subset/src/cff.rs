@@ -69,6 +69,7 @@ mod charstring;
 mod cid;
 mod emit;
 mod reader;
+mod seac;
 
 pub use charstring::{
     compute_kept_subrs, encode_int_operand, renumber_charstring, renumber_subr_call,
@@ -86,6 +87,7 @@ pub(crate) use reader::{
     private_operands, read_index_cff2, read_private_dict, walk_dict, DictEntry, OP_CHARSTRINGS,
     OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE, OP_SUBRS, OP_VSTORE,
 };
+pub(crate) use seac::SeacClosure;
 
 use charset::{extract_kept_charset_sids, extract_kept_encoding_codes};
 use cid::subset_cid_keyed;

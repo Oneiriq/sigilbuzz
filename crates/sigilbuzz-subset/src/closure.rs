@@ -22,6 +22,9 @@
 //!   marks attach optionally, and a base subset that drops its marks
 //!   simply renders without them.
 //! - **VARC components** (see [`crate::varc::varc_closure_bitset`]).
+//! - **seac components** in `CFF `: a kept glyph whose charstring ends
+//!   in the seac form of `endchar` keeps the base and accent glyphs it
+//!   draws (see [`crate::cff::SeacClosure`]).
 //!
 //! Glyph 0 (`.notdef`) is always retained: every SFNT font has one,
 //! every glyph index that fails a cmap lookup falls back to it, and
@@ -49,7 +52,7 @@ use crate::SubsetError;
 
 /// Computes the closure of `seed` over the source font's reference
 /// graph (composites, ligatures, substitutions, mark anchors, VARC
-/// components). The returned vec is sorted ascending and contains gid
+/// components, seac components). The returned vec is sorted ascending and contains gid
 /// 0 even when `seed` does not. Seed gids at or past `numGlyphs` are
 /// ignored.
 ///
@@ -76,6 +79,7 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
     // table; subsequent passes pick up second-order pull-ins (e.g. a
     // ligature whose output was itself dragged in by a composite).
     let budget = WorkBudget::new(WORK_LIMIT);
+    let mut seac = cff_seac(face);
     loop {
         // Each pass scans the whole bitset a few times.
         if !budget.spend(keep.len()) {
@@ -95,6 +99,9 @@ pub fn compute_closure(face: &Face<'_>, seed: &[u16]) -> Result<Vec<u16>, Subset
         // glyf composites do; pull them into the kept set so the
         // outline graph stays whole after subset.
         crate::varc::varc_closure_bitset(face, &mut keep, &budget);
+        if let Some(seac) = seac.as_mut() {
+            seac.expand(&mut keep);
+        }
         let after = count_kept(&keep);
         if before == after || budget.is_spent() {
             break;
@@ -175,6 +182,15 @@ fn expand_glyf_composites(
         }
     }
     Ok(())
+}
+
+/// The seac closure of `face`: for a CFF1 font whose outlines do not
+/// come from `glyf`, and that can use seac at all.
+fn cff_seac<'a>(face: &Face<'a>) -> Option<crate::cff::SeacClosure<'a>> {
+    if face.record(tag::GLYF).is_some() {
+        return None;
+    }
+    crate::cff::SeacClosure::new(face.table_bytes(tag::CFF1).ok()?)
 }
 
 /// Walks GSUB lookup type 4 (Ligature Substitution) subtables.

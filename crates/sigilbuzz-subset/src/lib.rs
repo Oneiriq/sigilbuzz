@@ -96,6 +96,8 @@
 //!
 //! For CFF and CFF2 fonts:
 //!
+//! - A kept `CFF ` glyph whose charstring ends in the seac form of
+//!   `endchar` keeps the base and accent glyphs it draws.
 //! - If every glyph survives, the font passes through and only the SFNT
 //!   directory is rebuilt. Every table is copied unchanged except
 //!   `kern`, `kerx`, and `morx`, and the layout tables (`BASE`

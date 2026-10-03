@@ -73,7 +73,11 @@ pub(super) fn extract_kept_charset_sids(
 
 /// Walks an explicit charset (format 0, 1, or 2) at `data[off..]` and
 /// returns the SIDs of gids `1..=n_left`.
-fn read_explicit_charset(data: &[u8], off: usize, n_left: usize) -> Result<Vec<u16>, SubsetError> {
+pub(super) fn read_explicit_charset(
+    data: &[u8],
+    off: usize,
+    n_left: usize,
+) -> Result<Vec<u16>, SubsetError> {
     let (&format, body) = data
         .get(off..)
         .and_then(<[u8]>::split_first)
