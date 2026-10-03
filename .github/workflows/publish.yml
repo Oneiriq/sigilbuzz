@@ -154,10 +154,12 @@ jobs:
       # (0.23.0 hit this). That, and a crate that is already up although the
       # index check above missed it, only need the index to catch up, so
       # they retry after a short wait. cargo's own check reports such a crate
-      # as "already exists", and the crates.io server, which answers when
-      # cargo's check misses it too, as "crate version `X` is already
-      # uploaded" (HTTP 400). Re-running a failed publish job resumes the
-      # same way.
+      # as "crate NAME@VERSION already exists on crates.io index", and the
+      # crates.io server, which answers when cargo's check misses it too, as
+      # "crate version `X` is already uploaded" (HTTP 400). The match keeps
+      # to those wordings, so a build failure that merely mentions something
+      # that "already exists" fails at once. Re-running a failed publish job
+      # resumes the same way.
       #
       # cargo reads the token from the environment, which keeps it off the
       # command line.
@@ -239,7 +241,7 @@ jobs:
               rate_limit_retries=$((rate_limit_retries - 1))
               echo "::notice::crates.io rate limit reached on attempt $attempt; retrying in $((rate_limit_wait / 60)) minutes"
               sleep "$rate_limit_wait"
-            elif grep -qE 'already exists|is already uploaded|due to a timeout while waiting for published dependencies' "$log"; then
+            elif grep -qE 'crate [^ ]+@[^ ]+ already exists on|is already uploaded|due to a timeout while waiting for published dependencies' "$log"; then
               if [ "$index_retries" -eq 0 ]; then
                 echo "::error::The crates.io index still lags after attempt $attempt"
                 exit 1
