@@ -26,6 +26,7 @@ pub use context::{
 pub use coverage::Coverage;
 pub use device::{DeviceOrVariationIndex, VARIATION_INDEX_DELTA_FORMAT};
 pub use feature_list::{Feature, FeatureList};
+pub(crate) use feature_variations::ActiveFeatures;
 pub use feature_variations::{
     Condition, ConditionList, ConditionSet, FeatureTableSubstitution, FeatureVariations, Negation,
 };

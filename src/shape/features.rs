@@ -445,7 +445,7 @@ fn lookup_indices_for_feature_in_scripts(
 ) -> Option<Vec<u16>> {
     crate::ot::layout_select::feature_lookup_indices(
         gsub.script_list(),
-        gsub.feature_list(),
+        &gsub.features(),
         gsub.language_tags(),
         tag,
         script_priority,

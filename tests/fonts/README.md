@@ -126,6 +126,16 @@ sigilbuzz ships the files unmodified. The OFL text lives in the upstream reposit
   "uni1101"})])` from `fontTools.otlLib.builder` to the GSUB lookup list and add its
   index to every `calt` feature.
 
+- `NotoSansKR-Palt-Subset.ttf`. A 24 KB subset of the Noto Sans Korean variable font,
+  axes and all, for `tests/feature_variations_gpos_parity.rs`. Its GPOS is version 1.1,
+  with one FeatureVariations record that gives `palt` and `vpal` an extra lookup from
+  `wght` 0.77899 (normalized) on. It keeps the space, U+3001, U+3002, U+300C, U+300D,
+  five hiragana, seven katakana, and U+FF01, U+FF08, U+FF09, and U+FF1F. Same upstream
+  and license as `NotoSansKR-HangulTone-Subset.ttf`. Built with this repository's
+  subsetter, which keeps and remaps the FeatureVariations:
+
+      cargo run -p sigilbuzz-cli --release -- subset 'NotoSansKR[wght].ttf'           NotoSansKR-Palt-Subset.ttf           --unicodes="U+0020,U+3001,U+3002,U+300C,U+300D,U+3042,U+3044,U+3046,U+3048,U+304A,U+30AB,U+30BF,U+30CA,U+30C6,U+30B9,U+30C8,U+FF08,U+FF09,U+FF01,U+FF1F"
+
 - `NotoSansDevanagari-NoGDEF-Subset.ttf`. A 2 KB subset of
   `NotoSansDevanagari-Regular.ttf` above without its GDEF table, for
   `tests/vowel_constraints_parity.rs`: with no GDEF glyph classes, HarfBuzz synthesizes

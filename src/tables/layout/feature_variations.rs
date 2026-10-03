@@ -86,7 +86,7 @@
 //! or GPOS.
 
 use crate::error::{Error, Result};
-use crate::tables::layout::Feature;
+use crate::tables::layout::{Feature, FeatureList};
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
 use alloc::vec::Vec;
@@ -779,6 +779,59 @@ pub(crate) fn locate<'a>(
             context,
         })?;
     FeatureVariations::parse(data).map(Some)
+}
+
+/// The record of `variations` that applies at the normalized
+/// coordinates `coords` with GDEF's ItemVariationStore `store`, with
+/// the table, ready for [`ActiveFeatures::with_variation`].
+pub(crate) fn select<'a>(
+    variations: Option<FeatureVariations<'a>>,
+    coords: &[f32],
+    store: Option<&ItemVariationStore<'_>>,
+) -> Option<(FeatureVariations<'a>, u32)> {
+    let variations = variations?;
+    Some((variations, variations.find_index(coords, store)?))
+}
+
+/// A table's FeatureList as the FeatureVariations record the shaper
+/// selected changes it: a substituted feature keeps its tag and takes
+/// its lookups from the record's alternate Feature table.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ActiveFeatures<'a> {
+    list: FeatureList<'a>,
+    variation: Option<(FeatureVariations<'a>, u32)>,
+}
+
+impl<'a> ActiveFeatures<'a> {
+    /// `list` with the substitutions of record `record` of `variations`
+    /// when `variation` is `Some((variations, record))`.
+    pub(crate) const fn new(
+        list: FeatureList<'a>,
+        variation: Option<(FeatureVariations<'a>, u32)>,
+    ) -> Self {
+        Self { list, variation }
+    }
+
+    /// Feature `index` as `(tag, Feature)`: the FeatureList's tag and
+    /// the substituted Feature table if there is one, the FeatureList's
+    /// otherwise. `None` when the index is out of range or the
+    /// FeatureList's table for it cannot be read.
+    pub(crate) fn get(&self, index: u16) -> Option<([u8; 4], Feature<'a>)> {
+        let tag = self.list.tag(index)?;
+        if let Some(feature) = self
+            .variation
+            .and_then(|(variations, record)| variations.substitute(record, index))
+        {
+            return Some((tag, feature));
+        }
+        self.list.get(index)
+    }
+
+    /// Index of the first feature record tagged `tag`, as HarfBuzz's
+    /// `find_feature_index` scans the FeatureList.
+    pub(crate) fn find(&self, tag: [u8; 4]) -> Option<u16> {
+        (0..self.list.len()).find(|&i| self.list.tag(i) == Some(tag))
+    }
 }
 
 /// The coordinates one evaluation reads, and the store for value

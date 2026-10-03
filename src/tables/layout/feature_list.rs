@@ -73,6 +73,14 @@ impl<'a> FeatureList<'a> {
             .map(|f| (tag, f))
     }
 
+    /// The tag of the feature record at `index`, or `None` if the index
+    /// is out of range. Unlike [`Self::get`], this does not read the
+    /// Feature table, so it answers for a record whose table is damaged.
+    #[must_use]
+    pub(crate) fn tag(&self, index: u16) -> Option<[u8; 4]> {
+        (index < self.feature_count).then(|| self.record_at(index).0)
+    }
+
     /// Iterates `(tag, Feature)` pairs in record order.
     // The iterator yields owned `(tag, Feature)` values and the list is
     // `Copy`, so an `IntoIterator for &FeatureList` impl would add API

@@ -719,6 +719,47 @@ fn rejects_runaway_shared_subtrees() {
 }
 
 #[test]
+fn active_features_substitute_by_index() {
+    // FeatureList: 0 = liga [1], 1 = rvrn [], 2 = rvrn [2].
+    let mut list = Vec::new();
+    list.extend_from_slice(&3u16.to_be_bytes());
+    let bodies: [(&[u8; 4], &[u16]); 3] = [(b"liga", &[1]), (b"rvrn", &[]), (b"rvrn", &[2])];
+    list.resize(2 + 6 * bodies.len(), 0);
+    for (i, (tag, indices)) in bodies.iter().enumerate() {
+        let offset = list.len() as u16;
+        list[2 + 6 * i..6 + 6 * i].copy_from_slice(*tag);
+        list[6 + 6 * i..8 + 6 * i].copy_from_slice(&offset.to_be_bytes());
+        list.extend_from_slice(&0u16.to_be_bytes());
+        list.extend_from_slice(&(indices.len() as u16).to_be_bytes());
+        for l in *indices {
+            list.extend_from_slice(&l.to_be_bytes());
+        }
+    }
+    let list = FeatureList::parse(&list).unwrap();
+    let bytes = fv_bytes(&[record(&[], subst(&[(1, &[7]), (5, &[8])]))]);
+    let fv = FeatureVariations::parse(&bytes).unwrap();
+    let get = |features: &ActiveFeatures<'_>, index| {
+        features
+            .get(index)
+            .map(|(tag, f)| (tag, f.lookup_indices().collect::<Vec<_>>()))
+    };
+    let plain = ActiveFeatures::new(list, None);
+    assert_eq!(get(&plain, 1), Some((*b"rvrn", vec![])));
+    let active = ActiveFeatures::new(list, Some((fv, 0)));
+    assert_eq!(get(&active, 0), Some((*b"liga", vec![1])));
+    assert_eq!(get(&active, 1), Some((*b"rvrn", vec![7])));
+    assert_eq!(get(&active, 2), Some((*b"rvrn", vec![2])));
+    // A substitution for a feature the list does not have is ignored.
+    assert_eq!(get(&active, 5), None);
+    assert_eq!(active.find(*b"rvrn"), Some(1));
+    assert_eq!(active.find(*b"liga"), Some(0));
+    assert_eq!(active.find(*b"kern"), None);
+    // A record past the end substitutes nothing.
+    let past = ActiveFeatures::new(list, Some((fv, 1)));
+    assert_eq!(get(&past, 1), Some((*b"rvrn", vec![])));
+}
+
+#[test]
 fn locate_reads_the_offset_from_the_table() {
     let fv = fv_bytes(&[record(&[], subst(&[]))]);
     let mut table = vec![0u8; 14];
@@ -733,4 +774,7 @@ fn locate_reads_the_offset_from_the_table() {
         }
     );
     assert!(locate(&table, table.len() as u32, "ctx").is_err());
+    let found = locate(&table, 14, "ctx").unwrap();
+    assert_eq!(select(found, &[], None).map(|(_, r)| r), Some(0));
+    assert!(select(None, &[], None).is_none());
 }

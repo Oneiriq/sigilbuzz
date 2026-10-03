@@ -14,7 +14,9 @@
 //! subtables are parsed.
 
 use crate::error::{Error, Result};
-use crate::tables::layout::{FeatureList, FeatureVariations, LookupList, ScriptList};
+use crate::tables::layout::{
+    ActiveFeatures, FeatureList, FeatureVariations, LookupList, ScriptList,
+};
 use crate::tables::parse::Reader;
 
 pub mod anchor;
@@ -72,6 +74,10 @@ pub struct Gpos<'a> {
     lookup_list: LookupList<'a>,
     /// `featureVariationsOffset` (version 1.1 and later), 0 for none.
     feature_variations_offset: u32,
+    /// The FeatureVariations and the record of them the shaper selected
+    /// for the font's coordinates, whose substitutions every feature
+    /// lookup sees.
+    feature_variation: Option<(FeatureVariations<'a>, u32)>,
     /// Language system tags the shaper tries, in order, when it
     /// resolves a feature through this view. Empty selects each
     /// script's default language system.
@@ -124,6 +130,7 @@ impl<'a> Gpos<'a> {
             feature_list,
             lookup_list,
             feature_variations_offset,
+            feature_variation: None,
             language_tags: &[],
         })
     }
@@ -133,6 +140,10 @@ impl<'a> Gpos<'a> {
     /// count from the start of the FeatureVariations table, except for
     /// an offset past the end of the GPOS, which reports the offset
     /// field.
+    ///
+    /// The shaper treats a font whose FeatureVariations fail to parse as
+    /// having no GPOS at all, as HarfBuzz 14.5.0 does (see
+    /// [`crate::tables::layout::feature_variations`]).
     ///
     /// # Errors
     ///
@@ -157,6 +168,26 @@ impl<'a> Gpos<'a> {
             self.feature_variations_offset,
             "GPOS featureVariations offset past end",
         )
+    }
+
+    /// Returns this view with `variation`, the table's FeatureVariations
+    /// and the index of the record that applies (see
+    /// [`FeatureVariations::find_index`]), selected: every feature the
+    /// record substitutes takes its lookups from the record's alternate
+    /// Feature table. `None` selects no record.
+    #[must_use]
+    pub(crate) const fn with_feature_variation(
+        mut self,
+        variation: Option<(FeatureVariations<'a>, u32)>,
+    ) -> Self {
+        self.feature_variation = variation;
+        self
+    }
+
+    /// The FeatureList as the shaper sees it: with the substitutions of
+    /// the record [`Self::with_feature_variation`] selected, if any.
+    pub(crate) const fn features(&self) -> ActiveFeatures<'a> {
+        ActiveFeatures::new(self.feature_list, self.feature_variation)
     }
 
     /// Returns this view with a language system preference: the

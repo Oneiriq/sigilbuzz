@@ -140,7 +140,7 @@ pub(super) fn apply_unscheduled(
     }
     let Some((tag, lookups)) = crate::ot::layout_select::required_feature(
         gsub.script_list(),
-        gsub.feature_list(),
+        &gsub.features(),
         gsub.language_tags(),
         script_priority,
     ) else {

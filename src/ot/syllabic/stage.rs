@@ -132,7 +132,7 @@ pub(crate) fn feature_lookups(
     let gsub = runner.gsub();
     crate::ot::layout_select::feature_lookup_indices(
         gsub.script_list(),
-        gsub.feature_list(),
+        &gsub.features(),
         gsub.language_tags(),
         tag,
         script_priority,
