@@ -9,12 +9,11 @@
 //! when the font cannot position them. The values here follow the
 //! shaper descriptors of HarfBuzz 14.5.0 (`hb-ot-shaper-*.cc`).
 //!
-//! HarfBuzz sends the Indic scripts to the default shaper when the font
-//! only has `DFLT` or `latn` lookups, and Myanmar also when it only has
-//! the pre-spec `mymr` tag; sigilbuzz runs its Indic and Myanmar shapers
-//! regardless, so those scripts always map to their own shaper here.
-//! The scripts of the Universal Shaping Engine go to the default shaper
-//! in such a font, as in HarfBuzz ([`Shaper::for_run`]).
+//! HarfBuzz sends the Indic scripts and the scripts of the Universal
+//! Shaping Engine to the default shaper when the script tag the font's
+//! GSUB picks is `DFLT`, `dflt`, or `latn`, and Myanmar also when it is
+//! the pre-spec `mymr` tag. [`Shaper::for_script`] maps a script to its
+//! own shaper, and [`Shaper::for_run`] makes that choice for a font.
 
 use crate::tables::Gsub;
 use crate::unicode::Script;

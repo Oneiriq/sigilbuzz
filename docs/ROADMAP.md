@@ -47,8 +47,6 @@ These are smaller pieces that are not scheduled yet.
 Found during the 0.22.0 hardening review. Each fix changes output for some valid
 fonts, so they are left for a release that can call that out.
 
-- CFF2 FDSelect format 4 truncates font DICT indexes to 8 bits, so a font with more
-  than 256 font DICTs uses the wrong local subroutines.
 - Progressive JPEG images in `sbix` decode their AC coefficients through the zigzag
   table twice.
 - VARC: child components get empty axis coordinates where they should inherit the
