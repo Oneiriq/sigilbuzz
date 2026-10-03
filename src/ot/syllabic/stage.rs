@@ -140,15 +140,29 @@ pub(crate) fn feature_lookups(
     .unwrap_or_default()
 }
 
-/// True when the font has lookups for `tag` and the caller did not
-/// turn it off: HarfBuzz gives such a feature a mask bit.
+/// True when the language system the run selects lists `tag` and the
+/// caller did not turn it off: HarfBuzz's feature map then has the
+/// feature and gives it a mask bit (`hb_ot_map_builder_t::compile`).
+///
+/// Presence is what counts, not lookups: a FeatureVariations record
+/// that leaves the feature without lookups keeps its bit, and a
+/// required feature with the tag gives it none, as HarfBuzz looks a
+/// feature up in the language system's feature list alone.
 pub(crate) fn has_feature(
     runner: &SyllabicGsub<'_>,
     features: &[Feature],
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> bool {
-    !user_disabled(features, tag) && !feature_lookups(runner, tag, script_priority).is_empty()
+    let gsub = runner.gsub();
+    !user_disabled(features, tag)
+        && crate::ot::layout_select::lists_feature(
+            gsub.script_list(),
+            &gsub.features(),
+            gsub.language_tags(),
+            tag,
+            script_priority,
+        )
 }
 
 /// Adds the caller's features to a shaper's last stage, where HarfBuzz
@@ -209,6 +223,72 @@ struct StageLookup {
     per_syllable: bool,
 }
 
+/// The lookups of a stage of `features` (those the caller did not turn
+/// off with `user`), merged by lookup index and sorted, as
+/// `hb_ot_map_builder_t::compile` builds a stage.
+///
+/// Each feature adds the lookups its listed feature has, with its mask
+/// and flags. When a feature of the stage has the tag of the language
+/// system's required feature, the stage runs the required feature too,
+/// ahead of the others, on every glyph, with automatic joiner handling
+/// and across syllables, as HarfBuzz adds it with the global mask and
+/// default flags. A lookup several of them share applies where any of
+/// their masks is on, skips joiners only where all of them do, and
+/// matches per syllable as the first of them that has it says.
+fn stage_lookups(
+    runner: &SyllabicGsub<'_>,
+    script_priority: &[[u8; 4]],
+    features: &[StageFeature],
+    user: &[Feature],
+) -> Vec<StageLookup> {
+    let gsub = runner.gsub();
+    let active = gsub.features();
+    let enabled = || features.iter().filter(|f| !user_disabled(user, f.tag));
+    let required = crate::ot::layout_select::required_feature(
+        gsub.script_list(),
+        &active,
+        gsub.language_tags(),
+        script_priority,
+    )
+    .filter(|(tag, _)| enabled().any(|f| f.tag == *tag))
+    .map(|(_, indices)| indices)
+    .unwrap_or_default();
+    let mut lookups: Vec<StageLookup> = Vec::new();
+    let mut add = |index: u16, mask: u32, joiners: Joiners, per_syllable: bool| match lookups
+        .iter_mut()
+        .find(|l| l.index == index)
+    {
+        Some(l) => {
+            l.mask |= mask;
+            l.joiners = l.joiners.and(joiners);
+        }
+        None => lookups.push(StageLookup {
+            index,
+            mask,
+            joiners,
+            per_syllable,
+        }),
+    };
+    for index in required {
+        add(index, GLOBAL_MASK, Joiners::AUTO, false);
+    }
+    for f in enabled() {
+        let listed = crate::ot::layout_select::listed_feature_lookups(
+            gsub.script_list(),
+            &active,
+            gsub.language_tags(),
+            f.tag,
+            script_priority,
+        );
+        let per_syllable = f.flags.contains(FeatureFlags::PER_SYLLABLE);
+        for index in listed {
+            add(index, f.mask, f.flags.joiners(), per_syllable);
+        }
+    }
+    lookups.sort_unstable_by_key(|l| l.index);
+    lookups
+}
+
 /// A glyph's side-table entry for the length of a stage.
 #[derive(Debug, Clone, Copy)]
 struct Slot {
@@ -240,11 +320,12 @@ fn slot_of(g: &Glyph) -> usize {
 }
 
 /// Runs one stage: the lookups of `features` (those the caller did not
-/// turn off with `user`) merged by lookup index, each at the glyphs
-/// whose info mask meets its features' masks and, for per-syllable
-/// features, inside each syllable. `info` has one entry per glyph and
-/// stays aligned with the glyphs. Glyphs a substitution touched get
-/// [`GlyphInfo::substituted`].
+/// turn off with `user`), and of the required feature when one of them
+/// has its tag, merged by lookup index (see [`stage_lookups`]), each at
+/// the glyphs whose info mask meets its features' masks and, for
+/// per-syllable features, inside each syllable. `info` has one entry
+/// per glyph and stays aligned with the glyphs. Glyphs a substitution
+/// touched get [`GlyphInfo::substituted`].
 pub(crate) fn apply_stage(
     runner: &mut SyllabicGsub<'_>,
     script_priority: &[[u8; 4]],
@@ -256,31 +337,10 @@ pub(crate) fn apply_stage(
     if glyphs.len() != info.len() || glyphs.is_empty() || glyphs.len() > MAX_SLOTS {
         return;
     }
-    let mut lookups: Vec<StageLookup> = Vec::new();
-    for f in features {
-        if user_disabled(user, f.tag) {
-            continue;
-        }
-        let joiners = f.flags.joiners();
-        for index in feature_lookups(runner, f.tag, script_priority) {
-            match lookups.iter_mut().find(|l| l.index == index) {
-                Some(l) => {
-                    l.mask |= f.mask;
-                    l.joiners = l.joiners.and(joiners);
-                }
-                None => lookups.push(StageLookup {
-                    index,
-                    mask: f.mask,
-                    joiners,
-                    per_syllable: f.flags.contains(FeatureFlags::PER_SYLLABLE),
-                }),
-            }
-        }
-    }
+    let lookups = stage_lookups(runner, script_priority, features, user);
     if lookups.is_empty() {
         return;
     }
-    lookups.sort_unstable_by_key(|l| l.index);
 
     let mut slots: Vec<Slot> = glyphs
         .iter_mut()

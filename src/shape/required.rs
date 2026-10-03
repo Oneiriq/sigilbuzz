@@ -16,13 +16,15 @@
 //! enabled, so the required feature still runs, in stage 0.
 //!
 //! sigilbuzz merges a required feature into its tag's lookups in
-//! [`crate::ot::layout_select`], which covers the first case, and a
-//! required `rvrn` with it. Before a segment's first GSUB lookup,
-//! [`apply_stage_zero`] runs `rvrn` unless the caller turned it off,
-//! and the required feature when no pass of the segment's pipeline
-//! will apply its tag, as one stage: each lookup once, in lookup-index
-//! order. A value the caller gives `rvrn` picks the alternate of an
-//! AlternateSubst lookup, as it would for any other feature.
+//! [`crate::ot::layout_select`], which covers the first case. Before a
+//! segment's first GSUB lookup, [`apply_stage_zero`] runs `rvrn` unless
+//! the caller turned it off, and the required feature when no pass of
+//! the segment's pipeline will apply its tag or its tag is `rvrn`, as
+//! one stage: each lookup once, in lookup-index order. A value the
+//! caller gives `rvrn` picks the alternate of an AlternateSubst lookup,
+//! as it would for any other feature, except in a lookup `rvrn` shares
+//! with the required feature. There a value above 1 picks no alternate
+//! at all, as in HarfBuzz (see [`stage_zero_alternate`]).
 //!
 //! HarfBuzz enables `rvrn` in GPOS too, where it joins the one GPOS
 //! stage with the other features (see [`super::gpos`]).
@@ -61,11 +63,17 @@ const ARABIC_FEATURES: &[&[u8; 4]] = &[
 /// `locl` and `ccmp`, which the Indic shaper runs first.
 const LOCL_CCMP: &[&[u8; 4]] = &[b"locl", b"ccmp"];
 
-/// The tags this module counts as applied for Khmer.
+/// The tags the Khmer shaper applies: `locl` and `ccmp`, then
+/// HarfBuzz's `khmer_features` ([`crate::ot::khmer::KHMER_FEATURES`]).
 const KHMER_TAGS: &[&[u8; 4]] = &[
-    b"locl", b"ccmp", b"nukt", b"akhn", b"rphf", b"pref", b"rkrf", b"abvf", b"blwf", b"half",
-    b"pstf", b"vatu", b"cjct", b"abvs", b"blws", b"haln", b"pres", b"psts",
+    b"locl", b"ccmp", b"pref", b"blwf", b"abvf", b"pstf", b"cfar", b"pres", b"abvs", b"blws",
+    b"psts",
 ];
+
+/// `liga`, which HarfBuzz's Indic and Khmer shapers turn off after the
+/// caller's features (`override_features_indic`,
+/// `override_features_khmer`), so it is off whatever the caller asks.
+const LIGA: [u8; 4] = *b"liga";
 
 /// What decides the GSUB tags one segment's pipeline applies.
 pub(super) struct SegmentPlan<'a> {
@@ -93,16 +101,22 @@ pub(super) struct SegmentPlan<'a> {
 
 impl SegmentPlan<'_> {
     /// Feature lists of the complex shaper that runs for the segment,
-    /// mirroring the dispatch in [`super::shape`]. Complex shapers
-    /// apply their features whatever the caller's overrides say.
-    fn shaper_features(&self) -> &'static [&'static [&'static [u8; 4]]] {
+    /// mirroring the dispatch in [`super::shape`], and whether that
+    /// shaper leaves out a feature the caller turned off. The
+    /// syllable-based shapers do (`apply_stage` in
+    /// [`crate::ot::syllabic::stage`]), as HarfBuzz's map drops a
+    /// feature whose value is 0. The Arabic joining forms always run.
+    fn shaper_features(&self) -> (&'static [&'static [&'static [u8; 4]]], bool) {
         if self.use_shaper {
-            return &[USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES];
+            return (&[USE_BASIC_FEATURES, USE_TOPOGRAPHICAL_FEATURES], true);
         }
         let dominant = self.dominant == Some(self.script);
         match self.script {
-            Script::Khmer => &[KHMER_TAGS],
-            Script::Myanmar => &[MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES],
+            Script::Khmer => (&[KHMER_TAGS], true),
+            Script::Myanmar => (
+                &[MYANMAR_BASIC_FEATURES, MYANMAR_TOPOGRAPHICAL_FEATURES],
+                true,
+            ),
             Script::Hangul
                 if dominant
                     && self
@@ -110,10 +124,10 @@ impl SegmentPlan<'_> {
                         .iter()
                         .any(|&c| crate::unicode::is_hangul_jamo(c)) =>
             {
-                &[HANGUL_FEATURES]
+                (&[HANGUL_FEATURES], true)
             }
-            _ if self.arabic => &[ARABIC_FEATURES],
-            _ => &[],
+            _ if self.arabic => (&[ARABIC_FEATURES], false),
+            _ => (&[], false),
         }
     }
 
@@ -124,7 +138,11 @@ impl SegmentPlan<'_> {
         let indic = !self.use_shaper
             && indic_config_for(self.script).is_some_and(|c| c.script != Script::Sinhala);
         if indic && (LOCL_CCMP.contains(&&tag) || INDIC_FEATURES.iter().any(|f| f.tag == tag)) {
-            return true;
+            return !feature_disabled(self.features, tag);
+        }
+        let khmer = !self.use_shaper && self.script == Script::Khmer;
+        if tag == LIGA && (indic || khmer) {
+            return false;
         }
         let default = DEFAULT_CHAIN.contains(&tag)
             || tag == RVRN
@@ -137,17 +155,17 @@ impl SegmentPlan<'_> {
         if self.features.iter().any(|f| f.tag == tag && f.value != 0) {
             return true;
         }
-        self.shaper_features()
-            .iter()
-            .any(|list| list.iter().any(|t| **t == tag))
+        let (lists, honors_overrides) = self.shaper_features();
+        lists.iter().any(|list| list.iter().any(|t| **t == tag))
+            && !(honors_overrides && feature_disabled(self.features, tag))
     }
 }
 
 /// Runs GSUB stage 0 of the segment: `rvrn` unless the caller turned
 /// it off, and the required feature of the language system the segment
-/// selects when its tag is one `plan` never applies. Call before the
-/// segment's first GSUB lookup. The lookups spend `budget`, the one
-/// the whole [`super::shape`] call shares.
+/// selects when its tag is `rvrn` or one `plan` never applies. Call
+/// before the segment's first GSUB lookup. The lookups spend `budget`,
+/// the one the whole [`super::shape`] call shares.
 pub(super) fn apply_stage_zero(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -160,49 +178,73 @@ pub(super) fn apply_stage_zero(
         return;
     }
     let features = gsub.features();
+    // A required `rvrn` runs here too, in the stage of its tag.
     let required = crate::ot::layout_select::required_feature(
         gsub.script_list(),
         &features,
         gsub.language_tags(),
         script_priority,
     )
-    .filter(|&(tag, _)| !plan.applies(tag))
+    .filter(|&(tag, _)| tag == RVRN || !plan.applies(tag))
     .map(|(_, lookups)| lookups)
     .unwrap_or_default();
     let rvrn = if feature_disabled(plan.features, RVRN) {
         Vec::new()
     } else {
-        crate::ot::layout_select::feature_lookup_indices(
+        crate::ot::layout_select::listed_feature_lookups(
             gsub.script_list(),
             &features,
             gsub.language_tags(),
             RVRN,
             script_priority,
         )
-        .unwrap_or_default()
     };
     if required.is_empty() && rvrn.is_empty() {
         return;
     }
-    // The caller's `rvrn` value picks the glyph an AlternateSubst lookup
-    // of `rvrn` substitutes, 1 for the first alternate, as for any
-    // feature. The required feature always picks the first.
     let rvrn_alternate = rvrn_alternate(plan.features);
     let mut stage: Vec<StageLookup> = required
-        .into_iter()
-        .filter(|index| !rvrn.contains(index))
-        .map(|index| (index, 0))
-        .chain(rvrn.iter().map(|&index| (index, rvrn_alternate)))
-        .map(|(index, alternate)| StageLookup {
+        .iter()
+        .chain(rvrn.iter().filter(|index| !required.contains(index)))
+        .map(|&index| StageLookup {
             index,
             flags: FeatureFlags::AUTO,
-            alternate,
+            alternate: stage_zero_alternate(
+                required.contains(&index),
+                rvrn.contains(&index),
+                rvrn_alternate,
+            ),
             masked: false,
         })
         .collect();
     stage.sort_unstable_by_key(|l| l.index);
     apply_gsub_stage(gsub, &stage, glyphs, gdef, None, budget);
 }
+
+/// The alternate an AlternateSubst lookup of stage 0 picks, given
+/// whether the required feature and `rvrn` have it: `rvrn_alternate`
+/// (see [`rvrn_alternate`]) for a lookup of `rvrn` alone, the first
+/// alternate for one of the required feature alone, and none for one
+/// they share while the caller picks an alternate past the first.
+///
+/// HarfBuzz runs the required feature with the global mask bit, and
+/// `rvrn` with it too unless the caller gives `rvrn` a value above 1,
+/// which takes mask bits of its own. A lookup the two share runs once
+/// with both masks OR-ed together, and AlternateSubst reads its
+/// alternate index from that mask from `rvrn`'s lowest bit up, the
+/// global bit included. The index then overruns the alternate set, so
+/// the lookup substitutes nothing.
+fn stage_zero_alternate(in_required: bool, in_rvrn: bool, rvrn_alternate: u16) -> u16 {
+    match (in_required, in_rvrn) {
+        (true, true) if rvrn_alternate > 0 => NO_ALTERNATE,
+        (true, _) => 0,
+        (false, _) => rvrn_alternate,
+    }
+}
+
+/// An alternate index past every AlternateSet, which holds at most
+/// 65,535 glyphs, so the lookup substitutes nothing.
+const NO_ALTERNATE: u16 = u16::MAX;
 
 /// The alternate an AlternateSubst lookup of `rvrn` picks: the last
 /// value the caller gave `rvrn`, less 1, and the first alternate when
@@ -289,6 +331,20 @@ mod tests {
     }
 
     #[test]
+    fn a_lookup_shared_with_the_required_feature_takes_no_later_alternate() {
+        // `rvrn` alone: the caller's alternate.
+        assert_eq!(stage_zero_alternate(false, true, 0), 0);
+        assert_eq!(stage_zero_alternate(false, true, 2), 2);
+        // The required feature alone: the first alternate.
+        assert_eq!(stage_zero_alternate(true, false, 0), 0);
+        assert_eq!(stage_zero_alternate(true, false, 2), 0);
+        // Both: the first alternate, or none past it.
+        assert_eq!(stage_zero_alternate(true, true, 0), 0);
+        assert_eq!(stage_zero_alternate(true, true, 1), NO_ALTERNATE);
+        assert_eq!(stage_zero_alternate(true, true, u16::MAX), NO_ALTERNATE);
+    }
+
+    #[test]
     fn complex_shaper_tags_apply() {
         assert!(plan(Script::Arabic, &[], &[]).applies(*b"init"));
         assert!(plan(Script::Devanagari, &[], &[]).applies(*b"rphf"));
@@ -307,12 +363,56 @@ mod tests {
         // The Hangul shaper only runs for jamo.
         assert!(!plan(Script::Hangul, &[], &['\u{AC00}']).applies(*b"ljmo"));
         assert!(plan(Script::Hangul, &[], &['\u{1100}']).applies(*b"ljmo"));
-        // Complex shapers ignore the caller's overrides.
-        let off = [Feature {
-            tag: *b"locl",
+    }
+
+    #[test]
+    fn the_syllabic_shapers_leave_out_what_the_caller_turns_off() {
+        // HarfBuzz's map drops a feature whose value is 0, so a required
+        // feature with its tag runs in stage 0.
+        let off = |tag: &[u8; 4]| Feature {
+            tag: *tag,
             value: 0,
+        };
+        let locl_off = [off(b"locl")];
+        assert!(!plan(Script::Devanagari, &locl_off, &[]).applies(*b"locl"));
+        assert!(!plan(Script::Latin, &locl_off, &[]).applies(*b"locl"));
+        assert!(!plan(Script::Devanagari, &[off(b"rphf")], &[]).applies(*b"rphf"));
+        assert!(!plan(Script::Khmer, &[off(b"cfar")], &[]).applies(*b"cfar"));
+        assert!(!plan(Script::Sinhala, &[off(b"rphf")], &[]).applies(*b"rphf"));
+        assert!(!plan(Script::Myanmar, &[off(b"pref")], &[]).applies(*b"pref"));
+        let jamo = ['\u{1100}'];
+        assert!(!plan(Script::Hangul, &[off(b"ljmo")], &jamo).applies(*b"ljmo"));
+        // The Arabic joining forms run whatever the caller says.
+        assert!(plan(Script::Arabic, &[off(b"init")], &[]).applies(*b"init"));
+    }
+
+    #[test]
+    fn khmer_applies_harfbuzz_khmer_features() {
+        let khmer = plan(Script::Khmer, &[], &[]);
+        for tag in [b"locl", b"ccmp", b"pstf", b"cfar", b"psts"] {
+            assert!(khmer.applies(*tag), "{tag:?}");
+        }
+        // Indic features HarfBuzz's Khmer shaper does not have.
+        for tag in [b"rphf", b"half", b"akhn", b"nukt"] {
+            assert!(!khmer.applies(*tag), "{tag:?}");
+        }
+        let tags: Vec<[u8; 4]> = KHMER_TAGS.iter().map(|t| **t).collect();
+        let mut expected = alloc::vec![*b"locl", *b"ccmp"];
+        expected.extend(crate::ot::khmer::KHMER_FEATURES.iter().map(|f| f.tag));
+        assert_eq!(tags, expected);
+    }
+
+    #[test]
+    fn indic_and_khmer_never_apply_liga() {
+        let on = [Feature {
+            tag: LIGA,
+            value: 1,
         }];
-        assert!(plan(Script::Devanagari, &off, &[]).applies(*b"locl"));
-        assert!(!plan(Script::Latin, &off, &[]).applies(*b"locl"));
+        for script in [Script::Devanagari, Script::Khmer] {
+            assert!(!plan(script, &[], &[]).applies(LIGA), "{script:?}");
+            assert!(!plan(script, &on, &[]).applies(LIGA), "{script:?}");
+        }
+        assert!(plan(Script::Sinhala, &[], &[]).applies(LIGA));
+        assert!(plan(Script::Myanmar, &[], &[]).applies(LIGA));
     }
 }
