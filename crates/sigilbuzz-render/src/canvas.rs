@@ -22,21 +22,29 @@
 //!   Gradients are sampled by mapping each pixel center back into paint
 //!   space, so they are exact under any transform.
 //!
+//! Each clip also keeps the rectangle outside which its coverage is
+//! zero. A clip outline is rasterized only inside its enclosing clip's
+//! rectangle, and fills and mask products visit only the current
+//! clip's rectangle, so a layer costs what it covers rather than the
+//! whole canvas. Skipped pixels would come out unchanged, so the
+//! output is the same either way.
+//!
 //! Hostile paint graphs are bounded three ways. Every clip outline
-//! draws from one shared segment budget. Every canvas-sized pass (a
-//! clip mask, a fill, a group, or a group composite) draws its pixel
-//! count from a work budget. The live clip masks and layers share a
-//! memory budget. Running out of work or memory fails the render.
+//! draws from one shared segment budget. Every pass (a clip mask, a
+//! fill, a group, or a group composite) draws the canvas's pixel count
+//! from a work budget, however few pixels it visits. The live clip
+//! masks and layers share a memory budget. Running out of work or
+//! memory fails the render.
 
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::PathOp;
 use sigilbuzz::Face;
 use sigilbuzz_paint::walk::{ColorLineRef, ColorRef, PaintSink, Resolver, RootClip};
-use sigilbuzz_paint::{CompositeMode, Extend, GradientKind, Transform2D};
+use sigilbuzz_paint::{CompositeMode, GradientKind, Transform2D};
 
 use crate::affine::Affine;
-use crate::colrv1::{composite_layer, mul_alpha, sample_gradient, to_premul};
+use crate::colrv1::{composite_layer, mul_alpha, to_premul, PreparedGradient};
 use crate::flatten::{flatten_limited, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap, Placement};
 use crate::raster::{rasterize_in, Window};
@@ -69,6 +77,44 @@ struct Canvas {
     origin_y: i32,
 }
 
+/// One pushed clip: its coverage of the canvas, canvas-sized, and the
+/// canvas rectangle outside which that coverage is zero. Every pass
+/// over a clip visits only its rectangle; the pixels outside it would
+/// leave the result unchanged.
+struct Clip {
+    mask: Pixmap,
+    rect: Window,
+}
+
+/// The empty rectangle.
+const NO_PIXELS: Window = Window {
+    x0: 0,
+    y0: 0,
+    x1: 0,
+    y1: 0,
+};
+
+impl Clip {
+    /// A clip that paints nothing: no canvas, or a spent budget.
+    fn empty() -> Self {
+        Self {
+            mask: Pixmap::new(0, 0),
+            rect: NO_PIXELS,
+        }
+    }
+}
+
+/// `a` intersected with `b`; empty when they do not overlap.
+fn intersect(a: Window, b: Window) -> Window {
+    let (x0, y0) = (a.x0.max(b.x0), a.y0.max(b.y0));
+    let (x1, y1) = (a.x1.min(b.x1), a.y1.min(b.y1));
+    if x0 < x1 && y0 < y1 {
+        Window { x0, y0, x1, y1 }
+    } else {
+        NO_PIXELS
+    }
+}
+
 /// Rasterizes one COLRv1 glyph walk.
 pub(crate) struct RasterSink<'f, 'a, 'c, 'r> {
     face: &'f Face<'a>,
@@ -90,8 +136,8 @@ pub(crate) struct RasterSink<'f, 'a, 'c, 'r> {
     skipped_groups: u32,
     /// Paint space to design units.
     transforms: Vec<Transform2D>,
-    /// Effective clip coverage per pushed clip, canvas-sized.
-    clips: Vec<Pixmap>,
+    /// Effective clip coverage per pushed clip.
+    clips: Vec<Clip>,
     /// Layer stack; the bottom layer is the output.
     layers: Vec<ColorPixmap>,
 }
@@ -193,7 +239,7 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
         let live: u64 = self
             .clips
             .iter()
-            .map(|m| m.data.len() as u64)
+            .map(|c| c.mask.data.len() as u64)
             .chain(self.layers.iter().map(|l| l.data.len() as u64))
             .sum();
         if live.saturating_add(bytes) > MAX_LIVE_BYTES {
@@ -205,7 +251,7 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
 
     /// Coverage of `ops` (in paint space) on the canvas, or `None` when
     /// the pass or memory budget is spent.
-    fn coverage(&mut self, canvas: Canvas, ops: &[PathOp]) -> Option<Pixmap> {
+    fn coverage(&mut self, canvas: Canvas, ops: &[PathOp]) -> Option<Clip> {
         if !self.take_pass() || !self.reserve(u64::from(canvas.width) * u64::from(canvas.height)) {
             return None;
         }
@@ -223,7 +269,10 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
         // graph that repeats a heavy outline stays bounded. Outlines
         // past the budget cover nothing.
         if self.segments_left == 0 {
-            return Some(mask);
+            return Some(Clip {
+                mask,
+                rect: NO_PIXELS,
+            });
         }
         let segments = flatten_limited(
             ops.iter().copied(),
@@ -232,47 +281,87 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
             self.segments_left,
         );
         self.segments_left = self.segments_left.saturating_sub(segments.len());
-        if segments.is_empty() {
-            return Some(mask);
-        }
-        // Rasterize only the canvas window: a shape far larger than
-        // the canvas stays cheap and still covers it.
-        let window = Window {
+        // Rasterize only where the enclosing clip covers the canvas. The
+        // shape is multiplied by that clip, so it ends up zero outside
+        // the clip's rectangle whatever it covers there, and a windowed
+        // raster stores exactly the values a full one would. A shape far
+        // larger than the canvas stays cheap and still covers it.
+        let whole = Window {
             x0: 0,
             y0: 0,
             x1: i32::try_from(canvas.width).unwrap_or(i32::MAX),
             y1: i32::try_from(canvas.height).unwrap_or(i32::MAX),
         };
+        let window = self
+            .clips
+            .last()
+            .map_or(whole, |parent| intersect(parent.rect, whole));
+        if segments.is_empty() || window == NO_PIXELS {
+            return Some(Clip {
+                mask,
+                rect: NO_PIXELS,
+            });
+        }
         let r = rasterize_in(&segments, Some(window));
-        for y in 0..r.pixmap.height {
-            let Ok(cy) = u32::try_from(i64::from(r.origin_y) + i64::from(y)) else {
-                continue;
-            };
-            for x in 0..r.pixmap.width {
-                if let Ok(cx) = u32::try_from(i64::from(r.origin_x) + i64::from(x)) {
-                    mask.set(cx, cy, r.pixmap.get(x, y));
-                }
+        let (Ok(x0), Ok(y0)) = (usize::try_from(r.origin_x), usize::try_from(r.origin_y)) else {
+            return Some(Clip {
+                mask,
+                rect: NO_PIXELS,
+            });
+        };
+        let (width, stride) = (r.pixmap.width as usize, canvas.width as usize);
+        if width == 0 || r.pixmap.height == 0 {
+            return Some(Clip {
+                mask,
+                rect: NO_PIXELS,
+            });
+        }
+        for (y, src) in (y0..).zip(r.pixmap.data.chunks_exact(width)) {
+            let start = y * stride + x0;
+            if let Some(dst) = mask.data.get_mut(start..start + width) {
+                dst.copy_from_slice(src);
             }
         }
-        Some(mask)
+        let rect = intersect(
+            Window {
+                x0: r.origin_x,
+                y0: r.origin_y,
+                x1: r.origin_x.saturating_add(width as i32),
+                y1: r.origin_y.saturating_add(r.pixmap.height as i32),
+            },
+            whole,
+        );
+        Some(Clip { mask, rect })
     }
 
     /// Pushes `shape` intersected with the enclosing clip. `None` (a
     /// spent budget) and an enclosing clip of another size push an
     /// empty clip, which paints nothing.
-    fn push_mask(&mut self, shape: Option<Pixmap>) {
+    fn push_mask(&mut self, shape: Option<Clip>) {
         let Some(mut shape) = shape else {
-            self.clips.push(Pixmap::new(0, 0));
+            self.clips.push(Clip::empty());
             return;
         };
         if let Some(parent) = self.clips.last() {
-            if parent.data.len() != shape.data.len() {
-                self.clips.push(Pixmap::new(0, 0));
+            if parent.mask.data.len() != shape.mask.data.len() {
+                self.clips.push(Clip::empty());
                 return;
             }
-            for (s, p) in shape.data.iter_mut().zip(&parent.data) {
-                *s = ((u32::from(*s) * u32::from(*p) + 127) / 255) as u8;
+            // Outside its rectangle the shape is zero, and so is the
+            // product.
+            let stride = shape.mask.width as usize;
+            for (start, end) in rows(shape.rect, stride) {
+                let (Some(s), Some(p)) = (
+                    shape.mask.data.get_mut(start..end),
+                    parent.mask.data.get(start..end),
+                ) else {
+                    continue;
+                };
+                for (s, p) in s.iter_mut().zip(p) {
+                    *s = ((u32::from(*s) * u32::from(*p) + 127) / 255) as u8;
+                }
             }
+            shape.rect = intersect(shape.rect, parent.rect);
         }
         self.clips.push(shape);
     }
@@ -280,24 +369,32 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
     /// Fills the current clip on the top layer with `color_at(x, y)`,
     /// the premultiplied color at canvas pixel center `(x, y)`.
     fn fill(&mut self, color_at: impl Fn(f32, f32) -> [u8; 4]) {
-        if self.clips.last().map_or(true, Pixmap::is_empty) || !self.take_pass() {
+        if self.clips.last().map_or(true, |c| c.mask.is_empty()) || !self.take_pass() {
             return;
         }
         let (Some(clip), Some(layer)) = (self.clips.last(), self.layers.last_mut()) else {
             return;
         };
-        let width = layer.width as usize;
-        if width == 0 {
+        if layer.width != clip.mask.width {
             return;
         }
-        let pixels = clip.data.iter().zip(layer.data.chunks_exact_mut(4));
-        for (i, (&coverage, dst)) in pixels.enumerate() {
-            if coverage == 0 {
+        // Pixels outside the clip's rectangle have no coverage.
+        let stride = layer.width as usize;
+        for ((start, end), y) in rows(clip.rect, stride).zip(clip.rect.y0..) {
+            let (Some(coverage), Some(dst)) = (
+                clip.mask.data.get(start..end),
+                layer.data.get_mut(start * 4..end * 4),
+            ) else {
                 continue;
+            };
+            let pixels = coverage.iter().zip(dst.chunks_exact_mut(4));
+            for ((&coverage, dst), x) in pixels.zip(clip.rect.x0..) {
+                if coverage == 0 {
+                    continue;
+                }
+                let src = mul_alpha(color_at(x as f32 + 0.5, y as f32 + 0.5), coverage);
+                blend_src_over(dst, src);
             }
-            let (x, y) = (i % width, i / width);
-            let src = mul_alpha(color_at(x as f32 + 0.5, y as f32 + 0.5), coverage);
-            blend_src_over(dst, src);
         }
     }
 
@@ -309,12 +406,18 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
             return;
         };
         let stops = self.resolver.stops(line);
-        let extend: Extend = line.extend;
-        self.fill(|x, y| {
-            let p = to_paint.apply(x, y);
-            sample_gradient(kind, &stops, extend, p)
-        });
+        let gradient = PreparedGradient::new(kind, &stops, line.extend);
+        self.fill(|x, y| gradient.sample(to_paint.apply(x, y)));
     }
+}
+
+/// The index range of every row of `rect` in a row-major buffer with
+/// `stride` pixels per row, top to bottom. `rect` lies inside the
+/// canvas, so its coordinates are not negative.
+fn rows(rect: Window, stride: usize) -> impl Iterator<Item = (usize, usize)> {
+    let (x0, x1) = (rect.x0.max(0) as usize, rect.x1.max(0) as usize);
+    let (y0, y1) = (rect.y0.max(0) as usize, rect.y1.max(0) as usize);
+    (y0..y1).map(move |y| (y * stride + x0, y * stride + x1.max(x0)))
 }
 
 /// `dst = src OVER dst` on one premultiplied pixel.
@@ -352,7 +455,7 @@ impl PaintSink for RasterSink<'_, '_, '_, '_> {
 
     fn push_clip_glyph(&mut self, glyph: u16) {
         let Some(canvas) = self.canvas else {
-            self.clips.push(Pixmap::new(0, 0));
+            self.clips.push(Clip::empty());
             return;
         };
         let outline = self
@@ -367,7 +470,7 @@ impl PaintSink for RasterSink<'_, '_, '_, '_> {
 
     fn push_clip_rectangle(&mut self, x_min: f32, y_min: f32, x_max: f32, y_max: f32) {
         let Some(canvas) = self.canvas else {
-            self.clips.push(Pixmap::new(0, 0));
+            self.clips.push(Clip::empty());
             return;
         };
         let ops = [
@@ -388,14 +491,14 @@ impl PaintSink for RasterSink<'_, '_, '_, '_> {
         let (top, bottom) = (-y1 * s, -y0 * s);
         let bounded = clip.is_bounded() && left < right && top < bottom;
         if !bounded {
-            self.clips.push(Pixmap::new(0, 0));
+            self.clips.push(Clip::empty());
             return;
         }
         let (left, top, right, bottom) = (left.floor(), top.floor(), right.ceil(), bottom.ceil());
         let (width, height) = (right - left + 2.0, bottom - top + 2.0);
         if !(width.is_finite() && height.is_finite()) || width > MAX_SIDE || height > MAX_SIDE {
             self.oversized = true;
-            self.clips.push(Pixmap::new(0, 0));
+            self.clips.push(Clip::empty());
             return;
         }
         let canvas = Canvas {
@@ -406,21 +509,27 @@ impl PaintSink for RasterSink<'_, '_, '_, '_> {
         };
         // One mask byte and four layer bytes per pixel.
         if !self.reserve(u64::from(canvas.width) * u64::from(canvas.height) * 5) {
-            self.clips.push(Pixmap::new(0, 0));
+            self.clips.push(Clip::empty());
             return;
         }
         // The clip box snapped out to whole pixels; the margin stays
         // outside it.
         let mut mask = Pixmap::new(canvas.width, canvas.height);
-        for y in 1..canvas.height.saturating_sub(1) {
-            for x in 1..canvas.width.saturating_sub(1) {
-                mask.set(x, y, 255);
+        let rect = Window {
+            x0: 1,
+            y0: 1,
+            x1: i32::try_from(canvas.width).unwrap_or(i32::MAX) - 1,
+            y1: i32::try_from(canvas.height).unwrap_or(i32::MAX) - 1,
+        };
+        for (start, end) in rows(rect, canvas.width as usize) {
+            if let Some(row) = mask.data.get_mut(start..end) {
+                row.fill(255);
             }
         }
         self.canvas = Some(canvas);
         self.layers
             .push(ColorPixmap::new(canvas.width, canvas.height));
-        self.clips.push(mask);
+        self.clips.push(Clip { mask, rect });
     }
 
     fn pop_clip(&mut self) {

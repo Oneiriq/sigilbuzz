@@ -33,6 +33,7 @@ use sigilbuzz_paint::{Color, ColorStop, CompositeMode, EvalOptions, Extend, Grad
 use crate::canvas::RasterSink;
 use crate::error::RenderError;
 use crate::pixmap::{ColorPixmap, Placement};
+use crate::raster::round_unit;
 
 /// Public entry: walks `gid`'s COLRv1 paint tree and renders it to a
 /// premultiplied RGBA pixmap, returned with its offset from the glyph
@@ -101,11 +102,13 @@ pub(crate) fn to_premul(c: Color) -> [u8; 4] {
     let r = c.r.clamp(0.0, 1.0) * a;
     let g = c.g.clamp(0.0, 1.0) * a;
     let b = c.b.clamp(0.0, 1.0) * a;
+    // Every channel is in `[0, 255]` or NaN here, where `round_unit`
+    // gives the bytes `f32::round` would.
     [
-        (r * 255.0).round().clamp(0.0, 255.0) as u8,
-        (g * 255.0).round().clamp(0.0, 255.0) as u8,
-        (b * 255.0).round().clamp(0.0, 255.0) as u8,
-        (a * 255.0).round().clamp(0.0, 255.0) as u8,
+        round_unit(r * 255.0).clamp(0.0, 255.0) as u8,
+        round_unit(g * 255.0).clamp(0.0, 255.0) as u8,
+        round_unit(b * 255.0).clamp(0.0, 255.0) as u8,
+        round_unit(a * 255.0).clamp(0.0, 255.0) as u8,
     ]
 }
 
@@ -118,30 +121,94 @@ pub(crate) fn to_premul(c: Color) -> [u8; 4] {
 /// gradient exact under any transform: a radial gradient under a
 /// non-uniform scale is an exact ellipse, and a sweep keeps its angles
 /// under a skew.
+///
+/// The renderer samples through [`PreparedGradient`], which sets the
+/// gradient up once per fill; this one-shot form is for tests.
+#[cfg(test)]
 pub(crate) fn sample_gradient(
     kind: GradientKind,
     stops: &[ColorStop],
     extend: Extend,
     p: (f32, f32),
 ) -> [u8; 4] {
-    if stops.is_empty() {
-        return [0, 0, 0, 0];
-    }
-    let t = match kind {
-        GradientKind::Linear { p0, p1, p2 } => {
-            let (a, b) = reduce_linear_anchors(p0, p1, p2);
-            project_linear(a, b, p)
+    PreparedGradient::new(kind, stops, extend).sample(p)
+}
+
+/// A gradient set up once for sampling at many points. The work that
+/// does not depend on the point, such as folding a linear gradient's
+/// rotation point into its end point, happens here once, with the same
+/// arithmetic a per-point evaluation would use, so every sample is
+/// bit-identical to evaluating the gradient from scratch.
+pub(crate) struct PreparedGradient<'s> {
+    geometry: Geometry,
+    stops: &'s [ColorStop],
+    extend: Extend,
+}
+
+/// Gradient geometry in paint space. A linear gradient's rotation point
+/// is already folded into its end point.
+#[derive(Clone, Copy)]
+enum Geometry {
+    Linear {
+        a: (f32, f32),
+        b: (f32, f32),
+    },
+    Radial {
+        c0: (f32, f32),
+        r0: f32,
+        c1: (f32, f32),
+        r1: f32,
+    },
+    Sweep {
+        center: (f32, f32),
+        start_angle: f32,
+        end_angle: f32,
+    },
+}
+
+impl<'s> PreparedGradient<'s> {
+    pub(crate) fn new(kind: GradientKind, stops: &'s [ColorStop], extend: Extend) -> Self {
+        let geometry = match kind {
+            GradientKind::Linear { p0, p1, p2 } => {
+                let (a, b) = reduce_linear_anchors(p0, p1, p2);
+                Geometry::Linear { a, b }
+            }
+            GradientKind::Radial { c0, r0, c1, r1 } => Geometry::Radial { c0, r0, c1, r1 },
+            GradientKind::Sweep {
+                center,
+                start_angle,
+                end_angle,
+            } => Geometry::Sweep {
+                center,
+                start_angle,
+                end_angle,
+            },
+        };
+        Self {
+            geometry,
+            stops,
+            extend,
         }
-        GradientKind::Radial { c0, r0, c1, r1 } => project_radial(c0, r0, c1, r1, p),
-        GradientKind::Sweep {
-            center,
-            start_angle,
-            end_angle,
-        } => project_sweep(center, start_angle, end_angle, p),
-    };
-    match t {
-        Some(t) => to_premul(sample_stops(stops, apply_extend(t, extend))),
-        None => [0, 0, 0, 0],
+    }
+
+    /// The premultiplied color at paint-space point `p`.
+    pub(crate) fn sample(&self, p: (f32, f32)) -> [u8; 4] {
+        if self.stops.is_empty() {
+            return [0, 0, 0, 0];
+        }
+        let t = match self.geometry {
+            Geometry::Linear { a, b } => project_linear(a, b, p),
+            Geometry::Radial { c0, r0, c1, r1 } => project_radial(c0, r0, c1, r1, p),
+            Geometry::Sweep {
+                center,
+                start_angle,
+                end_angle,
+            } => project_sweep(center, start_angle, end_angle, p),
+        };
+        match t {
+            Some(t) => to_premul(sample_stops(self.stops, apply_extend(t, self.extend))),
+            None => [0, 0, 0, 0],
+        }
     }
 }
 
