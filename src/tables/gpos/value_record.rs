@@ -142,18 +142,15 @@ impl ValueRecord {
 }
 
 /// Rounds the float delta the variation store returned to the nearest
-/// design-unit integer. Matches the add-0.5/subtract-0.5 rule the
-/// HVAR pipeline already uses so the two stay in byte-for-byte
-/// lockstep.
+/// design-unit integer, as HarfBuzz's `VariationDevice` does
+/// (`em_scalef_x`, which uses HarfBuzz's `roundf`): halves round up,
+/// so `-2.5` becomes `-2`. The HVAR and VVAR advances round the same
+/// way.
 #[must_use]
 fn round_delta(delta: f32) -> i32 {
-    // `as` saturates on overflow and maps NaN to zero, so no delta
-    // the variation store returns can panic here.
-    if delta >= 0.0 {
-        (delta + 0.5) as i32
-    } else {
-        (delta - 0.5) as i32
-    }
+    // Saturates on overflow and maps NaN to zero, so no delta the
+    // variation store returns can panic here.
+    crate::tables::parse::hb_round(delta)
 }
 
 /// Resolves one `Device` / `VariationIndex` slot against the bytes

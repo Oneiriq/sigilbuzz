@@ -98,7 +98,8 @@ fn control_box(ops: &[PathOp]) -> Extents {
             add(x, y);
         }
     }
-    let round = |v: f32| super::super::position::round_half_away(v);
+    // HarfBuzz's `roundf`: halves round up.
+    let round = crate::tables::parse::hb_round;
     let mut e = Extents::default();
     if min.0 < max.0 {
         e.x_bearing = round(min.0);

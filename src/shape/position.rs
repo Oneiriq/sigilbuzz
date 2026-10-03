@@ -42,6 +42,7 @@ use crate::face::Face;
 use crate::tables::gdef::Gdef;
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::layout::{GlyphClasses, MatchGlyph};
+use crate::tables::parse::hb_round;
 use crate::tables::{tag, Gpos, Hmtx, Hvar, Vmtx, Vvar};
 use crate::unicode::Script;
 
@@ -319,16 +320,6 @@ fn glyph_top_and_height(face: &Face<'_>, id: u16) -> Result<Option<(i32, i32)>> 
     }
 }
 
-/// Rounds a variation delta to the nearest unit, halves away from
-/// zero, the way the advance deltas are rounded elsewhere.
-pub(super) fn round_half_away(delta: f32) -> i32 {
-    if delta >= 0.0 {
-        (delta + 0.5) as i32
-    } else {
-        (delta - 0.5) as i32
-    }
-}
-
 /// True when the language system GPOS picks for the script tags of
 /// `script_priority` lists feature `tag`, with or without lookups (see
 /// [`crate::ot::layout_select::lists_feature`]).
@@ -393,6 +384,8 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
 /// is the `hmtx` (or `vmtx`) one. Otherwise:
 ///
 /// - with `HVAR` (or `VVAR`), the advance moves by the rounded delta;
+///   every rounding here is HarfBuzz's `roundf`, `floor(x + 0.5)`, so
+///   halves round up (a delta of -13.5 moves the advance by -13);
 /// - without it, in a `glyf` font with `gvar`, the advance is the
 ///   distance between the glyph's phantom points moved by their `gvar`
 ///   deltas (see [`crate::tables::Glyf::phantom_points_at_coords`]): the
@@ -473,7 +466,7 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             return base;
         }
         if let Some(hvar) = &self.hvar {
-            return base.saturating_add(round_half_away(hvar.advance_delta(id, self.coords)));
+            return base.saturating_add(hb_round(hvar.advance_delta(id, self.coords)));
         }
         self.phantom_advance(&self.h_phantom, id, false)
             .unwrap_or(base)
@@ -490,7 +483,7 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         }
         if let Some(vvar) = &self.vvar {
             let delta = vvar.advance_height_delta(id, self.coords);
-            return Some(base.saturating_add(round_half_away(delta)));
+            return Some(base.saturating_add(hb_round(delta)));
         }
         Some(
             self.phantom_advance(&self.v_phantom, id, true)
@@ -538,7 +531,7 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         } else {
             pp[1].0 - pp[0].0
         };
-        Some(round_half_away(advance).max(0))
+        Some(hb_round(advance).max(0))
     }
 }
 
