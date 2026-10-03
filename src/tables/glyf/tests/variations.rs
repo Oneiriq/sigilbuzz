@@ -290,34 +290,76 @@ fn phantom_points_move_by_their_deltas() {
     assert_points(&pp, &[(0.0, 0.0), (530.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
 }
 
-#[test]
-fn phantom_points_stop_at_a_self_referencing_composite() {
-    let parent = build_composite(&[Comp {
-        flags: COMP_ARGS_ARE_XY_VALUES | COMP_USE_MY_METRICS,
-        glyph: 0,
-        args: (0, 0),
-        scale: None,
-    }]);
-    let (glyf_bytes, loca_bytes) = build_tables(&[parent]);
-    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
+/// Composites whose `USE_MY_METRICS` components lead back to them:
+/// `uses[g]` is the glyph composite `g` names. hmtx gives glyph `g` an
+/// advance of 600 - 100 * g, and a tuple at peak 1.0 moves each glyph's
+/// advance point by 10 * (g + 1). Returns glyph 0's phantom points at
+/// `coord`.
+fn cyclic_phantoms(uses: &[u16], coord: f32) -> Result<[(f32, f32); 4]> {
+    let glyphs: Vec<Vec<u8>> = uses
+        .iter()
+        .map(|&glyph| {
+            build_composite(&[Comp {
+                flags: COMP_ARGS_ARE_XY_VALUES | COMP_USE_MY_METRICS,
+                glyph,
+                args: (0, 0),
+                scale: None,
+            }])
+        })
+        .collect();
+    let n = uses.len() as u16;
+    let (glyf_bytes, loca_bytes) = build_tables(&glyphs);
+    let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, n).unwrap();
     let glyf = Glyf::new(&glyf_bytes);
-    let gvar_bytes = build_gvar(1, &[vec![]]);
+    // One component, so the advance point is point 2.
+    let tuples: Vec<Vec<Tuple>> = (0..n)
+        .map(|g| {
+            vec![Tuple {
+                peak: vec![1.0],
+                points: Some(vec![2]),
+                deltas: vec![(10 * (g as i16 + 1), 0)],
+            }]
+        })
+        .collect();
+    let gvar_bytes = build_gvar(1, &tuples);
     let gvar = Gvar::parse(&gvar_bytes).unwrap();
-    let hmtx_bytes = build_hmtx(&[(600, 0)]);
-    let hmtx = Hmtx::parse(&hmtx_bytes, 1, 1).unwrap();
+    let metrics: Vec<(u16, i16)> = (0..n).map(|g| (600 - 100 * g, 0)).collect();
+    let hmtx_bytes = build_hmtx(&metrics);
+    let hmtx = Hmtx::parse(&hmtx_bytes, n, n).unwrap();
     let metrics = PhantomMetrics {
         hmtx: &hmtx,
         vmtx: None,
     };
-    assert!(matches!(
-        glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[1.0]),
-        Err(Error::Malformed { .. })
-    ));
-    // At the default instance nothing recurses.
-    let pp = glyf
-        .phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[0.0])
-        .unwrap();
+    glyf.phantom_points_at_coords(&loca, 0, &metrics, Some(&gvar), &[coord])
+}
+
+#[test]
+fn phantom_points_skip_a_self_referencing_composite() {
+    // HarfBuzz's decycler stops at the first repeat: glyph 0 inside
+    // glyph 0 keeps its own points, 600 moved by 10.
+    let pp = cyclic_phantoms(&[0], 1.0).unwrap();
+    assert_points(&pp[..2], &[(0.0, 0.0), (610.0, 0.0)]);
+    // At the default instance nothing moves.
+    let pp = cyclic_phantoms(&[0], 0.0).unwrap();
     assert_points(&pp[..2], &[(0.0, 0.0), (600.0, 0.0)]);
+}
+
+#[test]
+fn phantom_points_skip_a_longer_cycle_where_harfbuzz_does() {
+    // The decycler's tortoise moves at half speed, so it sees a longer
+    // cycle a few levels late, and the glyph where it does keeps its own
+    // points. The advances match HarfBuzz 14.5.0 on the same glyphs.
+    for (uses, advance) in [
+        // 0, 1, 0, 1: glyph 1 at depth 3, 500 moved by 20.
+        (&[1, 0][..], 520.0),
+        // 0, 1, 2, 0, 1, 2: glyph 2 at depth 5, 400 moved by 30.
+        (&[1, 2, 0][..], 430.0),
+        // Glyph 3 at depth 7, 300 moved by 40.
+        (&[1, 2, 3, 0][..], 340.0),
+    ] {
+        let pp = cyclic_phantoms(uses, 1.0).unwrap();
+        assert_points(&pp[..2], &[(0.0, 0.0), (advance, 0.0)]);
+    }
 }
 
 /// A composite tree over the square: glyph 0 is the square and glyph
