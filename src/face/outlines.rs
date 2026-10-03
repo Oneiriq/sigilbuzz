@@ -7,7 +7,6 @@ use super::Face;
 use crate::error::{Error, Result};
 use crate::font::f2dot14_coords;
 use crate::tables::glyf::PhantomMetrics;
-use crate::tables::outline::OutlineSink;
 use crate::tables::parse::hb_roundf;
 use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Gvar, Loca, Outline, PathOp, Vmtx};
 
@@ -310,20 +309,15 @@ pub(crate) fn varied_glyph_bounds(
 ) -> Result<GlyphBounds> {
     let (glyf, loca, gvar) = tables;
     let mut points = PointBox::default();
-    glyf.outline_at_coords(
-        loca,
-        glyph_id,
-        Some(gvar),
-        coords,
-        Some(metrics),
-        &mut points,
-    )?;
+    glyf.points_at_coords(loca, glyph_id, Some(gvar), coords, Some(metrics), |x, y| {
+        points.add(x, y);
+    })?;
     Ok(points.bounds(num_contours))
 }
 
-/// Bounding box of every point an outline walk emits, off-curve
-/// points included. Implied on-curve points lie between two emitted
-/// points, so they never widen it.
+/// Bounding box of every point of an outline walk, off-curve points
+/// included. Implied on-curve points lie between two of them, so they
+/// never widen it.
 struct PointBox {
     min: (f32, f32),
     max: (f32, f32),
@@ -367,25 +361,6 @@ impl PointBox {
             num_contours,
         }
     }
-}
-
-impl OutlineSink for PointBox {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
-        self.add(cx, cy);
-        self.add(x, y);
-    }
-    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
-        self.add(c1x, c1y);
-        self.add(c2x, c2y);
-        self.add(x, y);
-    }
-    fn close(&mut self) {}
 }
 
 /// Most VARC components one outline request may resolve, summed over
@@ -500,6 +475,59 @@ mod tests {
             face.glyph_outline_at_coords(o, &[1.0 / 40000.0]).unwrap(),
             face.glyph_outline(o).unwrap()
         );
+    }
+
+    #[test]
+    fn varied_bounds_from_the_points_box_the_drawn_outline() {
+        // The varied box reads the walked points without drawing the
+        // outline; the drawing only adds points between two of them,
+        // so the box is the same.
+        for data in [
+            &include_bytes!("../../tests/fixtures/hahmlet_gvar_subset.ttf")[..],
+            &include_bytes!("../../tests/fixtures/rubik_vf.ttf")[..],
+        ] {
+            let blob = crate::Blob::new(data);
+            let face = Face::parse(&blob, 0).unwrap();
+            let (loca, glyf, hmtx) = (
+                face.loca().unwrap(),
+                face.glyf().unwrap(),
+                face.hmtx().unwrap(),
+            );
+            let gvar = face.gvar().unwrap().unwrap();
+            let vmtx = face.phantom_vmtx(None).unwrap();
+            let metrics = PhantomMetrics {
+                hmtx: &hmtx,
+                vmtx: Some(&vmtx),
+            };
+            for coords in [[1.0], [-0.625], [6145.0 / 16384.0]] {
+                for gid in 0..face.maxp().unwrap().num_glyphs {
+                    let mut drawn = PointBox::default();
+                    let mut sink = Outline::new();
+                    glyf.outline_at_coords(
+                        &loca,
+                        gid,
+                        Some(&gvar),
+                        &coords,
+                        Some(&metrics),
+                        &mut sink,
+                    )
+                    .unwrap();
+                    for op in sink.ops() {
+                        match *op {
+                            PathOp::MoveTo { x, y } | PathOp::LineTo { x, y } => drawn.add(x, y),
+                            PathOp::QuadTo { cx, cy, x, y } => {
+                                drawn.add(cx, cy);
+                                drawn.add(x, y);
+                            }
+                            PathOp::CubicTo { .. } | PathOp::Close => {}
+                        }
+                    }
+                    let tables = (&glyf, &loca, &gvar);
+                    let got = varied_glyph_bounds(tables, gid, &coords, &metrics, 1).unwrap();
+                    assert_eq!(got, drawn.bounds(1), "glyph {gid} at {coords:?}");
+                }
+            }
+        }
     }
 
     #[test]

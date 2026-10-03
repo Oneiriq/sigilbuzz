@@ -513,6 +513,36 @@ impl<'a> Glyf<'a> {
         self.outline_with(&cx, glyph_id, None, sink)
     }
 
+    /// The points [`Glyf::outline_at_coords`] draws `glyph_id` from,
+    /// contour points on and off the curve, handed to `visit` without
+    /// drawing the outline: what a box of the outline needs, since the
+    /// points the drawing adds between two off-curve points lie between
+    /// them. Returns `Ok(false)` for a glyph without outline data.
+    pub(crate) fn points_at_coords(
+        &self,
+        loca: &Loca<'_>,
+        glyph_id: u16,
+        gvar: Option<&Gvar<'_>>,
+        coords: &[f32],
+        metrics: Option<&PhantomMetrics<'_>>,
+        mut visit: impl FnMut(f32, f32),
+    ) -> Result<bool> {
+        let cx = FlattenCtx {
+            loca,
+            metrics,
+            var: Variation::new(gvar, coords),
+        };
+        let Some(flat) = self.flatten_root(&cx, glyph_id, None, &mut FlattenBudget::new())? else {
+            return Ok(false);
+        };
+        for c in &flat.contours {
+            for &(x, y) in &flat.points[c.start..=c.end] {
+                visit(x, y);
+            }
+        }
+        Ok(true)
+    }
+
     /// Returns the four phantom points of `glyph_id` (left side
     /// bearing origin, advance origin, top origin, bottom origin) at
     /// the normalized variation `coords`, in the glyph's own frame. The
