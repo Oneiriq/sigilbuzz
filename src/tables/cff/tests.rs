@@ -255,6 +255,118 @@ fn charstring_rejects_operand_stack_overflow() {
     assert!(matches!(err, Error::Malformed { .. }));
 }
 
+/// The two bytes of `dotsection` (operator 12 0).
+const DOTSECTION: [u8; 2] = [op_code::ESCAPE, op_code::ESC_DOTSECTION];
+
+/// The outline of the one glyph of a CFF1 font whose charstring is
+/// `cs`.
+fn draw_single(cs: &[u8]) -> Result<Vec<PathOp>> {
+    let cff = build_cff_with_charstring(cs);
+    let mut o = Outline::new();
+    Cff::parse(&cff)?.outline(0, &mut o)?;
+    Ok(o.ops().to_vec())
+}
+
+#[test]
+fn dotsection_draws_nothing() {
+    // A charstring as a Type 1 conversion leaves it: a width, a stem
+    // hint, and `dotsection` around the path, `100 10 20 hstem
+    // dotsection 0 0 rmoveto 10 0 rlineto 0 10 rlineto dotsection
+    // endchar`. HarfBuzz and FreeType skip `dotsection`, which used to
+    // fail the glyph as a deprecated operator.
+    let mut cs = alloc::vec![239, 149, 159, op_code::HSTEM];
+    cs.extend_from_slice(&DOTSECTION);
+    cs.extend_from_slice(&[139, 139, op_code::RMOVETO]);
+    cs.extend_from_slice(&[149, 139, op_code::RLINETO, 139, 149, op_code::RLINETO]);
+    cs.extend_from_slice(&DOTSECTION);
+    cs.push(op_code::ENDCHAR);
+    let square = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 10.0 },
+        PathOp::Close,
+    ];
+    assert_eq!(draw_single(&cs).unwrap(), square);
+    // The same charstring without `dotsection` draws the same.
+    let plain: Vec<u8> = [
+        239,
+        149,
+        159,
+        op_code::HSTEM,
+        139,
+        139,
+        op_code::RMOVETO,
+        149,
+        139,
+        op_code::RLINETO,
+        139,
+        149,
+        op_code::RLINETO,
+        op_code::ENDCHAR,
+    ]
+    .to_vec();
+    assert_eq!(draw_single(&plain).unwrap(), square);
+}
+
+#[test]
+fn dotsection_clears_the_operand_stack() {
+    // `0 0 rmoveto 7 dotsection 10 0 rlineto endchar`: the 7 goes with
+    // `dotsection`, as in HarfBuzz, so `rlineto` draws one line to
+    // (10, 0). Left on the stack it would draw a line to (7, 10).
+    let mut cs = alloc::vec![139, 139, op_code::RMOVETO, 146];
+    cs.extend_from_slice(&DOTSECTION);
+    cs.extend_from_slice(&[149, 139, op_code::RLINETO, op_code::ENDCHAR]);
+    assert_eq!(
+        draw_single(&cs).unwrap(),
+        [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 10.0, y: 0.0 },
+            PathOp::Close,
+        ]
+    );
+}
+
+#[test]
+fn dotsection_in_a_subroutine_and_in_cff2() {
+    // `dotsection` inside a global subroutine, then in a CFF2
+    // charstring, where HarfBuzz clears the stack for it too, as for
+    // any operator it does not know.
+    let subr = [146, DOTSECTION[0], DOTSECTION[1], op_code::RETURN];
+    let bytes = encode_index(&[&subr], 1);
+    let globals = read_index(&mut Reader::new(&bytes)).unwrap();
+    // One global subr has bias 107: subr 0 is pushed as -107, byte 32.
+    let cs = [
+        139,
+        139,
+        op_code::RMOVETO,
+        32,
+        op_code::CALLGSUBR,
+        149,
+        139,
+        op_code::RLINETO,
+    ];
+    let expected = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 0.0 },
+        PathOp::Close,
+    ];
+    for is_cff2 in [false, true] {
+        let mut out = Outline::new();
+        let mut interp = Interp::new(globals, Index::default(), &mut out, is_cff2);
+        interp.run(&cs, 0).unwrap();
+        interp.finish();
+        assert_eq!(out.ops(), expected, "is_cff2 {is_cff2}");
+    }
+}
+
+#[test]
+fn other_deprecated_type1_operators_are_still_rejected() {
+    // `callothersubr` (12 16) stays unsupported.
+    let cs = [139, op_code::ESCAPE, 16, op_code::ENDCHAR];
+    let err = draw_single(&cs).unwrap_err();
+    assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
+}
+
 #[test]
 fn charstring_hflex1_endpoint_returns_to_start_y() {
     // hflex1 spec: the flex starts and ends at the same y value.

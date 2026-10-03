@@ -32,8 +32,9 @@
 //! draws the base character and then the accent at `(adx, ady)`, as
 //! HarfBuzz and FreeType do. The two are named by Standard Encoding
 //! code and found through the charset, in name-keyed fonts only.
-//! Other deprecated Type 1 operators (`callothersubr`, `pop`, and the
-//! like) are rejected.
+//! `dotsection` clears the operand stack and does nothing else, as in
+//! HarfBuzz and FreeType. Other deprecated Type 1 operators
+//! (`callothersubr`, `pop`, and the like) are rejected.
 
 mod charset;
 mod charstring;
@@ -316,6 +317,7 @@ pub(crate) mod op_code {
     pub const HVCURVETO: u8 = 31;
 
     // Escaped (prefix 12).
+    pub const ESC_DOTSECTION: u8 = 0;
     pub const ESC_HFLEX: u8 = 34;
     pub const ESC_FLEX: u8 = 35;
     pub const ESC_HFLEX1: u8 = 36;
