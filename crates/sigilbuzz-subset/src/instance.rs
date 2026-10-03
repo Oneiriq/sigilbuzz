@@ -123,9 +123,14 @@
 //! # Partial instancing
 //!
 //! When [`InstanceInput::axis_pins`] keeps some axes variable, the
-//! bake emits a reduced-axis variable font instead. `gvar` goes through
-//! [`crate::gvar_partial::bake_gvar_partial`] and the CFF2 VarStore
-//! through [`crate::cff2::bake_cff2_partial`].
+//! bake emits a reduced-axis variable font instead. As in HarfBuzz's
+//! instancer, the default of a `glyf` font moves to the pinned location
+//! (the kept axes at their defaults): `glyf`, `hmtx`, `vmtx` and `VORG`
+//! are baked there, and the gvar tuples and `HVAR` / `VVAR` regions
+//! left on the pinned axes only go. `gvar` goes through
+//! [`crate::gvar_partial::bake_gvar_partial_with`], which merges tuples
+//! that land on the same region, and the CFF2 VarStore through
+//! [`crate::cff2::bake_cff2_partial`].
 //!
 //! # Determinism
 //!
@@ -155,7 +160,7 @@ use crate::util;
 use crate::warnings::Warnings;
 use crate::{SubsetError, SubsetWarning};
 use gdef_store::{prune_gdef_store, GdefBake};
-use glyf::{bake_glyf_loca, GlyphMetrics};
+use glyf::{bake_glyf_loca, GlyfLocaBake, GlyphMetrics};
 use metrics::{
     bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, hmtx_from_metrics, patch_head_bounds,
     patch_line_extremes, MvarBake, VmtxBake, VorgBake,
@@ -442,6 +447,8 @@ fn snap_f2dot14(v: f32) -> f32 {
 
 /// What [`push_glyf_tables`] baked besides the tables it pushed.
 struct GlyfTablesBake {
+    /// The glyf bake, for the partial instance's `gvar` rewrite.
+    glyf: GlyfLocaBake,
     /// The vertical metrics bake, naming the tables it left out.
     vmtx: VmtxBake,
     /// The font's glyph count.
@@ -502,11 +509,15 @@ fn push_glyf_tables(
         (tag::HHEA, hhea_out),
         (tag::MAXP, maxp_out),
         (tag::HMTX, hmtx_out.bytes),
-        (tag::LOCA, glyf_loca.loca),
-        (tag::GLYF, glyf_loca.glyf),
+        (tag::LOCA, glyf_loca.loca.clone()),
+        (tag::GLYF, glyf_loca.glyf.clone()),
     ]);
     push_vertical_metrics(face, &vmtx, mvar_bake, baked, tables)?;
-    Ok(GlyfTablesBake { vmtx, num_glyphs })
+    Ok(GlyfTablesBake {
+        glyf: glyf_loca,
+        vmtx,
+        num_glyphs,
+    })
 }
 
 /// Appends the rebuilt `vmtx` with `vhea` (MVAR-baked when `MVAR`

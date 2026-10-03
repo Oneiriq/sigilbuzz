@@ -332,15 +332,35 @@ fn shared_tuple_projection_is_not_repeated_per_tuple() {
 
 #[test]
 fn tuple_headers_past_the_u16_data_offset_are_rejected() {
-    // 4095 tuples point at one shared tuple, so their headers take
-    // 16 KB. Each survives with 16 Keep axes, and the rewrite embeds
-    // its peak, which needs 147 KB of headers: past what the u16
-    // dataOffset can address. The offset used to be truncated,
-    // which corrupted the glyph.
+    // 4095 tuples each point at a shared tuple of their own, so their
+    // headers take 16 KB. Each survives with 16 Keep axes and a region
+    // of its own, so none merge, and the rewrite embeds the peaks,
+    // which needs 147 KB of headers: past what the u16 dataOffset can
+    // address. The offset used to be truncated, which corrupted the
+    // glyph.
     const AXES: usize = 17;
-    let shared: Vec<u8> = 0x4000i16.to_be_bytes().repeat(AXES); // every peak 1.0
-                                                                // All-points deltas: one zero for x, one for y.
-    let body = body_of_shared_tuples(0x0FFF, &[DELTA_ALL_ZERO, DELTA_ALL_ZERO]);
+    const TUPLES: u16 = 0x0FFF;
+    // Shared tuple `i` peaks at 1.0 on every axis but axis 1, where it
+    // peaks at its own `(i + 1) / 16384`.
+    let mut shared: Vec<u8> = Vec::new();
+    for i in 0..TUPLES {
+        for axis in 0..AXES {
+            let peak: i16 = if axis == 1 { i as i16 + 1 } else { 0x4000 };
+            shared.extend_from_slice(&peak.to_be_bytes());
+        }
+    }
+    // All-points deltas for a glyph of one point: x 1, y 1.
+    let tuple_data = [0x00, 1, 0x00, 1];
+    let mut body = Vec::new();
+    body.extend_from_slice(&TUPLES.to_be_bytes());
+    body.extend_from_slice(&(4 + 4 * TUPLES).to_be_bytes()); // dataOffset
+    for i in 0..TUPLES {
+        body.extend_from_slice(&(tuple_data.len() as u16).to_be_bytes());
+        body.extend_from_slice(&i.to_be_bytes()); // shared tuple i
+    }
+    for _ in 0..TUPLES {
+        body.extend_from_slice(&tuple_data);
+    }
     let gvar = gvar_with_offsets(AXES as u16, &shared, &[0, body.len() as u32], &body);
     let mut pins = alloc::vec![AxisPin::Keep; AXES];
     pins[0] = AxisPin::Pin;

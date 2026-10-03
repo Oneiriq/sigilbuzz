@@ -37,6 +37,7 @@ use sigilbuzz::tables::glyf::PhantomMetrics;
 use sigilbuzz::tables::{tag, Glyf, Gvar, Hmtx, Loca, OutlineSink, Reader, Vmtx};
 use sigilbuzz::Face;
 
+use crate::gvar_partial::GlyphPoints;
 use crate::util::round_half_up;
 use crate::warnings::Warnings;
 use crate::SubsetError;
@@ -124,6 +125,60 @@ pub(super) fn bake_glyf_loca(
         long_loca,
         metrics: gvar.is_some().then_some(metrics),
     })
+}
+
+impl GlyfLocaBake {
+    /// The baked `glyf` body of glyph `gid`, empty for a glyph with no
+    /// outline or past the end.
+    fn body(&self, gid: u16) -> &[u8] {
+        let i = usize::from(gid);
+        let offset = |k: usize| -> Option<usize> {
+            if self.long_loca {
+                let b = self.loca.get(k * 4..k * 4 + 4)?;
+                Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            } else {
+                let b = self.loca.get(k * 2..k * 2 + 2)?;
+                Some(usize::from(u16::from_be_bytes([b[0], b[1]])) * 2)
+            }
+        };
+        offset(i)
+            .zip(offset(i + 1))
+            .and_then(|(s, e)| self.glyf.get(s..e))
+            .unwrap_or_default()
+    }
+
+    /// The gvar points of glyph `gid`, whose source body is `src_body`:
+    /// its contour points or its components' offsets in the source, and
+    /// for a simple glyph whose points this bake moved, the moved
+    /// points. `None` when the glyph cannot be read.
+    pub(super) fn glyph_points(&self, src_body: &[u8], gid: u16) -> Option<GlyphPoints> {
+        if src_body.is_empty() {
+            return Some(GlyphPoints {
+                end_pts: Vec::new(),
+                before: Vec::new(),
+                after: None,
+            });
+        }
+        if src_body.len() < 10 {
+            return None;
+        }
+        if i16::from_be_bytes([src_body[0], src_body[1]]) < 0 {
+            let components = read_component_records(src_body).ok()?;
+            return Some(GlyphPoints {
+                end_pts: Vec::new(),
+                before: components.iter().map(CompRecord::gvar_point).collect(),
+                after: None,
+            });
+        }
+        let before = SimpleGlyph::decode(src_body).ok()?;
+        let after = SimpleGlyph::decode(self.body(gid)).ok()?;
+        let moved = before.xs != after.xs || before.ys != after.ys;
+        Some(GlyphPoints {
+            after: moved.then(|| after.points()),
+            before: before.points(),
+            end_pts: before.end_pts,
+        })
+    }
 }
 
 /// Lays the glyph bodies out into `glyf`, each padded to two bytes,

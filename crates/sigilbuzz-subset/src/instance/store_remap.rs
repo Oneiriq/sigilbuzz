@@ -23,7 +23,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use super::gdef_store::{has_store, identity_map, GdefBake};
-use super::ivs::{project_ivs, shifted, RegionRemap};
+use super::ivs::{project_ivs_with, shifted, Projection, RegionRemap};
 use super::AxisPin;
 use crate::gdef::StorePlan;
 use crate::gpos_var::{walk_gpos_device_slots, VARIATION_INDEX_DELTA_FORMAT};
@@ -86,8 +86,10 @@ pub(super) fn bake_gdef_bytes_partial(
     let projected =
         match read::offset32_at(bytes, 14, 0, "GDEF ItemVariationStore offset past the end")
             .map_err(SubsetError::from)
-            .and_then(|at| project_ivs(&bytes[at..], coords, pins).map_err(|e| shifted(e, at)))
-        {
+            .and_then(|at| {
+                project_ivs_with(&bytes[at..], coords, pins, Projection::KEEP_MERGED)
+                    .map_err(|e| shifted(e, at))
+            }) {
             Ok(projected) => Some(projected),
             Err(SubsetError::Parse(e)) => {
                 warnings.parse_error(tag::GDEF, 0, &e, "the ItemVariationStore");

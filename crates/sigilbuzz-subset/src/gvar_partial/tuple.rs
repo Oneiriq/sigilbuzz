@@ -83,10 +83,14 @@ pub(super) fn parse_tuple_header(
 }
 
 pub(super) fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-    let raw = (v * 16384.0)
+    out.extend_from_slice(&f2dot14_raw(v).to_be_bytes());
+}
+
+/// The F2DOT14 bits [`write_f2dot14`] writes for `v`.
+pub(super) fn f2dot14_raw(v: f32) -> i16 {
+    (v * 16384.0)
         .round()
-        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
-    out.extend_from_slice(&raw.to_be_bytes());
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
 }
 
 // ---------------------------------------------------------------------------

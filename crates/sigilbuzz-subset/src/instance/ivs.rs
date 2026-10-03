@@ -2,11 +2,13 @@
 //! trimmed to the kept axes, deltas scaled by the pinned axes, and the
 //! row remap every table that names the store follows.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::region::project_region_onto_kept_axes;
 use super::AxisPin;
 use crate::read;
+use crate::util::round_half_up;
 use crate::SubsetError;
 
 // ---------------------------------------------------------------------------
@@ -49,10 +51,23 @@ fn f2dot14(raw: [u8; 2]) -> f32 {
 
 /// Writes an F2DOT14 to a byte vector.
 fn write_f2dot14_bytes(out: &mut Vec<u8>, v: f32) {
-    let raw = (v * 16384.0)
+    out.extend_from_slice(&f2dot14_bits(v).to_be_bytes());
+}
+
+/// The F2DOT14 bits [`write_f2dot14_bytes`] writes for `v`.
+fn f2dot14_bits(v: f32) -> i16 {
+    (v * 16384.0)
         .round()
-        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
-    out.extend_from_slice(&raw.to_be_bytes());
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+}
+
+/// A projected region as written: the F2DOT14 bits of each axis's
+/// start, peak and end.
+fn region_bits(region: &[(f32, f32, f32)]) -> Vec<[i16; 3]> {
+    region
+        .iter()
+        .map(|&(s, p, e)| [f2dot14_bits(s), f2dot14_bits(p), f2dot14_bits(e)])
+        .collect()
 }
 
 /// Narrows the position of a table written into a rebuilt parent to
@@ -80,6 +95,52 @@ pub(super) fn shifted(err: SubsetError, by: usize) -> SubsetError {
         }
         other => other,
     }
+}
+
+/// What a partial instance does with a region that, projected onto the
+/// kept axes, has no peak left: it lies on the pinned axes only, so its
+/// deltas apply alike at every kept coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PinnedOnly {
+    /// Keep the region, with a zero peak on every kept axis, so the
+    /// store keeps adding its deltas. For a store whose default values
+    /// the instance leaves at the source's default.
+    Keep,
+    /// Drop the region. For a store whose default values the instance
+    /// moved to the pinned location, as HarfBuzz's instancer does: the
+    /// deltas are in them already.
+    Drop,
+}
+
+/// How [`project_ivs_with`] projects a store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Projection {
+    /// What becomes of a region on the pinned axes only.
+    pub(crate) pinned_only: PinnedOnly,
+    /// Merge regions that project to the same kept-axis region, as
+    /// HarfBuzz's instancer does: one region in the new list, and in
+    /// each subtable one column whose deltas are the sum of the merged
+    /// columns' scaled deltas, rounded once (halves up). Without it
+    /// every surviving column stays, rounded on its own (halves away
+    /// from zero); the CFF2 bake relies on that layout.
+    pub(crate) merge: bool,
+}
+
+impl Projection {
+    /// The projection [`project_ivs`] makes.
+    pub(crate) const KEEP_ALL: Self = Self {
+        pinned_only: PinnedOnly::Keep,
+        merge: false,
+    };
+
+    /// The projection of a store whose default values stay at the
+    /// source's default (MVAR's fields, GDEF's carets and GPOS's
+    /// values): the regions on the pinned axes only stay, and regions
+    /// that project alike merge, as in HarfBuzz's instancer.
+    pub(crate) const KEEP_MERGED: Self = Self {
+        pinned_only: PinnedOnly::Keep,
+        merge: true,
+    };
 }
 
 /// [`project_ivs`] as an `Option`, for callers that treat any failure
@@ -118,6 +179,16 @@ pub(crate) fn project_ivs(
     ivs_bytes: &[u8],
     coords: &[f32],
     pins: &[AxisPin],
+) -> Result<(Vec<u8>, RegionRemap), SubsetError> {
+    project_ivs_with(ivs_bytes, coords, pins, Projection::KEEP_ALL)
+}
+
+/// [`project_ivs`], projecting as `how` says.
+pub(crate) fn project_ivs_with(
+    ivs_bytes: &[u8],
+    coords: &[f32],
+    pins: &[AxisPin],
+    how: Projection,
 ) -> Result<(Vec<u8>, RegionRemap), SubsetError> {
     const CTX: &str = "ItemVariationStore truncated";
     const OFFSET: &str = "ItemVariationStore offset past the end";
@@ -170,6 +241,8 @@ pub(crate) fn project_ivs(
     // Project each region. None -> dropped; Some((new_index, scalar)).
     let mut region_remap: Vec<Option<(u16, f32)>> = Vec::with_capacity(region_count);
     let mut new_regions: Vec<Vec<(f32, f32, f32)>> = Vec::new();
+    // The new index of each region written, by its bits, for merging.
+    let mut region_of: BTreeMap<Vec<[i16; 3]>, u16> = BTreeMap::new();
     for ri in 0..region_count {
         let record = &regions[ri * region_size..(ri + 1) * region_size];
         let region: Vec<(f32, f32, f32)> = record
@@ -182,10 +255,28 @@ pub(crate) fn project_ivs(
                 )
             })
             .collect();
-        match project_region_onto_kept_axes(&region, pins, coords) {
+        let projected = project_region_onto_kept_axes(&region, pins, coords).filter(|p| {
+            how.pinned_only == PinnedOnly::Keep
+                || p.kept_axes.iter().any(|&(_, peak, _)| peak != 0.0)
+        });
+        match projected {
             Some(p) => {
-                let new_idx = new_regions.len() as u16;
-                new_regions.push(p.kept_axes);
+                // A merging projection reuses a region it already wrote
+                // when the two read the same once written.
+                let existing = if how.merge {
+                    let next = new_regions.len() as u16;
+                    let idx = *region_of.entry(region_bits(&p.kept_axes)).or_insert(next);
+                    (idx != next).then_some(idx)
+                } else {
+                    None
+                };
+                let new_idx = match existing {
+                    Some(i) => i,
+                    None => {
+                        new_regions.push(p.kept_axes);
+                        (new_regions.len() - 1) as u16
+                    }
+                };
                 region_remap.push(Some((new_idx, p.pin_scalar)));
             }
             None => region_remap.push(None),
@@ -236,24 +327,38 @@ pub(crate) fn project_ivs(
             .map(|b| u16::from_be_bytes([b[0], b[1]]))
             .collect();
 
-        // Per-source-slot survival list: index into source slot,
-        // produces (new_region_index, scalar).
-        let mut surviving_slots: Vec<(usize, u16, f32)> = Vec::new();
+        // The new columns: each a new region index and the source slots
+        // (with their scalars) that sum into it. Without merging, one
+        // column per surviving slot.
+        let mut columns: Vec<(u16, Vec<(usize, f32)>)> = Vec::new();
+        // The column of each new region index, for merging.
+        let mut column_of: BTreeMap<u16, usize> = BTreeMap::new();
         for (slot, &old_ri) in region_indexes.iter().enumerate() {
             if let Some(Some((new_ri, scalar))) = region_remap.get(old_ri as usize) {
-                surviving_slots.push((slot, *new_ri, *scalar));
+                let merged = if how.merge {
+                    column_of.get(new_ri).and_then(|&c| columns.get_mut(c))
+                } else {
+                    None
+                };
+                match merged {
+                    Some((_, slots)) => slots.push((slot, *scalar)),
+                    None => {
+                        column_of.insert(*new_ri, columns.len());
+                        columns.push((*new_ri, alloc::vec![(slot, *scalar)]));
+                    }
+                }
             }
         }
 
         // Subtable collapses entirely if either no items or no
         // surviving regions.
-        if item_count == 0 || surviving_slots.is_empty() {
+        if item_count == 0 || columns.is_empty() {
             new_outer_for_old.push(None);
             continue;
         }
         // Every kept column is written wide, so wordDeltaCount equals
         // the kept region count, and its top bit is the LONG_WORDS flag.
-        let surviving_count = u16::try_from(surviving_slots.len())
+        let surviving_count = u16::try_from(columns.len())
             .ok()
             .filter(|&count| count <= 0x7FFF)
             .ok_or(sigilbuzz::Error::Malformed {
@@ -310,13 +415,22 @@ pub(crate) fn project_ivs(
                 };
                 src_deltas.push(value);
             }
-            // Apply scalar to each surviving slot, build the new row in
-            // surviving-slot order.
-            let new_row: Vec<i32> = surviving_slots
+            // Apply scalar to each surviving slot and sum each column,
+            // building the new row in column order.
+            let new_row: Vec<i32> = columns
                 .iter()
-                .map(|&(slot, _new_ri, scalar)| {
-                    let scaled = src_deltas.get(slot).copied().unwrap_or(0) as f32 * scalar;
-                    scaled.round() as i32
+                .map(|(_, slots)| {
+                    let scaled: f32 = slots
+                        .iter()
+                        .map(|&(slot, scalar)| {
+                            src_deltas.get(slot).copied().unwrap_or(0) as f32 * scalar
+                        })
+                        .sum();
+                    if how.merge {
+                        round_half_up(scaled)
+                    } else {
+                        scaled.round() as i32
+                    }
                 })
                 .collect();
             item_rows.push(new_row);
@@ -345,7 +459,7 @@ pub(crate) fn project_ivs(
         };
         sub_bytes.extend_from_slice(&wdc_word.to_be_bytes());
         sub_bytes.extend_from_slice(&surviving_count.to_be_bytes());
-        for &(_slot, new_ri, _scalar) in &surviving_slots {
+        for (new_ri, _) in &columns {
             sub_bytes.extend_from_slice(&new_ri.to_be_bytes());
         }
         for row in &item_rows {

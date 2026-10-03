@@ -10,6 +10,23 @@
 //! falls outside its region or hits a peak-of-zero edge case with
 //! `axis_support_scalar` evaluating to 0) are dropped entirely.
 //!
+//! The rewrite follows HarfBuzz's and fontTools' instancers:
+//!
+//! - A tuple whose region lies on the pinned axes only applies at
+//!   every kept coordinate alike. Its deltas belong in the default
+//!   outline, where the instancer has already baked them (see
+//!   [`crate::instance()`]), so the tuple goes.
+//! - Tuples whose projected regions match merge into one tuple, their
+//!   scaled deltas summed before they round, so a merged delta is off
+//!   by at most half a unit. Tuples that list different points merge
+//!   into a tuple covering every point, the points each one skips
+//!   inferred from the source's default points (IUP).
+//! - Moving the default outline changes what the points a sparse tuple
+//!   skips infer from the points it lists, so a sparse tuple of a glyph
+//!   whose points moved is checked: when its inferred deltas now land
+//!   more than half a unit from where the source puts them, the tuple
+//!   is written out with every point's delta instead.
+//!
 //! The rewrite is implemented as a self-contained re-emit:
 //!
 //! 1. Walk the source's `glyphCount`, parse each glyph's
@@ -22,10 +39,9 @@
 //!    embedded peaks is slightly larger than reusing the source's
 //!    shared-tuple list but eliminates the cross-glyph shared-tuple
 //!    coordination problem cleanly: every output tuple stands alone.
-//! 3. Output `sharedTupleCount = 0`. Per-glyph emit reproduces the
-//!    source's shared-points / per-tuple-private-points structure
-//!    verbatim: packed point numbers are copied byte-for-byte; only
-//!    the delta payloads (and the headers around them) change.
+//! 3. Output `sharedTupleCount = 0`. A tuple that keeps its source
+//!    points keeps the source's shared-points / private-points
+//!    structure: its packed point numbers are copied byte-for-byte.
 //! 4. The header's `axisCount` becomes `new_axis_count`; the header's
 //!    `glyphCount` is the source's verbatim (instancing keeps every
 //!    glyph).
@@ -35,20 +51,23 @@
 //!
 //! # Determinism
 //!
-//! Every floating-point round goes through `f32::round()`; tuple
-//! ordering matches the source. Packed-point streams are copied
-//! byte-for-byte from the source so their (compressible) layout
-//! choice is preserved when the deltas survive at all.
+//! Deltas round half up, as in HarfBuzz and fontTools; tuple ordering
+//! follows the source, a merged tuple taking the place of its first
+//! member.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::instance::{project_region_onto_kept_axes, AxisPin, F2Dot14};
+use crate::util::round_half_up;
 use crate::SubsetError;
 
+mod iup;
 mod tuple;
 
+use iup::SparseTuple;
 use tuple::{
-    count_packed_deltas, encode_packed_deltas, packed_point_numbers_byte_len,
+    count_packed_deltas, encode_packed_deltas, f2dot14_raw, packed_point_numbers_byte_len,
     parse_packed_point_numbers, parse_tuple_header, read_packed_deltas_n, write_f2dot14,
     ParsedTupleHeader,
 };
@@ -65,6 +84,39 @@ const DELTA_ALL_ZERO: u8 = 0x80;
 const DELTA_WORDS: u8 = 0x40;
 const DELTA_COUNT_MASK: u8 = 0x3F;
 
+/// The default points of one glyph: its own gvar points before the
+/// partial instance (contour points, or one per component of a
+/// composite), and, for a simple glyph whose points the instance moved,
+/// after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GlyphPoints {
+    /// The glyph's `endPtsOfContours`; empty for a composite.
+    pub(crate) end_pts: Vec<u16>,
+    /// The source's default points.
+    pub(crate) before: Vec<(i32, i32)>,
+    /// The instance's default points, as many as `before`, when they
+    /// moved.
+    pub(crate) after: Option<Vec<(i32, i32)>>,
+}
+
+/// How far, in font units, an inferred delta may land from the source's
+/// before a sparse tuple is written out in full. fontTools' instancer
+/// optimizes its tuples to the same tolerance.
+const IUP_TOLERANCE: f32 = 0.5;
+
+/// [`bake_gvar_partial_with`] for a font whose default points are not
+/// known: tuples merge only when they list the same points, and sparse
+/// tuples keep their points.
+#[cfg(test)]
+pub(crate) fn bake_gvar_partial(
+    gvar_bytes: &[u8],
+    coords: &[F2Dot14],
+    pins: &[AxisPin],
+    new_axis_count: u16,
+) -> Result<Vec<u8>, SubsetError> {
+    bake_gvar_partial_with(gvar_bytes, coords, pins, new_axis_count, &|_| None)
+}
+
 /// Bakes a partial-instancing rewrite of `gvar` against `coords` and
 /// `pins`, dropping every `Pin`-axis dimension from the file-wide axis
 /// count and every tuple region while scaling the per-point deltas by
@@ -73,13 +125,18 @@ const DELTA_COUNT_MASK: u8 = 0x3F;
 /// `new_axis_count` must equal the count of `AxisPin::Keep` entries in
 /// `pins` (the caller derives both from a single source-axis vector).
 ///
+/// `points` gives each glyph's default points (see [`GlyphPoints`]),
+/// read when tuples that list different points merge, or when a moved
+/// glyph's sparse tuple is checked; `None` when they are not known.
+///
 /// Returns the new `gvar` bytes. When every axis is `AxisPin::Keep`
 /// the source bytes pass through verbatim. No re-emit is needed.
-pub(crate) fn bake_gvar_partial(
+pub(crate) fn bake_gvar_partial_with(
     gvar_bytes: &[u8],
     coords: &[F2Dot14],
     pins: &[AxisPin],
     new_axis_count: u16,
+    points: &dyn Fn(u16) -> Option<GlyphPoints>,
 ) -> Result<Vec<u8>, SubsetError> {
     if pins.iter().all(|p| matches!(p, AxisPin::Keep)) {
         // No pinning: passthrough preserves byte-identity, which the
@@ -136,7 +193,15 @@ pub(crate) fn bake_gvar_partial(
         let new_body = if body.is_empty() {
             Vec::new()
         } else {
-            rewrite_glyph_body(body, &tuples, header.axis_count, coords, pins)?
+            let glyph_points = points(gid);
+            let glyph = GlyphCtx {
+                shared: &tuples,
+                src_axis_count: header.axis_count,
+                coords,
+                pins,
+                points: glyph_points.as_ref(),
+            };
+            rewrite_glyph_body(body, &glyph)?
         };
         bodies.push(new_body);
     }
@@ -395,17 +460,355 @@ fn project_tuple_region(
     })
 }
 
-/// Rewrites a single glyph's `GlyphVariationData` body. The output
-/// keeps the source's shared / private-points structure but emits
-/// every surviving tuple with an embedded peak (no shared-tuple
-/// references) so the output's `sharedTupleCount = 0` is consistent.
-fn rewrite_glyph_body(
-    body: &[u8],
-    shared: &SharedTuples<'_>,
+/// What one glyph's rewrite reads besides its variation data.
+struct GlyphCtx<'a> {
+    shared: &'a SharedTuples<'a>,
     src_axis_count: u16,
-    coords: &[F2Dot14],
-    pins: &[AxisPin],
-) -> Result<Vec<u8>, SubsetError> {
+    coords: &'a [F2Dot14],
+    pins: &'a [AxisPin],
+    /// The glyph's default points, when the caller knows them.
+    points: Option<&'a GlyphPoints>,
+}
+
+/// One source tuple that survives the projection, decoded.
+struct Decoded<'b> {
+    region: ProjectedRegion,
+    /// The point numbers it lists; `None` when it covers every point.
+    points: Option<Vec<u16>>,
+    /// The source x deltas, one per listed point.
+    xs: Vec<i32>,
+    /// The source y deltas, one per listed point.
+    ys: Vec<i32>,
+    /// The tuple's own packed point numbers, when it has them.
+    private_raw: Option<&'b [u8]>,
+}
+
+impl Decoded<'_> {
+    /// The deltas scaled by the pinned axes' scalar, as floats.
+    fn scaled(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
+        let s = self.region.pin_scalar;
+        self.xs
+            .iter()
+            .zip(&self.ys)
+            .map(move |(&x, &y)| (x as f32 * s, y as f32 * s))
+    }
+
+    /// The tuple's scaled deltas for all `count` points of the glyph
+    /// whose default points `points` gives, the points it skips
+    /// inferred from the source's default points.
+    fn dense(&self, points: &GlyphPoints) -> Vec<(f32, f32)> {
+        let scaled: Vec<(f32, f32)> = self.scaled().collect();
+        match &self.points {
+            Some(listed) => iup::infer(
+                listed,
+                |k| scaled.get(k).copied().unwrap_or((0.0, 0.0)),
+                &points.before,
+                &points.end_pts,
+            ),
+            None => {
+                let mut out = alloc::vec![(0.0, 0.0); points.before.len() + 4];
+                for (slot, d) in out.iter_mut().zip(&scaled) {
+                    *slot = *d;
+                }
+                out
+            }
+        }
+    }
+}
+
+/// A tuple about to be written: the first source tuple it stands for,
+/// its deltas, and whether they cover every point of the glyph rather
+/// than the points `first` lists.
+struct Merged<'d, 'b> {
+    first: &'d Decoded<'b>,
+    sum: Vec<(f32, f32)>,
+    dense: bool,
+}
+
+/// One tuple of the rewritten glyph.
+struct Survivor {
+    /// The tuple index field: embedded peak, plus the intermediate and
+    /// private point flags it needs.
+    new_tuple_index: u16,
+    region: ProjectedRegion,
+    /// Private point numbers (when it has them) and packed deltas.
+    payload: Vec<u8>,
+}
+
+/// Rewrites a single glyph's `GlyphVariationData` body. Every
+/// surviving tuple is written with an embedded peak (no shared-tuple
+/// references) so the output's `sharedTupleCount = 0` is consistent.
+///
+/// Tuples whose projected regions match merge into one, their scaled
+/// deltas summed and rounded once, as HarfBuzz's instancer merges
+/// them: a tuple per region keeps the rounding of a merged delta to
+/// half a unit. Tuples listing the same points merge into a tuple
+/// listing those points; others merge into a tuple covering every
+/// point, the points each skipped inferred from the source's default
+/// points. A tuple that merges with nothing keeps its source points. A
+/// sparse tuple whose inferred deltas the moved default points would
+/// change gets every point instead (see the module docs).
+fn rewrite_glyph_body(body: &[u8], glyph: &GlyphCtx<'_>) -> Result<Vec<u8>, SubsetError> {
+    let Some((&[tvc_hi, tvc_lo, _, _], _)) = body.split_first_chunk::<4>() else {
+        return Err(SubsetError::Unsupported(
+            "gvar partial: glyph body too short",
+        ));
+    };
+    let has_shared_points = u16::from_be_bytes([tvc_hi, tvc_lo]) & SHARED_POINTS_FLAG != 0;
+    let (decoded, shared_points_raw) = decode_tuples(body, glyph)?;
+
+    // Group the survivors by projected region, in order of first
+    // appearance.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_of: BTreeMap<RegionKey, usize> = BTreeMap::new();
+    for (i, d) in decoded.iter().enumerate() {
+        let next = groups.len();
+        let g = *group_of.entry(RegionKey::of(&d.region)).or_insert(next);
+        match groups.get_mut(g) {
+            Some(members) => members.push(i),
+            None => groups.push(alloc::vec![i]),
+        }
+    }
+
+    let mut survivors: Vec<Survivor> = Vec::with_capacity(groups.len());
+    let mut keep_shared_points = false;
+    for members in &groups {
+        let first = &decoded[members[0]];
+        let same_points = members
+            .iter()
+            .all(|&m| decoded[m].points == first.points && decoded[m].xs.len() == first.xs.len());
+        // The merged deltas: per listed point when the members list the
+        // same points, else per point of the glyph.
+        let merged: Option<(Vec<(f32, f32)>, bool)> = if members.len() == 1 || same_points {
+            let mut sum = alloc::vec![(0.0_f32, 0.0_f32); first.xs.len()];
+            for &m in members {
+                for (slot, d) in sum.iter_mut().zip(decoded[m].scaled()) {
+                    slot.0 += d.0;
+                    slot.1 += d.1;
+                }
+            }
+            Some((sum, false))
+        } else if let Some(points) = glyph.points {
+            let mut sum = alloc::vec![(0.0_f32, 0.0_f32); points.before.len() + 4];
+            for &m in members {
+                for (slot, d) in sum.iter_mut().zip(decoded[m].dense(points)) {
+                    slot.0 += d.0;
+                    slot.1 += d.1;
+                }
+            }
+            Some((sum, true))
+        } else {
+            None
+        };
+        // Without default points to infer merged deltas from, the
+        // members stay apart.
+        let tuples: Vec<Merged<'_, '_>> = match merged {
+            Some((sum, dense)) => alloc::vec![Merged { first, sum, dense }],
+            None => members
+                .iter()
+                .map(|&m| Merged {
+                    first: &decoded[m],
+                    sum: decoded[m].scaled().collect(),
+                    dense: false,
+                })
+                .collect(),
+        };
+        for Merged {
+            first: d,
+            sum,
+            dense,
+        } in tuples
+        {
+            // A tuple whose deltas all round to zero moves nothing.
+            if sum
+                .iter()
+                .all(|&(x, y)| round_half_up(x) == 0 && round_half_up(y) == 0)
+            {
+                continue;
+            }
+            let tuple = if dense {
+                dense_payload(&sum).map(|payload| (payload, true))
+            } else {
+                sparse_tuple(d, &sum, glyph.points)
+            };
+            let (payload, private) = tuple.ok_or(SubsetError::Unsupported(
+                "gvar partial: tuple payload exceeds u16 size",
+            ))?;
+            survivors.push(survivor(&d.region, payload, private)?);
+            keep_shared_points |= !private && has_shared_points;
+        }
+    }
+
+    // If no tuples survive, the glyph has no variation. Emit empty.
+    if survivors.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // The header block: tuple count, data offset, and every tuple
+    // header. Its end is the u16 data offset.
+    let header_block_len = survivors.iter().fold(4usize, |len, s| {
+        let axes_per_header = if s.region.intermediate.is_some() {
+            3
+        } else {
+            1
+        };
+        len + 4 + 2 * axes_per_header * s.region.peak.len()
+    });
+    let data_offset = u16::try_from(header_block_len).map_err(|_| {
+        SubsetError::Unsupported("gvar partial: tuple headers exceed the u16 data offset")
+    })?;
+
+    // ---- Emit ----
+    let mut out: Vec<u8> = Vec::new();
+
+    // Header word: tuple count + sharedPoints flag.
+    let mut tvc_word: u16 = survivors.len() as u16 & TUPLE_COUNT_MASK;
+    if keep_shared_points {
+        tvc_word |= SHARED_POINTS_FLAG;
+    }
+    out.extend_from_slice(&tvc_word.to_be_bytes());
+    out.extend_from_slice(&data_offset.to_be_bytes());
+
+    // Tuple variation headers.
+    for s in &survivors {
+        out.extend_from_slice(&(s.payload.len() as u16).to_be_bytes());
+        out.extend_from_slice(&s.new_tuple_index.to_be_bytes());
+        for &p in &s.region.peak {
+            write_f2dot14(&mut out, p);
+        }
+        if let Some((starts, ends)) = &s.region.intermediate {
+            for &v in starts {
+                write_f2dot14(&mut out, v);
+            }
+            for &v in ends {
+                write_f2dot14(&mut out, v);
+            }
+        }
+    }
+    debug_assert_eq!(out.len(), header_block_len);
+
+    // Shared point numbers (if any survivor still references them).
+    if keep_shared_points {
+        if let Some(sp_raw) = shared_points_raw {
+            out.extend_from_slice(sp_raw);
+        }
+    }
+
+    // Per-tuple payloads.
+    for s in &survivors {
+        out.extend_from_slice(&s.payload);
+    }
+
+    Ok(out)
+}
+
+/// A projected region as written: its F2DOT14 peak, then its
+/// intermediate start and end when it has them. Tuples merge when
+/// their keys match.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RegionKey(Vec<i16>);
+
+impl RegionKey {
+    fn of(region: &ProjectedRegion) -> Self {
+        let raw = |v: f32| f2dot14_raw(v);
+        let mut key: Vec<i16> = region.peak.iter().map(|&p| raw(p)).collect();
+        if let Some((starts, ends)) = &region.intermediate {
+            key.push(i16::MIN); // Keeps a peak-only key apart.
+            key.extend(starts.iter().chain(ends).map(|&v| raw(v)));
+        }
+        Self(key)
+    }
+}
+
+/// The payload of a tuple listing `first`'s points (all of them when
+/// it lists none) with the deltas `sum`, rounded, and whether it has
+/// private point numbers. A sparse tuple of a glyph whose default
+/// points moved is written with every point instead when its inferred
+/// deltas would drift. `None` when the payload outgrows its u16 size.
+fn sparse_tuple(
+    first: &Decoded<'_>,
+    sum: &[(f32, f32)],
+    points: Option<&GlyphPoints>,
+) -> Option<(Vec<u8>, bool)> {
+    let xs: Vec<i32> = sum.iter().map(|d| round_half_up(d.0)).collect();
+    let ys: Vec<i32> = sum.iter().map(|d| round_half_up(d.1)).collect();
+    let moved = points.and_then(|p| p.after.as_ref().map(|after| (p, after)));
+    if let (Some((points, after)), Some(listed)) = (moved, first.points.as_deref()) {
+        let tuple = SparseTuple {
+            points: listed,
+            deltas: sum,
+        };
+        if let Some(dense) = tuple.densified_if_drifting(points, after, &xs, &ys) {
+            // A glyph too large for every point keeps the sparse form.
+            if let Some(payload) = dense_payload(&dense) {
+                return Some((payload, true));
+            }
+        }
+    }
+    let mut payload: Vec<u8> = Vec::new();
+    if let Some(raw) = first.private_raw {
+        payload.extend_from_slice(raw);
+    }
+    encode_packed_deltas(&xs, &mut payload);
+    encode_packed_deltas(&ys, &mut payload);
+    (payload.len() <= usize::from(u16::MAX)).then_some((payload, first.private_raw.is_some()))
+}
+
+/// The payload of a tuple covering every point with the deltas `sum`,
+/// rounded: private point numbers naming them all, then the deltas.
+/// `None` when it outgrows its u16 size.
+fn dense_payload(sum: &[(f32, f32)]) -> Option<Vec<u8>> {
+    let xs: Vec<i32> = sum.iter().map(|d| round_half_up(d.0)).collect();
+    let ys: Vec<i32> = sum.iter().map(|d| round_half_up(d.1)).collect();
+    let mut payload = alloc::vec![0u8];
+    encode_packed_deltas(&xs, &mut payload);
+    encode_packed_deltas(&ys, &mut payload);
+    (payload.len() <= usize::from(u16::MAX)).then_some(payload)
+}
+
+/// The survivor for `region` with `payload`, flagged when the payload
+/// starts with private point numbers. Without them the tuple reads the
+/// glyph's shared point numbers, or covers every point when the glyph
+/// has none.
+fn survivor(
+    region: &ProjectedRegion,
+    payload: Vec<u8>,
+    private: bool,
+) -> Result<Survivor, SubsetError> {
+    // The variationDataSize field is a u16. The spec imposes no limit
+    // beyond that.
+    if payload.len() > usize::from(u16::MAX) {
+        return Err(SubsetError::Unsupported(
+            "gvar partial: tuple payload exceeds u16 size",
+        ));
+    }
+    // Embedded-peak is always set; the low 12 bits are unused in the
+    // new layout (no shared-tuple references).
+    let mut new_tuple_index: u16 = FLAG_EMBEDDED_PEAK;
+    if region.intermediate.is_some() {
+        new_tuple_index |= FLAG_INTERMEDIATE_REGION;
+    }
+    if private {
+        new_tuple_index |= FLAG_PRIVATE_POINT_NUMBERS;
+    }
+    Ok(Survivor {
+        new_tuple_index,
+        region: region.clone(),
+        payload,
+    })
+}
+
+/// Decodes every tuple of the glyph `body` that survives the
+/// projection, in order, and returns them with the glyph's packed
+/// shared point numbers. Tuples whose region drops at the pin
+/// coordinates, or keeps no kept-axis peak (the instance baked those
+/// into the default outline), are skipped.
+fn decode_tuples<'b>(
+    body: &'b [u8],
+    glyph: &GlyphCtx<'_>,
+) -> Result<(Vec<Decoded<'b>>, Option<&'b [u8]>), SubsetError> {
+    let (shared, src_axis_count, coords, pins) =
+        (glyph.shared, glyph.src_axis_count, glyph.coords, glyph.pins);
     let Some((&[tvc_hi, tvc_lo, off_hi, off_lo], mut header_bytes)) = body.split_first_chunk::<4>()
     else {
         return Err(SubsetError::Unsupported(
@@ -442,27 +845,11 @@ fn rewrite_glyph_body(
     } else {
         None
     };
-    // Shared point count, parsed the first time a tuple needs it.
-    let mut shared_point_count: Option<usize> = None;
+    // Shared point numbers, parsed the first time a tuple needs them.
+    // Empty means every point.
+    let mut shared_points: Option<Vec<u16>> = None;
 
-    // Walk each tuple. Every survivor keeps its rewritten header
-    // fields plus its pre-encoded data payload (private points +
-    // packed x deltas + packed y deltas).
-    struct Survivor {
-        // The new tuple_index field for the output (with embedded-peak
-        // bit set, optional intermediate / private-point bits copied
-        // from source).
-        new_tuple_index: u16,
-        region: ProjectedRegion,
-        payload: Vec<u8>,
-    }
-
-    let mut survivors: Vec<Survivor> = Vec::with_capacity(tuple_count);
-    let mut keep_shared_points = false;
-    // Size of the output header block (tuple count, data offset, and
-    // every tuple header). Its end is the u16 data offset.
-    let mut header_block_len = 4usize;
-
+    let mut out: Vec<Decoded<'b>> = Vec::with_capacity(tuple_count);
     for header in &headers {
         let tuple_data_len = header.variation_data_size as usize;
         let tuple_bytes = data_region
@@ -481,11 +868,9 @@ fn rewrite_glyph_body(
             .as_deref()
             .zip(header.intermediate_end.as_deref());
         // A `None` projection means the tuple drops: skip it.
-        let computed: Option<ProjectedRegion>;
-        let region: &ProjectedRegion = match &header.embedded_peak {
+        let region: ProjectedRegion = match &header.embedded_peak {
             Some(peak) => {
-                computed = project_tuple_region(peak, intermediate, src_axis_count, coords, pins);
-                match &computed {
+                match project_tuple_region(peak, intermediate, src_axis_count, coords, pins) {
                     Some(region) => region,
                     None => continue,
                 }
@@ -496,18 +881,14 @@ fn rewrite_glyph_body(
                     // Malformed: drop the tuple silently.
                     continue;
                 };
-                if intermediate.is_some() {
-                    computed =
-                        project_tuple_region(peak, intermediate, src_axis_count, coords, pins);
-                    match &computed {
-                        Some(region) => region,
-                        None => continue,
-                    }
+                let projected = if intermediate.is_some() {
+                    project_tuple_region(peak, intermediate, src_axis_count, coords, pins)
                 } else {
-                    match shared.projections.get(idx) {
-                        Some(Some(region)) => region,
-                        _ => continue,
-                    }
+                    shared.projections.get(idx).cloned().flatten()
+                };
+                match projected {
+                    Some(region) => region,
+                    None => continue,
                 }
             }
         };
@@ -516,167 +897,57 @@ fn rewrite_glyph_body(
         let mut tr = 0usize;
         // Private points (when the tuple's flag is set). We preserve
         // the raw bytes too so the output emits the same packed form.
-        let (private_points, private_points_raw, tuple_is_all_points) =
-            if header.private_point_numbers {
-                let used = packed_point_numbers_byte_len(tuple_bytes)?;
-                let raw = tuple_bytes.get(..used).unwrap_or_default();
-                let pts = parse_packed_point_numbers(raw)?;
-                let all_pts = pts.is_empty();
-                tr = used;
-                (Some(pts), Some(raw), all_pts)
-            } else {
-                (None, None, false)
-            };
+        let (private_points, private_raw) = if header.private_point_numbers {
+            let used = packed_point_numbers_byte_len(tuple_bytes)?;
+            let raw = tuple_bytes.get(..used).unwrap_or_default();
+            tr = used;
+            (Some(parse_packed_point_numbers(raw)?), Some(raw))
+        } else {
+            (None, None)
+        };
         let deltas_bytes = tuple_bytes.get(tr..).unwrap_or_default();
 
-        // Resolve the effective point count.
-        let n: usize = if header.private_point_numbers {
-            if tuple_is_all_points {
-                // All-points: caller-provided num_points needed, but
-                // we don't have it here. Fortunately the packed-deltas
-                // decoder eats whatever the headers say; we recover
-                // n by decoding "all available" from the byte stream.
-                count_packed_deltas(deltas_bytes)?
-            } else {
-                private_points.as_ref().map_or(0, Vec::len)
-            }
-        } else if has_shared_points {
-            // shared_points: same logic. We need the count.
-            let count = match shared_point_count {
-                Some(count) => count,
-                None => {
-                    let count =
-                        parse_packed_point_numbers(shared_points_raw.unwrap_or_default())?.len();
-                    shared_point_count = Some(count);
-                    count
+        // The points the tuple lists: its own, the glyph's shared
+        // ones, or (an empty list, or none at all) every point.
+        let listed: Option<Vec<u16>> = match private_points {
+            Some(points) => Some(points),
+            None if has_shared_points => {
+                if shared_points.is_none() {
+                    shared_points = Some(parse_packed_point_numbers(
+                        shared_points_raw.unwrap_or_default(),
+                    )?);
                 }
-            };
-            if count == 0 {
-                count_packed_deltas(deltas_bytes)?
-            } else {
-                count
+                shared_points.clone()
             }
-        } else {
-            // No point lists at all: spec says this is the all-
-            // points case. Recover n from the delta stream byte
-            // length.
-            count_packed_deltas(deltas_bytes)?
-        };
+            None => None,
+        }
+        .filter(|points| !points.is_empty());
 
+        // The all-points form packs as many deltas as the glyph has
+        // points; recover the count from the delta stream itself.
+        let n = match &listed {
+            Some(points) => points.len(),
+            None => count_packed_deltas(deltas_bytes)?,
+        };
         let (xs, used_x) = read_packed_deltas_n(deltas_bytes, n)?;
         let (ys, _used_y) =
             read_packed_deltas_n(deltas_bytes.get(used_x..).unwrap_or_default(), n)?;
 
-        // Drop survivors whose new region collapses to no-contribution
-        // on every Keep axis (every peak is zero: the kept-axis
-        // tuple is a no-op). The static contribution at the pin
-        // coords is not carried by the rewritten gvar.
+        // A tuple left with no Keep-axis peak applies everywhere alike:
+        // the instance baked its deltas into the default outline, so
+        // it goes.
         if region.all_zero_peak {
             continue;
         }
-
-        // Scale by pin_scalar and pre-encode the tuple's data region
-        // so its variationDataSize is known.
-        let scalar = region.pin_scalar;
-        let scale = |v: i32| -> i32 {
-            let scaled = (v as f32 * scalar).round() as i64;
-            scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-        };
-        let x_scaled: Vec<i32> = xs.iter().copied().map(scale).collect();
-        let y_scaled: Vec<i32> = ys.iter().copied().map(scale).collect();
-        let mut payload: Vec<u8> = Vec::new();
-        if let Some(raw) = private_points_raw {
-            payload.extend_from_slice(raw);
-        }
-        encode_packed_deltas(&x_scaled, &mut payload);
-        encode_packed_deltas(&y_scaled, &mut payload);
-        // The variationDataSize field is a u16. The spec imposes no limit
-        // beyond that.
-        if payload.len() > usize::from(u16::MAX) {
-            return Err(SubsetError::Unsupported(
-                "gvar partial: tuple payload exceeds u16 size",
-            ));
-        }
-
-        // Build the new tuple_index. Embedded-peak is always set; the
-        // low 12 bits are unused in the new layout (no shared-tuple
-        // references).
-        let mut new_idx: u16 = FLAG_EMBEDDED_PEAK;
-        if region.intermediate.is_some() {
-            new_idx |= FLAG_INTERMEDIATE_REGION;
-        }
-        if header.private_point_numbers {
-            new_idx |= FLAG_PRIVATE_POINT_NUMBERS;
-        } else if has_shared_points {
-            // Mark that this glyph still uses shared points.
-            keep_shared_points = true;
-        }
-
-        // The data offset that follows the tuple headers is a u16.
-        // A header block past it cannot be encoded.
-        let axes_per_header = if region.intermediate.is_some() { 3 } else { 1 };
-        header_block_len += 4 + 2 * axes_per_header * region.peak.len();
-        if header_block_len > usize::from(u16::MAX) {
-            return Err(SubsetError::Unsupported(
-                "gvar partial: tuple headers exceed the u16 data offset",
-            ));
-        }
-
-        survivors.push(Survivor {
-            new_tuple_index: new_idx,
-            region: region.clone(),
-            payload,
+        out.push(Decoded {
+            region,
+            points: listed,
+            xs,
+            ys,
+            private_raw,
         });
     }
-
-    // If no tuples survive, the glyph has no variation. Emit empty.
-    if survivors.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // ---- Emit ----
-    let mut out: Vec<u8> = Vec::new();
-
-    // Header word: tuple count + sharedPoints flag.
-    let mut tvc_word: u16 = survivors.len() as u16 & TUPLE_COUNT_MASK;
-    if keep_shared_points {
-        tvc_word |= SHARED_POINTS_FLAG;
-    }
-    out.extend_from_slice(&tvc_word.to_be_bytes());
-    // dataOffset: the header block size, checked against u16 above.
-    out.extend_from_slice(&(header_block_len as u16).to_be_bytes());
-
-    // Tuple variation headers.
-    for s in &survivors {
-        out.extend_from_slice(&(s.payload.len() as u16).to_be_bytes());
-        out.extend_from_slice(&s.new_tuple_index.to_be_bytes());
-        for &p in &s.region.peak {
-            write_f2dot14(&mut out, p);
-        }
-        if let Some((starts, ends)) = &s.region.intermediate {
-            for &v in starts {
-                write_f2dot14(&mut out, v);
-            }
-            for &v in ends {
-                write_f2dot14(&mut out, v);
-            }
-        }
-    }
-    debug_assert_eq!(out.len(), header_block_len);
-
-    // Shared point numbers (if any survivor still references them).
-    if keep_shared_points {
-        if let Some(sp_raw) = shared_points_raw {
-            out.extend_from_slice(sp_raw);
-        }
-    }
-
-    // Per-tuple payloads.
-    for s in &survivors {
-        out.extend_from_slice(&s.payload);
-    }
-
-    Ok(out)
+    Ok((out, shared_points_raw))
 }
 
 #[cfg(test)]

@@ -9,9 +9,11 @@ use sigilbuzz::Face;
 
 use super::axes::{bake_avar_partial, bake_fvar_partial};
 use super::gdef_store::GdefBake;
-use super::metrics_var::{bake_hvar_partial, bake_mvar_partial, bake_vvar_partial};
+use super::ivs::PinnedOnly;
+use super::metrics::{bake_vorg, MvarBake, VorgBake};
+use super::metrics_var::{bake_hvar_partial_with, bake_mvar_partial, bake_vvar_partial_with};
 use super::store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
-use super::{post_avar, AxisPin, InstanceInput, InstancedOutput};
+use super::{post_avar, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput};
 use crate::sfnt;
 use crate::warnings::Warnings;
 use crate::SubsetError;
@@ -32,11 +34,17 @@ use crate::SubsetError;
 /// - rebuilds `GDEF` around its projected store and renumbers every
 ///   VariationIndex in it and in `GPOS` to match (see
 ///   [`store_remap`](super::store_remap)),
-/// - rides `glyf` / `hmtx` / `vmtx` / `head` / `hhea` / `maxp` /
-///   the rest of the layout and other tables through verbatim. The Keep-axis
-///   variations stay live; the Pin-axis dimensions fold into the
-///   trimmed deltas so a shaper at `(Keep coords)` produces exactly
-///   what the source produced at `(Keep coords, Pin coords)`.
+/// - for a `glyf` font with `gvar`, bakes `glyf`, `hmtx`, `vmtx`, `VORG`
+///   and the `head` / `hhea` / `vhea` fields that follow from them at
+///   the new default (the pinned axes at their pins, the kept axes at
+///   their defaults), as HarfBuzz's instancer does; the gvar tuples and
+///   the `HVAR` / `VVAR` regions left on the pinned axes only are in
+///   those tables now, so the variation tables drop them,
+/// - rides `maxp` and the rest of the layout and other tables through
+///   verbatim. The Keep-axis variations stay live; the Pin-axis
+///   dimensions fold into the trimmed deltas so a shaper at
+///   `(Keep coords)` produces what the source produced at
+///   `(Keep coords, Pin coords)`, within rounding.
 ///
 /// An `avar`, `HVAR`, `VVAR` or `MVAR` that cannot be rebuilt for the
 /// kept axes (malformed, or an `avar` other than version 1) is left
@@ -92,19 +100,55 @@ pub(super) fn partial_instance(
         }
     }
 
+    // A glyf font with gvar gets its default outlines and glyph metrics
+    // at the pinned location (the kept axes at their defaults), as
+    // HarfBuzz's instancer does: the gvar tuples and the HVAR and VVAR
+    // regions left on the pinned axes only are baked into glyf, hmtx,
+    // vmtx and VORG, and leave the variation tables.
+    let fold_glyphs = face.record(tag::GLYF).is_some() && matches!(face.gvar(), Ok(Some(_)));
+    let pinned_only = if fold_glyphs {
+        PinnedOnly::Drop
+    } else {
+        PinnedOnly::Keep
+    };
+    let default_coords: Vec<f32> = post_avar_coords
+        .iter()
+        .zip(pins)
+        .map(|(&c, pin)| if *pin == AxisPin::Keep { 0.0 } else { c })
+        .collect();
+    let glyf_bake = if fold_glyphs {
+        Some(push_glyf_tables(
+            face,
+            &default_coords,
+            &MvarBake::default(),
+            &warnings,
+            &mut tables,
+        )?)
+    } else {
+        None
+    };
+    let vorg_bake = if fold_glyphs {
+        bake_vorg(face, &default_coords, face.maxp()?.num_glyphs, &warnings)
+    } else {
+        VorgBake::Unchanged
+    };
+    if let VorgBake::Rebuilt(b) = &vorg_bake {
+        tables.push((tag::VORG, b.clone()));
+    }
+
     // HVAR / VVAR / MVAR rewrites (optional). A malformed table is
     // dropped (its metrics stop varying) and reported.
-    type MetricsBake = fn(&[u8], &[f32], &[AxisPin]) -> Result<Vec<u8>, SubsetError>;
-    let metrics_bakes: [([u8; 4], MetricsBake); 3] = [
-        (tag::HVAR, bake_hvar_partial),
-        (tag::VVAR, bake_vvar_partial),
-        (tag::MVAR, bake_mvar_partial),
-    ];
+    let hvar = |b: &[u8]| bake_hvar_partial_with(b, &post_avar_coords, pins, pinned_only);
+    let vvar = |b: &[u8]| bake_vvar_partial_with(b, &post_avar_coords, pins, pinned_only);
+    let mvar = |b: &[u8]| bake_mvar_partial(b, &post_avar_coords, pins);
+    type MetricsBake<'b> = &'b dyn Fn(&[u8]) -> Result<Vec<u8>, SubsetError>;
+    let metrics_bakes: [([u8; 4], MetricsBake<'_>); 3] =
+        [(tag::HVAR, &hvar), (tag::VVAR, &vvar), (tag::MVAR, &mvar)];
     for (table, bake) in metrics_bakes {
         let Ok(bytes) = face.table_bytes(table) else {
             continue;
         };
-        match bake(bytes, &post_avar_coords, pins) {
+        match bake(bytes) {
             Ok(new) => tables.push((table, new)),
             Err(SubsetError::Parse(e)) => {
                 warnings.parse_error(table, 0, &e, "the whole table");
@@ -159,14 +203,25 @@ pub(super) fn partial_instance(
     // gvar tuple-projection rewrite (optional). Pin-axis support
     // scalars fold into per-point deltas; Pin-axis dimensions drop
     // from every tuple region; tuples whose Pin-axis support is zero
-    // disappear. Output gvar's axisCount = Keep-axis count.
+    // disappear, and so do those left on the pinned axes only, whose
+    // deltas the glyf bake moved into the default outlines. Output
+    // gvar's axisCount = Keep-axis count.
     if let Ok(gvar_bytes) = face.table_bytes(tag::GVAR) {
         let new_axis_count = pins.iter().filter(|p| matches!(p, AxisPin::Keep)).count() as u16;
-        let new_gvar = crate::gvar_partial::bake_gvar_partial(
+        let src_glyf = face.table_bytes(tag::GLYF).ok();
+        let src_loca = face.loca().ok();
+        let points = |gid: u16| {
+            let (bake, glyf, loca) = (glyf_bake.as_ref()?, src_glyf?, src_loca.as_ref()?);
+            let (start, end) = loca.range(gid)?;
+            let body = glyf.get(start as usize..end as usize)?;
+            bake.glyf.glyph_points(body, gid)
+        };
+        let new_gvar = crate::gvar_partial::bake_gvar_partial_with(
             gvar_bytes,
             &post_avar_coords,
             pins,
             new_axis_count,
+            &points,
         )?;
         tables.push((tag::GVAR, new_gvar));
     }
@@ -184,6 +239,14 @@ pub(super) fn partial_instance(
             continue;
         }
         if dropped.contains(&rec.tag) {
+            continue;
+        }
+        // Vertical metrics the glyph bake could not read, and a VORG
+        // it could not fold the pinned axes into, are left out.
+        let left_out = glyf_bake
+            .as_ref()
+            .is_some_and(|b| b.vmtx.left_out.contains(&rec.tag));
+        if left_out || (rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped) {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
