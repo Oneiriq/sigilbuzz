@@ -181,7 +181,9 @@ impl<'a> Gvar<'a> {
         // point index. A `Vec<PointDelta>` gives deterministic
         // output and avoids HashMap ordering nondeterminism.
         let mut acc = DeltaAccumulator::default();
-        let walked = self.walk_tuples(glyph_id, coords, usize::from(num_points), |t| {
+        let mut work = MAX_TUPLE_WORK;
+        let num_points = usize::from(num_points);
+        let walked = self.walk_tuples(glyph_id, coords, num_points, &mut work, |t| {
             match t.points {
                 None => {
                     for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate() {
@@ -269,6 +271,21 @@ impl<'a> Gvar<'a> {
         points: &[(i32, i32)],
         end_points: &[u16],
     ) -> Result<Vec<(f32, f32)>> {
+        let mut work = MAX_TUPLE_WORK;
+        self.glyph_point_deltas_with(glyph_id, coords, points, end_points, &mut work)
+    }
+
+    /// [`Gvar::glyph_point_deltas`], charging the tuples it decodes to
+    /// `work`, which an outline walk shares across every glyph it
+    /// visits (see [`MAX_TUPLE_WORK`]).
+    pub(crate) fn glyph_point_deltas_with(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        points: &[(i32, i32)],
+        end_points: &[u16],
+        work: &mut usize,
+    ) -> Result<Vec<(f32, f32)>> {
         let count = points.len() + PHANTOM_COUNT;
         let mut total = alloc::vec![(0.0_f32, 0.0_f32); count];
         // Contour membership, from the end point numbers. Points past
@@ -284,7 +301,7 @@ impl<'a> Gvar<'a> {
         // points.
         let mut tuple: Vec<(f32, f32)> = Vec::new();
         let mut listed: Vec<bool> = Vec::new();
-        self.walk_tuples(glyph_id, coords, count, |t| match t.points {
+        self.walk_tuples(glyph_id, coords, count, work, |t| match t.points {
             None => {
                 for ((slot, &x), &y) in total.iter_mut().zip(t.xs).zip(t.ys) {
                     slot.0 += t.scalar * x as f32;
@@ -317,12 +334,15 @@ impl<'a> Gvar<'a> {
 
     /// Deltas of the four phantom points of a glyph with `num_points`
     /// points of its own (contour points, or components). Only listed
-    /// deltas apply: phantom points are on no contour.
+    /// deltas apply: phantom points are on no contour. The tuples it
+    /// decodes are charged to `work`, as in
+    /// [`Gvar::glyph_point_deltas_with`].
     pub(crate) fn phantom_deltas(
         &self,
         glyph_id: u16,
         coords: &[f32],
         num_points: usize,
+        work: &mut usize,
     ) -> Result<[(f32, f32); 4]> {
         let mut out = [(0.0_f32, 0.0_f32); PHANTOM_COUNT];
         let mut add = |i: usize, x: i32, y: i32, scalar: f32| {
@@ -331,17 +351,16 @@ impl<'a> Gvar<'a> {
                 slot.1 += scalar * y as f32;
             }
         };
-        self.walk_tuples(glyph_id, coords, num_points + PHANTOM_COUNT, |t| {
-            match t.points {
-                None => {
-                    for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate().skip(num_points) {
-                        add(i, x, y, t.scalar);
-                    }
+        let count = num_points + PHANTOM_COUNT;
+        self.walk_tuples(glyph_id, coords, count, work, |t| match t.points {
+            None => {
+                for (i, (&x, &y)) in t.xs.iter().zip(t.ys).enumerate().skip(num_points) {
+                    add(i, x, y, t.scalar);
                 }
-                Some(numbers) => {
-                    for ((&pt, &x), &y) in numbers.iter().zip(t.xs).zip(t.ys) {
-                        add(usize::from(pt), x, y, t.scalar);
-                    }
+            }
+            Some(numbers) => {
+                for ((&pt, &x), &y) in numbers.iter().zip(t.xs).zip(t.ys) {
+                    add(usize::from(pt), x, y, t.scalar);
                 }
             }
         })?;
@@ -362,6 +381,10 @@ impl<'a> Gvar<'a> {
     /// `num_points` is the glyph's point count including the phantom
     /// points: the all-points form packs that many deltas.
     ///
+    /// Each tuple header read costs one unit of `work`, and each tuple
+    /// decoded costs `num_points` more, as HarfBuzz charges its glyph
+    /// budget per tuple. Running out fails the walk.
+    ///
     /// Glyph ids past the end and glyphs with no data visit nothing.
     /// Errors carry offsets from the start of the table.
     fn walk_tuples<F>(
@@ -369,6 +392,7 @@ impl<'a> Gvar<'a> {
         glyph_id: u16,
         coords: &[f32],
         num_points: usize,
+        work: &mut usize,
         mut visit: F,
     ) -> Result<()>
     where
@@ -406,7 +430,7 @@ impl<'a> Gvar<'a> {
                 context: "gvar glyph data past end of table",
             });
         };
-        self.walk_glyph_data(body, coords, num_points, &mut visit)
+        self.walk_glyph_data(body, coords, num_points, work, &mut visit)
             .map_err(|e| rebase(e, gvd_start))
     }
 
@@ -417,6 +441,7 @@ impl<'a> Gvar<'a> {
         body: &[u8],
         coords: &[f32],
         num_points: usize,
+        work: &mut usize,
         visit: &mut dyn FnMut(&TupleDeltas<'_>),
     ) -> Result<()> {
         let mut r = Reader::new(body);
@@ -431,6 +456,7 @@ impl<'a> Gvar<'a> {
         let mut headers: Vec<TupleVariationHeader> =
             Vec::with_capacity((tuple_count as usize).min(r.remaining() / 4));
         for _ in 0..tuple_count {
+            charge(work, 1, r.position())?;
             headers.push(TupleVariationHeader::read(&mut r, self.axis_count)?);
         }
 
@@ -456,10 +482,6 @@ impl<'a> Gvar<'a> {
             None
         };
 
-        // Every visited tuple costs the caller work in proportion to
-        // the point count, so a glyph of many small tuples over many
-        // points is capped, as HarfBuzz charges its budget per tuple.
-        let mut work = 0usize;
         for header in &headers {
             let tuple_start = cursor;
             let tuple_data_len = header.variation_data_size as usize;
@@ -492,13 +514,11 @@ impl<'a> Gvar<'a> {
                 continue;
             }
 
-            work = work.saturating_add(num_points.max(1));
-            if work > MAX_TUPLE_WORK {
-                return Err(Error::Malformed {
-                    offset: 0,
-                    context: "gvar glyph variation data exceeds the work cap",
-                });
-            }
+            // Every decoded tuple costs the caller work in proportion
+            // to the point count, so a glyph of many small tuples over
+            // many points is capped, as HarfBuzz charges its budget per
+            // tuple.
+            charge(work, num_points.max(1), data_off + tuple_start)?;
 
             // Within the tuple's bytes: optional private point
             // numbers, then packed x deltas, then packed y deltas.
@@ -543,10 +563,23 @@ const GVAR_HEADER_SIZE: usize = 20;
 /// Phantom points gvar appends after a glyph's own points.
 const PHANTOM_COUNT: usize = 4;
 
-/// Cap on the points times tuples one glyph's variation data may make
-/// a caller walk. Real glyphs stay far below it: a few hundred points
-/// over at most a few hundred tuples.
-const MAX_TUPLE_WORK: usize = 1 << 24;
+/// Cap on the tuple work one walk may do: one unit per tuple header,
+/// plus the point count of every tuple it decodes. A call on one glyph
+/// gets the whole cap; an outline walk shares one cap across every
+/// glyph it visits, as HarfBuzz passes one budget (also `1 << 24`)
+/// down its `get_points` recursion. Real glyphs stay far below it: a
+/// few hundred points over at most a few hundred tuples.
+pub(crate) const MAX_TUPLE_WORK: usize = 1 << 24;
+
+/// Takes `cost` units from `work`, or fails with the byte offset of the
+/// tuple data that would overspend it.
+fn charge(work: &mut usize, cost: usize, offset: usize) -> Result<()> {
+    *work = work.checked_sub(cost).ok_or(Error::Malformed {
+        offset,
+        context: "gvar variation work exceeds the cap",
+    })?;
+    Ok(())
+}
 
 /// One tuple's decoded deltas, as [`Gvar::walk_tuples`] hands them out.
 struct TupleDeltas<'t> {

@@ -52,7 +52,7 @@ mod simple;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::gvar::Gvar;
+use crate::tables::gvar::{Gvar, MAX_TUPLE_WORK};
 use crate::tables::hmtx::Hmtx;
 use crate::tables::loca::Loca;
 use crate::tables::outline::OutlineSink;
@@ -154,6 +154,11 @@ const MAX_FLATTEN_POINTS: usize = 1 << 18;
 struct FlattenBudget {
     glyphs: u32,
     points: usize,
+    /// `gvar` tuple work left for the whole walk. Every glyph the walk
+    /// visits decodes its own tuples, and a composite can visit the
+    /// same glyph many times, so one cap ([`MAX_TUPLE_WORK`]) covers
+    /// them all, as HarfBuzz shares one budget across `get_points`.
+    work: usize,
 }
 
 impl FlattenBudget {
@@ -161,6 +166,7 @@ impl FlattenBudget {
         Self {
             glyphs: MAX_FLATTEN_GLYPHS,
             points: MAX_FLATTEN_POINTS,
+            work: MAX_TUPLE_WORK,
         }
     }
 
@@ -610,7 +616,9 @@ impl<'a> Glyf<'a> {
             }
             _ => 0,
         };
-        let deltas = var.gvar.phantom_deltas(glyph_id, var.coords, own_points)?;
+        let deltas = var
+            .gvar
+            .phantom_deltas(glyph_id, var.coords, own_points, &mut budget.work)?;
         for (p, d) in pp.iter_mut().zip(deltas) {
             p.0 += d.0;
             p.1 += d.1;

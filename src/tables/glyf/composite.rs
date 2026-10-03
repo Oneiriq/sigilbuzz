@@ -147,8 +147,13 @@ impl Glyf<'_> {
             Some(var) => {
                 let points: Vec<(i32, i32)> =
                     components.iter().map(Component::gvar_point).collect();
-                var.gvar
-                    .glyph_point_deltas(parent_glyph_id, var.coords, &points, &[])?
+                var.gvar.glyph_point_deltas_with(
+                    parent_glyph_id,
+                    var.coords,
+                    &points,
+                    &[],
+                    &mut budget.work,
+                )?
             }
             None => Vec::new(),
         };
