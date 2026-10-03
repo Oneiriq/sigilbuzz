@@ -1,5 +1,5 @@
-//! Item-Variation-Store rewriter shared by the HVAR subsetter (and
-//! eventually VVAR / MVAR, which this crate does not subset yet).
+//! Item-Variation-Store rewriter shared by the HVAR and VVAR subsetters
+//! (and eventually MVAR, which this crate does not subset yet).
 //!
 //! HVAR maps each glyph to an `(outer, inner)` pair via a
 //! `DeltaSetIndexMap`; the pair indexes into an `ItemVariationStore`
@@ -10,8 +10,8 @@
 //! that holds only those rows (deduped across the source) plus
 //! the regions those rows reference.
 //!
-//! The rewriter is generic over the rows: callers (HVAR today,
-//! VVAR / MVAR later) pull the rows they need with [`pull_row`],
+//! The rewriter is generic over the rows: callers (HVAR and VVAR
+//! today, MVAR later) pull the rows they need with [`pull_row`],
 //! dedupe them, and hand them to [`rebuild_store`] in the order they
 //! should be emitted. The output is a single `ItemVariationData`
 //! subtable in outer-index 0; per-glyph mappings are then short
@@ -64,9 +64,7 @@ pub(crate) fn pull_row(
     let mut r = Reader::new(store_bytes);
     let format = r.read_u16().map_err(|_| truncated("ivs format"))?;
     if format != 1 {
-        return Err(SubsetError::Unsupported(
-            "ItemVariationStore format != 1 in HVAR",
-        ));
+        return Err(SubsetError::Unsupported("ItemVariationStore format != 1"));
     }
     let _region_list_off = r.read_u32().map_err(|_| truncated("ivs region off"))?;
     let subtable_count = r.read_u16().map_err(|_| truncated("ivs subtable count"))?;
@@ -88,9 +86,7 @@ pub(crate) fn read_regions(store_bytes: &[u8]) -> Result<(u16, Vec<RegionTriple>
     let mut r = Reader::new(store_bytes);
     let format = r.read_u16().map_err(|_| truncated("ivs format"))?;
     if format != 1 {
-        return Err(SubsetError::Unsupported(
-            "ItemVariationStore format != 1 in HVAR",
-        ));
+        return Err(SubsetError::Unsupported("ItemVariationStore format != 1"));
     }
     let region_list_off = r.read_u32().map_err(|_| truncated("ivs region off"))? as usize;
 
