@@ -1,0 +1,177 @@
+# HarfBuzz 14.5.0, top to bottom;
+# regenerate with tests/tools/vertical_shaping_expected.py.
+vorg noto_sans_kr_vf_vertical_subset.otf 100 0020 1,0,-1000,-110,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 100 2030 2,0,-1000,-500,-863
+vorg noto_sans_kr_vf_vertical_subset.otf 100 2170 3,0,-1000,-500,-867
+vorg noto_sans_kr_vf_vertical_subset.otf 100 3001 10,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 100 3002 11,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 100 300C 12,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 100 300D 13,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 100 AC00 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 100 0020,2030,2170,3001,3002,300C,300D,AC00 1,0,-1000,-110,-880 2,0,-1000,-500,-863 3,0,-1000,-500,-867 10,0,-1000,-500,-880 11,0,-1000,-500,-880 12,0,-1000,-500,-880 13,0,-1000,-500,-880 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 250 0020 1,0,-1000,-110,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 250 2030 2,0,-1000,-500,-864
+vorg noto_sans_kr_vf_vertical_subset.otf 250 2170 3,0,-1000,-500,-873
+vorg noto_sans_kr_vf_vertical_subset.otf 250 3001 10,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 250 3002 11,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 250 300C 12,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 250 300D 13,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 250 AC00 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 250 0020,2030,2170,3001,3002,300C,300D,AC00 1,0,-1000,-110,-880 2,0,-1000,-500,-864 3,0,-1000,-500,-873 10,0,-1000,-500,-880 11,0,-1000,-500,-880 12,0,-1000,-500,-880 13,0,-1000,-500,-880 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 400 0020 1,0,-1000,-112,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 400 2030 2,0,-1000,-500,-867
+vorg noto_sans_kr_vf_vertical_subset.otf 400 2170 3,0,-1000,-500,-887
+vorg noto_sans_kr_vf_vertical_subset.otf 400 3001 10,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 400 3002 11,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 400 300C 12,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 400 300D 13,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 400 AC00 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 400 0020,2030,2170,3001,3002,300C,300D,AC00 1,0,-1000,-112,-880 2,0,-1000,-500,-867 3,0,-1000,-500,-887 10,0,-1000,-500,-880 11,0,-1000,-500,-880 12,0,-1000,-500,-880 13,0,-1000,-500,-880 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 555 0020 1,0,-1000,-113,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 555 2030 2,0,-1000,-500,-869
+vorg noto_sans_kr_vf_vertical_subset.otf 555 2170 3,0,-1000,-500,-899
+vorg noto_sans_kr_vf_vertical_subset.otf 555 3001 10,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 555 3002 11,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 555 300C 12,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 555 300D 13,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 555 AC00 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 555 0020,2030,2170,3001,3002,300C,300D,AC00 1,0,-1000,-113,-880 2,0,-1000,-500,-869 3,0,-1000,-500,-899 10,0,-1000,-500,-880 11,0,-1000,-500,-880 12,0,-1000,-500,-880 13,0,-1000,-500,-880 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 700 0020 1,0,-1000,-113,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 700 2030 2,0,-1000,-500,-871
+vorg noto_sans_kr_vf_vertical_subset.otf 700 2170 3,0,-1000,-500,-907
+vorg noto_sans_kr_vf_vertical_subset.otf 700 3001 10,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 700 3002 11,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 700 300C 12,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 700 300D 13,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 700 AC00 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 700 0020,2030,2170,3001,3002,300C,300D,AC00 1,0,-1000,-113,-880 2,0,-1000,-500,-871 3,0,-1000,-500,-907 10,0,-1000,-500,-880 11,0,-1000,-500,-880 12,0,-1000,-500,-880 13,0,-1000,-500,-880 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 900 0020 1,0,-1000,-114,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 900 2030 2,0,-1000,-500,-873
+vorg noto_sans_kr_vf_vertical_subset.otf 900 2170 3,0,-1000,-500,-918
+vorg noto_sans_kr_vf_vertical_subset.otf 900 3001 10,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 900 3002 11,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 900 300C 12,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 900 300D 13,0,-1000,-500,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 900 AC00 9,0,-1000,-460,-880
+vorg noto_sans_kr_vf_vertical_subset.otf 900 0020,2030,2170,3001,3002,300C,300D,AC00 1,0,-1000,-114,-880 2,0,-1000,-500,-873 3,0,-1000,-500,-918 10,0,-1000,-500,-880 11,0,-1000,-500,-880 12,0,-1000,-500,-880 13,0,-1000,-500,-880 9,0,-1000,-460,-880
+phantom hahmlet_gvar_subset.ttf 100 0020 9,0,-1000,-120,-50
+phantom hahmlet_gvar_subset.ttf 100 0041 1,0,-1000,-407,-802
+phantom hahmlet_gvar_subset.ttf 100 004F 4,0,-1000,-433,-800
+phantom hahmlet_gvar_subset.ttf 100 00C1 2,0,-1000,-407,-802
+phantom hahmlet_gvar_subset.ttf 100 00C5 3,0,-1000,-407,-802
+phantom hahmlet_gvar_subset.ttf 100 3143 5,0,-1000,-465,-649
+phantom hahmlet_gvar_subset.ttf 100 BE60 6,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 100 BE75 7,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 100 BED0 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 100 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1000,-120,-50 1,0,-1000,-407,-802 4,0,-1000,-433,-800 2,0,-1000,-407,-802 3,0,-1000,-407,-802 5,0,-1000,-465,-649 6,0,-1000,-465,-846 7,0,-1000,-465,-846 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 250 0020 9,0,-1000,-122,-50
+phantom hahmlet_gvar_subset.ttf 250 0041 1,0,-1000,-412,-802
+phantom hahmlet_gvar_subset.ttf 250 004F 4,0,-1000,-439,-800
+phantom hahmlet_gvar_subset.ttf 250 00C1 2,0,-1000,-412,-802
+phantom hahmlet_gvar_subset.ttf 250 00C5 3,0,-1000,-412,-802
+phantom hahmlet_gvar_subset.ttf 250 3143 5,0,-1000,-465,-649
+phantom hahmlet_gvar_subset.ttf 250 BE60 6,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 250 BE75 7,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 250 BED0 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 250 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1000,-122,-50 1,0,-1000,-412,-802 4,0,-1000,-439,-800 2,0,-1000,-412,-802 3,0,-1000,-412,-802 5,0,-1000,-465,-649 6,0,-1000,-465,-846 7,0,-1000,-465,-846 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 400 0020 9,0,-1000,-124,-50
+phantom hahmlet_gvar_subset.ttf 400 0041 1,0,-1000,-417,-802
+phantom hahmlet_gvar_subset.ttf 400 004F 4,0,-1000,-445,-800
+phantom hahmlet_gvar_subset.ttf 400 00C1 2,0,-1000,-417,-802
+phantom hahmlet_gvar_subset.ttf 400 00C5 3,0,-1000,-417,-802
+phantom hahmlet_gvar_subset.ttf 400 3143 5,0,-1000,-465,-649
+phantom hahmlet_gvar_subset.ttf 400 BE60 6,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 400 BE75 7,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 400 BED0 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 400 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1000,-124,-50 1,0,-1000,-417,-802 4,0,-1000,-445,-800 2,0,-1000,-417,-802 3,0,-1000,-417,-802 5,0,-1000,-465,-649 6,0,-1000,-465,-846 7,0,-1000,-465,-846 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 650 0020 9,0,-1000,-128,-50
+phantom hahmlet_gvar_subset.ttf 650 0041 1,0,-1000,-424,-802
+phantom hahmlet_gvar_subset.ttf 650 004F 4,0,-1031,-463,-819
+phantom hahmlet_gvar_subset.ttf 650 00C1 2,0,-1000,-424,-802
+phantom hahmlet_gvar_subset.ttf 650 00C5 3,0,-1000,-424,-802
+phantom hahmlet_gvar_subset.ttf 650 3143 5,0,-1000,-465,-649
+phantom hahmlet_gvar_subset.ttf 650 BE60 6,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 650 BE75 7,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 650 BED0 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 650 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1000,-128,-50 1,0,-1000,-424,-802 4,0,-1031,-463,-819 2,0,-1000,-424,-802 3,0,-1000,-424,-802 5,0,-1000,-465,-649 6,0,-1000,-465,-846 7,0,-1000,-465,-846 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 900 0020 9,0,-1000,-132,-50
+phantom hahmlet_gvar_subset.ttf 900 0041 1,0,-1000,-432,-802
+phantom hahmlet_gvar_subset.ttf 900 004F 4,0,-1065,-483,-840
+phantom hahmlet_gvar_subset.ttf 900 00C1 2,0,-1000,-432,-802
+phantom hahmlet_gvar_subset.ttf 900 00C5 3,0,-1000,-432,-802
+phantom hahmlet_gvar_subset.ttf 900 3143 5,0,-1000,-465,-649
+phantom hahmlet_gvar_subset.ttf 900 BE60 6,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 900 BE75 7,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 900 BED0 8,0,-1000,-465,-846
+phantom hahmlet_gvar_subset.ttf 900 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1000,-132,-50 1,0,-1000,-432,-802 4,0,-1065,-483,-840 2,0,-1000,-432,-802 3,0,-1000,-432,-802 5,0,-1000,-465,-649 6,0,-1000,-465,-846 7,0,-1000,-465,-846 8,0,-1000,-465,-846
+extents hahmlet_gvar_subset.ttf 100 0020 9,0,-1448,-120,-724
+extents hahmlet_gvar_subset.ttf 100 0041 1,0,-1448,-407,-1092
+extents hahmlet_gvar_subset.ttf 100 004F 4,0,-1448,-433,-1090
+extents hahmlet_gvar_subset.ttf 100 00C1 2,0,-1448,-407,-1182
+extents hahmlet_gvar_subset.ttf 100 00C5 3,0,-1448,-407,-1163
+extents hahmlet_gvar_subset.ttf 100 3143 5,0,-1448,-465,-1057
+extents hahmlet_gvar_subset.ttf 100 BE60 6,0,-1448,-465,-1068
+extents hahmlet_gvar_subset.ttf 100 BE75 7,0,-1448,-465,-1076
+extents hahmlet_gvar_subset.ttf 100 BED0 8,0,-1448,-465,-1068
+extents hahmlet_gvar_subset.ttf 100 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1448,-120,-724 1,0,-1448,-407,-1092 4,0,-1448,-433,-1090 2,0,-1448,-407,-1182 3,0,-1448,-407,-1163 5,0,-1448,-465,-1057 6,0,-1448,-465,-1068 7,0,-1448,-465,-1076 8,0,-1448,-465,-1068
+extents hahmlet_gvar_subset.ttf 250 0020 9,0,-1448,-122,-724
+extents hahmlet_gvar_subset.ttf 250 0041 1,0,-1448,-412,-1096
+extents hahmlet_gvar_subset.ttf 250 004F 4,0,-1448,-439,-1093
+extents hahmlet_gvar_subset.ttf 250 00C1 2,0,-1448,-412,-1189
+extents hahmlet_gvar_subset.ttf 250 00C5 3,0,-1448,-412,-1168
+extents hahmlet_gvar_subset.ttf 250 3143 5,0,-1448,-465,-1054
+extents hahmlet_gvar_subset.ttf 250 BE60 6,0,-1448,-465,-1070
+extents hahmlet_gvar_subset.ttf 250 BE75 7,0,-1448,-465,-1074
+extents hahmlet_gvar_subset.ttf 250 BED0 8,0,-1448,-465,-1070
+extents hahmlet_gvar_subset.ttf 250 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1448,-122,-724 1,0,-1448,-412,-1096 4,0,-1448,-439,-1093 2,0,-1448,-412,-1189 3,0,-1448,-412,-1168 5,0,-1448,-465,-1054 6,0,-1448,-465,-1070 7,0,-1448,-465,-1074 8,0,-1448,-465,-1070
+extents hahmlet_gvar_subset.ttf 400 0020 9,0,-1448,-124,-724
+extents hahmlet_gvar_subset.ttf 400 0041 1,0,-1448,-417,-1100
+extents hahmlet_gvar_subset.ttf 400 004F 4,0,-1448,-445,-1095
+extents hahmlet_gvar_subset.ttf 400 00C1 2,0,-1448,-417,-1196
+extents hahmlet_gvar_subset.ttf 400 00C5 3,0,-1448,-417,-1172
+extents hahmlet_gvar_subset.ttf 400 3143 5,0,-1448,-465,-1051
+extents hahmlet_gvar_subset.ttf 400 BE60 6,0,-1448,-465,-1070
+extents hahmlet_gvar_subset.ttf 400 BE75 7,0,-1448,-465,-1071
+extents hahmlet_gvar_subset.ttf 400 BED0 8,0,-1448,-465,-1070
+extents hahmlet_gvar_subset.ttf 400 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1448,-124,-724 1,0,-1448,-417,-1100 4,0,-1448,-445,-1095 2,0,-1448,-417,-1196 3,0,-1448,-417,-1172 5,0,-1448,-465,-1051 6,0,-1448,-465,-1070 7,0,-1448,-465,-1071 8,0,-1448,-465,-1070
+extents hahmlet_gvar_subset.ttf 650 0020 9,0,-1448,-128,-724
+extents hahmlet_gvar_subset.ttf 650 0041 1,0,-1448,-424,-1103
+extents hahmlet_gvar_subset.ttf 650 004F 4,0,-1448,-463,-1098
+extents hahmlet_gvar_subset.ttf 650 00C1 2,0,-1448,-424,-1209
+extents hahmlet_gvar_subset.ttf 650 00C5 3,0,-1448,-424,-1178
+extents hahmlet_gvar_subset.ttf 650 3143 5,0,-1448,-465,-1050
+extents hahmlet_gvar_subset.ttf 650 BE60 6,0,-1448,-465,-1071
+extents hahmlet_gvar_subset.ttf 650 BE75 7,0,-1448,-465,-1071
+extents hahmlet_gvar_subset.ttf 650 BED0 8,0,-1448,-465,-1071
+extents hahmlet_gvar_subset.ttf 650 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1448,-128,-724 1,0,-1448,-424,-1103 4,0,-1448,-463,-1098 2,0,-1448,-424,-1209 3,0,-1448,-424,-1178 5,0,-1448,-465,-1050 6,0,-1448,-465,-1071 7,0,-1448,-465,-1071 8,0,-1448,-465,-1071
+extents hahmlet_gvar_subset.ttf 900 0020 9,0,-1448,-132,-724
+extents hahmlet_gvar_subset.ttf 900 0041 1,0,-1448,-432,-1107
+extents hahmlet_gvar_subset.ttf 900 004F 4,0,-1448,-483,-1101
+extents hahmlet_gvar_subset.ttf 900 00C1 2,0,-1448,-432,-1223
+extents hahmlet_gvar_subset.ttf 900 00C5 3,0,-1448,-432,-1185
+extents hahmlet_gvar_subset.ttf 900 3143 5,0,-1448,-465,-1050
+extents hahmlet_gvar_subset.ttf 900 BE60 6,0,-1448,-465,-1072
+extents hahmlet_gvar_subset.ttf 900 BE75 7,0,-1448,-465,-1070
+extents hahmlet_gvar_subset.ttf 900 BED0 8,0,-1448,-465,-1072
+extents hahmlet_gvar_subset.ttf 900 0020,0041,004F,00C1,00C5,3143,BE60,BE75,BED0 9,0,-1448,-132,-724 1,0,-1448,-432,-1107 4,0,-1448,-483,-1101 2,0,-1448,-432,-1223 3,0,-1448,-432,-1185 5,0,-1448,-465,-1050 6,0,-1448,-465,-1072 7,0,-1448,-465,-1070 8,0,-1448,-465,-1072
+extents rubik_vf.ttf 300 0048,0065,006C,006C,006F 40,0,-1185,-350,-942 152,0,-1185,-273,-852 189,0,-1185,-112,-947 189,0,-1185,-112,-947 203,0,-1185,-279,-852
+extents rubik_vf.ttf 300 0041,0056,0041,0054 1,0,-1185,-325,-942 113,0,-1185,-319,-942 1,0,-1185,-325,-942 98,0,-1185,-278,-942
+extents rubik_vf.ttf 300 0067,00E9,0020,0078 163,0,-1185,-290,-747 153,0,-1185,-273,-950 928,0,-1185,-129,-592 251,0,-1185,-259,-852
+extents rubik_vf.ttf 300 20AC,0035 1022,0,-1185,-363,-942 861,0,-1185,-286,-937
+extents rubik_vf.ttf 493.75 0048,0065,006C,006C,006F 40,0,-1185,-364,-942 152,0,-1185,-288,-852 189,0,-1185,-131,-947 189,0,-1185,-131,-947 203,0,-1185,-295,-852
+extents rubik_vf.ttf 493.75 0041,0056,0041,0054 1,0,-1185,-345,-942 113,0,-1185,-336,-942 1,0,-1185,-345,-942 98,0,-1185,-301,-942
+extents rubik_vf.ttf 493.75 0067,00E9,0020,0078 163,0,-1185,-307,-747 153,0,-1185,-288,-958 928,0,-1185,-115,-592 251,0,-1185,-281,-852
+extents rubik_vf.ttf 493.75 20AC,0035 1022,0,-1185,-381,-942 861,0,-1185,-309,-937
+extents rubik_vf.ttf 700 0048,0065,006C,006C,006F 40,0,-1185,-372,-942 152,0,-1185,-297,-852 189,0,-1185,-143,-947 189,0,-1185,-143,-947 203,0,-1185,-305,-852
+extents rubik_vf.ttf 700 0041,0056,0041,0054 1,0,-1185,-358,-942 113,0,-1185,-346,-942 1,0,-1185,-358,-942 98,0,-1185,-315,-942
+extents rubik_vf.ttf 700 0067,00E9,0020,0078 163,0,-1185,-317,-747 153,0,-1185,-297,-962 928,0,-1185,-106,-592 251,0,-1185,-294,-852
+extents rubik_vf.ttf 700 20AC,0035 1171,0,-1185,-392,-942 861,0,-1185,-323,-937
+extents rubik_vf.ttf 900 0048,0065,006C,006C,006F 40,0,-1185,-386,-942 152,0,-1185,-311,-852 189,0,-1185,-161,-947 189,0,-1185,-161,-947 203,0,-1185,-321,-852
+extents rubik_vf.ttf 900 0041,0056,0041,0054 1,0,-1185,-377,-942 113,0,-1185,-363,-942 1,0,-1185,-377,-942 98,0,-1185,-337,-942
+extents rubik_vf.ttf 900 0067,00E9,0020,0078 163,0,-1185,-333,-747 153,0,-1185,-311,-970 928,0,-1185,-93,-592 251,0,-1185,-315,-852
+extents rubik_vf.ttf 900 20AC,0035 1171,0,-1185,-410,-942 861,0,-1185,-345,-936
+static opensans_regular.ttf default 0041,0056,0041,0054 36,0,-2789,-648,-2128 57,0,-2789,-609,-2125 36,0,-2789,-648,-2128 55,0,-2789,-566,-2125
+static opensans_regular.ttf default 0041,0020,0062 36,0,-2789,-648,-2128 3,0,-2789,-266,-1394 69,0,-2789,-627,-2162
+static SourceCodePro-Latin-Subset.otf default 0041,0062,0063 2,0,-1257,-300,-956 29,0,-1257,-300,-978 30,0,-1257,-300,-871
+static NotoSansMongolian-Regular.ttf default 1820,1885 5,0,-1000,-464,-880 1503,0,0,-464,120
+static NotoSansMongolian-Regular.ttf default 1820,1821,1822 8,0,-1000,-393,-880 18,0,-1000,-142,-880 29,0,-1000,-250,-880

@@ -87,10 +87,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let coords = rounded_coords.as_slice();
     let cmap = face.cmap()?;
     let hmtx = face.hmtx()?;
-    // Vertical metrics and origin overrides are optional; only look
-    // them up when the caller has asked for vertical layout so
-    // horizontal callers keep the cheap "hmtx only" path.
-    let vmtx = if is_vertical { face.vmtx()? } else { None };
 
     let text = buffer.text();
     if text.is_empty() {
@@ -759,27 +755,23 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // One `FontAdvances` serves the whole call: the origins, the
     // fallback spaces, and the `stch` stretch below ask it too, and it
     // keeps each glyph's phantom-point advance once computed.
-    let advances = position::FontAdvances::new(face, coords, vmtx)?;
+    let advances = position::FontAdvances::new(face, coords, is_vertical)?;
     if is_vertical {
         // VVAR carries per-glyph vertical-advance deltas; applies
         // only when the font is variable and the user requested
         // non-default coords. Without VVAR, a varied glyf font takes
         // the advance from the glyph's varied phantom points. With
-        // no vmtx at all, fall back to an em-square advance so the
-        // run still stacks deterministically, using the hhea-reported
-        // line height as a reasonable default.
-        let hhea = face.hhea()?;
-        let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
+        // no vmtx at all, every glyph advances by the ascender-to-
+        // descender height, as in HarfBuzz.
         for glyph in &mut glyphs {
             // HarfBuzz convention: vertical y_advance is negative in
             // both TTB and BTT, so the pen moves downward; BTT only
             // differs by the final reversal.
-            let raw = advances.v_advance(glyph.glyph_id).unwrap_or(fallback);
-            glyph.y_advance = raw.saturating_neg();
+            glyph.y_advance = advances.v_advance(glyph.glyph_id).saturating_neg();
             glyph.x_advance = 0;
         }
         // Offsets are relative to each glyph's horizontal origin.
-        position::subtract_vertical_origins(face, &advances, &mut glyphs)?;
+        position::subtract_vertical_origins(&advances, &mut glyphs);
     } else {
         // Without HVAR, a varied glyf font takes the advance from the
         // glyph's varied phantom points.

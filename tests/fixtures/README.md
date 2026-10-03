@@ -132,9 +132,12 @@ Fonts used by the integration tests.
           --unicodes 'U+0020,U+300C,U+300D,U+3001,U+3002,U+AC00,U+2030,U+2170'
 
   `tests/variable_vertical_parity.rs` checks its top-to-bottom runs against
-  `variable_vertical.expected`, HarfBuzz 14.5.0's output at six weights. Regenerate
-  that file with `uv run --no-project --with uharfbuzz==0.56.2 python
-  tests/tools/variable_vertical_expected.py`.
+  `vertical_shaping.expected`, HarfBuzz 14.5.0's output at six weights. That file also
+  holds HarfBuzz's top-to-bottom runs of `hahmlet_gvar_subset.ttf` and `rubik_vf.ttf`
+  (varied glyph boxes, no `vmtx`), of `hahmlet_gvar_subset.ttf` with a hand-built
+  `vhea`, `vmtx` and `gvar` (varied top phantom points), and of the static fonts in
+  `tests/vertical_shaping.rs`. Regenerate it with `uv run --no-project --with
+  uharfbuzz==0.56.2 python tests/tools/vertical_shaping_expected.py`.
 
 - `../fonts/NotoSansKR-HangulTone-Subset.ttf`: an 8 KB subset of Noto Sans KR (OFL 1.1,
   Copyright 2014-2021 Adobe, Reserved Font Name 'Source'), from

@@ -16,6 +16,7 @@
 mod extents;
 mod marks;
 
+pub(super) use extents::glyph_extents;
 pub(super) use marks::{recategorize_combining_class, MarkPositioner};
 
 use super::position::FontAdvances;
@@ -96,7 +97,7 @@ pub(super) fn adjust_spaces(
     }
     let upem = i32::from(face.head()?.units_per_em);
     let cmap = face.cmap()?;
-    let advance = |gid: u16| advance(face, advances, gid, horizontal);
+    let advance = |gid: u16| advance(advances, gid, horizontal);
     // The digit and punctuation widths, looked up once.
     let figure = ('0'..='9').find_map(|c| cmap.glyph_id(c));
     let punctuation = cmap.glyph_id('.').or_else(|| cmap.glyph_id(','));
@@ -117,8 +118,8 @@ pub(super) fn adjust_spaces(
                 Some((upem + kind / 2) / kind)
             }
             space::EM_4_18 => Some(upem * 4 / 18),
-            space::FIGURE => figure.map(advance).transpose()?,
-            space::PUNCTUATION => punctuation.map(advance).transpose()?,
+            space::FIGURE => figure.map(advance),
+            space::PUNCTUATION => punctuation.map(advance),
             space::NARROW => {
                 if horizontal {
                     g.x_advance /= 2;
@@ -144,21 +145,13 @@ pub(super) fn adjust_spaces(
 /// computes it: `hmtx` (plus `HVAR`) horizontally, `vmtx` (plus `VVAR`)
 /// or the ascender-to-descender height vertically, with the varied
 /// phantom points of a `glyf` font standing in for a missing `HVAR` or
-/// `VVAR` (see [`FontAdvances`]). Always positive.
-fn advance(
-    face: &Face<'_>,
-    advances: &FontAdvances<'_, '_>,
-    gid: u16,
-    horizontal: bool,
-) -> Result<i32> {
+/// `VVAR` (see [`FontAdvances`]). Never negative.
+fn advance(advances: &FontAdvances<'_, '_>, gid: u16, horizontal: bool) -> i32 {
     if horizontal {
-        return Ok(advances.h_advance(u32::from(gid)));
+        advances.h_advance(u32::from(gid))
+    } else {
+        advances.v_advance(u32::from(gid))
     }
-    if let Some(advance) = advances.v_advance(u32::from(gid)) {
-        return Ok(advance);
-    }
-    let hhea = face.hhea()?;
-    Ok(i32::from(hhea.ascent) - i32::from(hhea.descent))
 }
 
 #[cfg(test)]
