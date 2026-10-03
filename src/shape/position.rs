@@ -268,7 +268,9 @@ pub(super) fn position(
 /// GPOS and the renderer work from a glyph's horizontal origin, so
 /// every glyph of a vertical run is moved from its vertical origin
 /// there. The vertical origin sits half the horizontal advance to the
-/// right of the horizontal one and, vertically, at the `VORG` value;
+/// right of the horizontal one and, vertically, at the `VORG` value,
+/// moved away from the default instance by the `VVAR` vertical origin
+/// delta and rounded (halves up), as HarfBuzz moves it;
 /// without `VORG` it is the top of the glyph's box plus the `vmtx` top
 /// side bearing, or with no `vmtx` the top of a box centered in the
 /// ascender-to-descender span. Glyphs with no outline data (CFF fonts
@@ -291,7 +293,15 @@ pub(super) fn subtract_vertical_origins(
         let id = g.glyph_id as u16;
         let h_advance = advances.h_advance(g.glyph_id);
         let y_origin = match vorg {
-            Some(ref vorg) => i32::from(vorg.vert_origin_y(id)),
+            // HarfBuzz moves the VORG origin by the VVAR vertical
+            // origin delta and rounds the sum.
+            Some(ref vorg) => {
+                let y = vorg.vert_origin_y(id);
+                match advances.vorg_delta(id) {
+                    Some(delta) => hb_round(f32::from(y) + delta),
+                    None => i32::from(y),
+                }
+            }
             None => match glyph_top_and_height(face, id)? {
                 Some((top, height)) => match vmtx {
                     Some(ref vmtx) => top + i32::from(vmtx.tsb(id).unwrap_or(0)),
@@ -492,6 +502,17 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             self.phantom_advance(&self.v_phantom, id, true)
                 .unwrap_or(base),
         )
+    }
+
+    /// How far the `VVAR` vertical origin mapping moves glyph `id`'s
+    /// `VORG` origin, or `None` at the default instance, without
+    /// `VVAR` or its vertical origin mapping, or for a glyph the
+    /// mapping has no entry for.
+    pub(super) fn vorg_delta(&self, id: u16) -> Option<f32> {
+        if !self.varied {
+            return None;
+        }
+        self.vvar.as_ref()?.vorg_delta(id, self.coords)
     }
 
     /// The advance of glyph `id` from its varied phantom points, from

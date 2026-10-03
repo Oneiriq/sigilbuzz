@@ -11,7 +11,10 @@ Fonts used by the integration tests.
 - `rubik_vf.ttf`: Rubik Variable (`wght` axis only) by Philipp Hubert and Sebastian
   Fischer, OFL 1.1, from the `googlefonts/rubik` repository. `tests/variable_fonts.rs`
   uses it to exercise the `fvar`, `avar`, and `HVAR` advance-delta pipeline and `gvar`
-  outline deltas against rustybuzz's output at the same axis coordinate.
+  outline deltas against HarfBuzz's output at the same axis coordinate, and
+  `tests/anchor_variations.rs` its variable mark anchors. Both read HarfBuzz 14.5.0's
+  output from `rubik_variable_shaping.expected`; regenerate that file with `uv run
+  --no-project --with uharfbuzz==0.56.2 python tests/tools/variable_shaping_expected.py`.
   `tests/feature_variations_gsub_parity.rs` uses its GSUB 1.1 FeatureVariations, which
   give `rvrn` heavier currency signs from `wght` 500 on.
 - `hahmlet_gvar_subset.ttf`: a 7,908-byte subset of Hahmlet Variable (`wght` 100 to
@@ -127,6 +130,11 @@ Fonts used by the integration tests.
       cargo run --release -p sigilbuzz-cli -- subset NotoSansKR-VF.otf \
           tests/fixtures/noto_sans_kr_vf_vertical_subset.otf \
           --unicodes 'U+0020,U+300C,U+300D,U+3001,U+3002,U+AC00,U+2030,U+2170'
+
+  `tests/variable_vertical_parity.rs` checks its top-to-bottom runs against
+  `variable_vertical.expected`, HarfBuzz 14.5.0's output at six weights. Regenerate
+  that file with `uv run --no-project --with uharfbuzz==0.56.2 python
+  tests/tools/variable_vertical_expected.py`.
 
 - `../fonts/NotoSansKR-HangulTone-Subset.ttf`: an 8 KB subset of Noto Sans KR (OFL 1.1,
   Copyright 2014-2021 Adobe, Reserved Font Name 'Source'), from
