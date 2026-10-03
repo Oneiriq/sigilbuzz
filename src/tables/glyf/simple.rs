@@ -21,14 +21,15 @@ pub(super) fn simple_point_count(r: &mut Reader<'_>, num_contours: u16) -> Resul
     Ok(usize::from(r.read_u16()?) + 1)
 }
 
-/// Decodes the simple glyph at `r` and appends its points, moved and
-/// transformed, to `out`.
+/// Decodes the simple glyph at `glyph`, a reader past the glyph header
+/// and the glyph's byte offset in `glyf`, and appends its points, moved
+/// and transformed, to `out`.
 ///
 /// The points move by `deltas` (dense, in point order) or, when `var`
 /// is set, by the glyph's own `gvar` deltas with untouched points
 /// inferred. `var` carries the glyph id the deltas belong to.
 pub(super) fn flatten_simple_glyph(
-    r: &mut Reader<'_>,
+    glyph: (Reader<'_>, usize),
     num_contours: u16,
     deltas: Option<&[(f32, f32)]>,
     var: Option<(Variation<'_>, u16)>,
@@ -36,6 +37,7 @@ pub(super) fn flatten_simple_glyph(
     out: &mut FlatGlyph,
     budget: &mut FlattenBudget,
 ) -> Result<()> {
+    let (mut r, offset) = glyph;
     if num_contours == 0 {
         return Ok(());
     }
@@ -45,7 +47,7 @@ pub(super) fn flatten_simple_glyph(
         end_pts.push(r.read_u16()?);
     }
     let total_points = end_pts.last().map_or(0, |e| e.saturating_add(1));
-    budget.take_points(usize::from(total_points))?;
+    budget.take_points(usize::from(total_points), offset)?;
 
     // instructions: skip.
     let instr_len = r.read_u16()? as usize;
@@ -157,7 +159,7 @@ pub(super) fn flatten_simple_glyph(
         let end_idx = end as usize;
         if end_idx >= xs.len() || end_idx < start {
             return Err(Error::Malformed {
-                offset: 0,
+                offset,
                 context: "glyf endPtsOfContours out of range",
             });
         }

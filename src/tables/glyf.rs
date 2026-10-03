@@ -170,21 +170,32 @@ impl FlattenBudget {
         }
     }
 
-    fn take_glyph(&mut self) -> Result<()> {
+    /// Takes one glyph visit, or fails with `offset`, the byte offset in
+    /// `glyf` of the glyph that would overspend the cap.
+    fn take_glyph(&mut self, offset: usize) -> Result<()> {
         self.glyphs = self.glyphs.checked_sub(1).ok_or(Error::Malformed {
-            offset: 0,
+            offset,
             context: "glyf composite visits too many glyphs",
         })?;
         Ok(())
     }
 
-    fn take_points(&mut self, n: usize) -> Result<()> {
+    /// Takes `n` points, or fails with `offset`, the byte offset in
+    /// `glyf` of the simple glyph whose points would overspend the cap.
+    fn take_points(&mut self, n: usize, offset: usize) -> Result<()> {
         self.points = self.points.checked_sub(n).ok_or(Error::Malformed {
-            offset: 0,
+            offset,
             context: "glyf composite expands to too many points",
         })?;
         Ok(())
     }
+}
+
+/// The byte offset in `glyf` where `loca` puts `glyph_id`, which errors
+/// about the glyph report; 0, the start of the table, for a glyph id
+/// past the end of `loca`.
+fn glyph_offset(loca: &Loca<'_>, glyph_id: u16) -> usize {
+    loca.range(glyph_id).map_or(0, |(start, _)| start as usize)
 }
 
 /// Rounds a float to the nearest `i16`, saturating at the type bounds.
@@ -263,7 +274,7 @@ impl<'a> Glyf<'a> {
         };
         if body.len() < 10 {
             return Err(Error::Truncated {
-                offset: 0,
+                offset: glyph_offset(loca, glyph_id),
                 context: "glyf header shorter than 10 bytes",
             });
         }
@@ -621,13 +632,14 @@ impl<'a> Glyf<'a> {
         budget: &mut FlattenBudget,
         path: &mut Vec<u16>,
     ) -> Result<[(f32, f32); 4]> {
+        let offset = glyph_offset(cx.loca, glyph_id);
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(Error::Malformed {
-                offset: 0,
+                offset,
                 context: "glyf composite recursion exceeded cap",
             });
         }
-        budget.take_glyph()?;
+        budget.take_glyph(offset)?;
         let mut pp = self.phantom_points(cx.loca, glyph_id, metrics)?;
         // The glyph's own gvar points come first: contour points for a
         // simple glyph, components for a composite, none when empty.
@@ -699,13 +711,14 @@ impl<'a> Glyf<'a> {
         depth: u8,
         budget: &mut FlattenBudget,
     ) -> Result<bool> {
+        let offset = glyph_offset(cx.loca, glyph_id);
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(Error::Malformed {
-                offset: 0,
+                offset,
                 context: "glyf composite recursion exceeded cap",
             });
         }
-        budget.take_glyph()?;
+        budget.take_glyph(offset)?;
         let Some(body) = self.glyph_bytes(cx.loca, glyph_id)? else {
             return Ok(false);
         };
@@ -717,7 +730,8 @@ impl<'a> Glyf<'a> {
         r.skip(8)?; // bbox
         if num_contours >= 0 {
             let var = cx.var.map(|v| (v, glyph_id));
-            flatten_simple_glyph(&mut r, num_contours as u16, deltas, var, tf, out, budget)?;
+            let glyph = (r, offset);
+            flatten_simple_glyph(glyph, num_contours as u16, deltas, var, tf, out, budget)?;
         } else {
             self.flatten_composite(&mut r, cx, glyph_id, tf, out, depth, budget)?;
         }
