@@ -75,25 +75,31 @@ pub fn write_index_to_loc_format(head: &mut [u8], long: bool) {
     head[50..52].copy_from_slice(&val.to_be_bytes());
 }
 
-/// Patches `hhea.numberOfHMetrics` (last two bytes of the table).
+/// Byte offset of `hhea.numberOfHMetrics` and of
+/// `vhea.numberOfLongVerMetrics`, where the parsers read them.
+const METRICS_COUNT_OFFSET: usize = 34;
+
+/// Patches `hhea.numberOfHMetrics` at byte 34. A table padded past its
+/// 36 bytes keeps its tail.
 pub fn write_hhea_metrics_count(hhea: &mut [u8], n: u16) -> Result<(), SubsetError> {
-    if hhea.len() < 36 {
-        return Err(SubsetError::Unsupported("hhea too short to patch"));
-    }
-    let off = hhea.len() - 2;
-    hhea[off..off + 2].copy_from_slice(&n.to_be_bytes());
-    Ok(())
+    write_metrics_count(hhea, n).ok_or(SubsetError::Unsupported("hhea too short to patch"))
 }
 
-/// Patches `vhea.numberOfLongVerMetrics` (last two bytes of the table,
-/// vhea v1.0 / v1.1 share an identical byte layout to `hhea`).
+/// Patches `vhea.numberOfLongVerMetrics` at byte 34 (vhea v1.0 and
+/// v1.1 share the byte layout of `hhea`). A table padded past its 36
+/// bytes keeps its tail.
 pub fn write_vhea_metrics_count(vhea: &mut [u8], n: u16) -> Result<(), SubsetError> {
-    if vhea.len() < 36 {
-        return Err(SubsetError::Unsupported("vhea too short to patch"));
-    }
-    let off = vhea.len() - 2;
-    vhea[off..off + 2].copy_from_slice(&n.to_be_bytes());
-    Ok(())
+    write_metrics_count(vhea, n).ok_or(SubsetError::Unsupported("vhea too short to patch"))
+}
+
+/// Writes `n` at [`METRICS_COUNT_OFFSET`]; `None` when the table is too
+/// short to hold it.
+fn write_metrics_count(table: &mut [u8], n: u16) -> Option<()> {
+    let field = table
+        .get_mut(METRICS_COUNT_OFFSET..)?
+        .first_chunk_mut::<2>()?;
+    *field = n.to_be_bytes();
+    Some(())
 }
 
 /// Patches `maxp.numGlyphs` (offset 4..6).
@@ -171,6 +177,20 @@ mod tests {
         let mut hhea = alloc::vec![0u8; 36];
         write_hhea_metrics_count(&mut hhea, 42).unwrap();
         assert_eq!(&hhea[34..36], &42u16.to_be_bytes());
+    }
+
+    #[test]
+    fn metrics_counts_are_patched_at_byte_34_of_a_padded_table() {
+        // A table longer than 36 bytes keeps its count at byte 34,
+        // where the parsers read it. Patching the last two bytes
+        // instead left the count stale and wrote over the padding.
+        for write in [write_hhea_metrics_count, write_vhea_metrics_count] {
+            let mut table = alloc::vec![0xAAu8; 40];
+            write(&mut table, 0x0102).unwrap();
+            assert_eq!(&table[34..36], &[0x01, 0x02]);
+            assert_eq!(&table[36..], &[0xAA; 4], "the tail is untouched");
+            assert!(write(&mut alloc::vec![0u8; 35], 1).is_err());
+        }
     }
 
     #[test]

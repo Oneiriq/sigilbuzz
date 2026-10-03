@@ -1,21 +1,24 @@
-//! `HVAR` subsetting.
+//! `HVAR` and `VVAR` subsetting.
 //!
 //! HVAR carries per-glyph advance-width deltas as
 //! `(outer, inner) -> ItemVariationStore` lookups. The outer index
 //! selects an `ItemVariationData` subtable; the inner index picks a
 //! delta row within it. The mapping from gid to `(outer, inner)` is
 //! either implicit (`outer = 0`, `inner = gid`) or explicit via a
-//! `DeltaSetIndexMap`.
+//! `DeltaSetIndexMap`. VVAR is the vertical sibling, with the same
+//! store and up to four maps: advance height, top and bottom side
+//! bearings, and the vertical origin that `VORG` values vary by.
 //!
-//! Subsetting walks every kept gid, pulls the row it references out
-//! of the source store, and rebuilds:
+//! Subsetting walks every kept gid through every map the subset
+//! carries, pulls the row it references out of the source store, and
+//! rebuilds:
 //!
 //! - a fresh `ItemVariationStore` containing only the referenced
-//!   rows (deduped across the source so rows shared between glyphs
-//!   stay shared in the output),
-//! - a fresh `DeltaSetIndexMap` mapping `new_gid -> (0, new_inner)`
-//!   in `format 0` (compact `u16` map count) when the inner range
-//!   fits, else `format 1` for big subsets.
+//!   rows (deduped across the source and across the maps, so rows
+//!   shared between glyphs stay shared in the output),
+//! - a fresh `DeltaSetIndexMap` per map, mapping
+//!   `new_gid -> (0, new_inner)` in `format 0` (compact `u16` map
+//!   count) when the glyph count fits, else `format 1`.
 //!
 //! The output store always uses outer index 0. We never bother with
 //! multiple subtables. The OpenType spec permits multiple outer
@@ -24,7 +27,11 @@
 //! against the rest of the table and the single-outer layout keeps
 //! the rewriter trivial. Glyphs with no source row map to
 //! `(0, 0)` of the output, where row 0 is a synthesized all-zero
-//! row, equivalent to "no advance variation for this gid".
+//! row, equivalent to "no variation for this gid".
+//!
+//! HVAR keeps only its advance map, as it always has. VVAR keeps every
+//! map the source carries: the instancer folds the top side bearing
+//! deltas into `vmtx` and the vertical origin deltas into `VORG`.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -33,7 +40,59 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use crate::variation_store::{pull_row, read_regions, rebuild_store, rebuilt_store_len, PulledRow};
+use crate::warnings::Warnings;
 use crate::{GlyphId, SubsetError};
+
+/// Byte offset of `itemVariationStoreOffset` in HVAR and VVAR.
+pub(crate) const STORE_SLOT: usize = 4;
+
+/// Byte offset of the advance map's Offset32 in HVAR and VVAR.
+const ADVANCE_SLOT: usize = 8;
+
+/// Byte offset of `vorgMappingOffset` in VVAR.
+pub(crate) const VVAR_VORG_SLOT: usize = 20;
+
+/// The header of one metrics-variations table, and the messages its
+/// rewrite reports.
+struct MetricsVarLayout {
+    /// Header length: the version, the store Offset32 at byte 4, then
+    /// one Offset32 per `DeltaSetIndexMap` from byte 8.
+    header_len: usize,
+    /// The map slots the subset carries. The advance map at byte 8
+    /// comes first; a zero there means the implicit gid mapping, so
+    /// it is always written. Any other slot is written only when the
+    /// source has that map.
+    slots: &'static [usize],
+    header_truncated: &'static str,
+    bad_major: &'static str,
+    store_past_end: &'static str,
+    rows_overlap: &'static str,
+    too_large: &'static str,
+}
+
+/// HVAR: version, store, then the advance, LSB and RSB maps. Only the
+/// advance map is carried.
+const HVAR: MetricsVarLayout = MetricsVarLayout {
+    header_len: 20,
+    slots: &[ADVANCE_SLOT],
+    header_truncated: "HVAR header truncated",
+    bad_major: "HVAR major != 1",
+    store_past_end: "HVAR store offset past end",
+    rows_overlap: "HVAR store rows overlap past the store size",
+    too_large: "HVAR rebuilt store too large",
+};
+
+/// VVAR: version, store, then the advance height, TSB, BSB and vertical
+/// origin maps. Every map the source has is carried.
+const VVAR: MetricsVarLayout = MetricsVarLayout {
+    header_len: 24,
+    slots: &[ADVANCE_SLOT, 12, 16, VVAR_VORG_SLOT],
+    header_truncated: "VVAR header truncated",
+    bad_major: "VVAR major != 1",
+    store_past_end: "VVAR store offset past end",
+    rows_overlap: "VVAR store rows overlap past the store size",
+    too_large: "VVAR rebuilt store too large",
+};
 
 /// Subsets HVAR for `kept` (kept gids in new-gid order). Returns
 /// `None` when the source font has no HVAR (caller emits no HVAR
@@ -47,24 +106,99 @@ pub(crate) fn subset_hvar(
         Err(sigilbuzz::Error::MissingTable { .. }) => return Ok(None),
         Err(e) => return Err(SubsetError::from(e)),
     };
-    let parsed = parse_hvar_header(hvar_bytes)?;
-    let store_bytes = hvar_bytes
-        .get(parsed.store_off..)
-        .ok_or(SubsetError::Unsupported("HVAR store offset past end"))?;
+    subset_metrics_var(&HVAR, hvar_bytes, kept)
+        .map(Some)
+        .map_err(|bad| SubsetError::Unsupported(bad.context))
+}
 
-    // Step 1: pull each kept gid's source row. Glyphs missing from
-    // the source map (or out of range) yield None and are routed
-    // through the synthesized zero-row in the output.
+/// Subsets VVAR for `kept` (kept gids in new-gid order). Returns `None`
+/// when the source font has no VVAR. A VVAR that cannot be rebuilt is
+/// left out of the subset, like the other vertical tables, and
+/// reported in `warnings`: the subset's vertical metrics then stop
+/// varying, but the run goes on.
+pub(crate) fn subset_vvar(
+    face: &Face<'_>,
+    kept: &[GlyphId],
+    warnings: &Warnings,
+) -> Option<Vec<u8>> {
+    let vvar_bytes = match face.table_bytes(tag::VVAR) {
+        Ok(b) => b,
+        Err(sigilbuzz::Error::MissingTable { .. }) => return None,
+        Err(e) => {
+            warnings.parse_error(tag::VVAR, 0, &e, "the whole table");
+            return None;
+        }
+    };
+    match subset_metrics_var(&VVAR, vvar_bytes, kept) {
+        Ok(bytes) => Some(bytes),
+        Err(bad) => {
+            warnings.push(tag::VVAR, bad.offset, bad.context, "the whole table");
+            None
+        }
+    }
+}
+
+/// Why a metrics-variations table could not be rebuilt, and where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Unreadable {
+    /// Byte offset from the start of the table.
+    offset: usize,
+    context: &'static str,
+}
+
+/// Turns a store-walk error into an [`Unreadable`] at `offset`, the
+/// start of the store.
+fn store_error(offset: usize) -> impl Fn(SubsetError) -> Unreadable {
+    move |e| Unreadable {
+        offset,
+        context: match e {
+            SubsetError::Unsupported(context) => context,
+            _ => "ItemVariationStore unreadable",
+        },
+    }
+}
+
+/// Rebuilds the table `layout` describes, `bytes`, for `kept`.
+fn subset_metrics_var(
+    layout: &MetricsVarLayout,
+    bytes: &[u8],
+    kept: &[GlyphId],
+) -> Result<Vec<u8>, Unreadable> {
+    let header = bytes.get(..layout.header_len).ok_or(Unreadable {
+        offset: 0,
+        context: layout.header_truncated,
+    })?;
+    if u16::from_be_bytes([header[0], header[1]]) != 1 {
+        return Err(Unreadable {
+            offset: 0,
+            context: layout.bad_major,
+        });
+    }
+    let read_slot = |slot: usize| -> usize {
+        header
+            .get(slot..)
+            .and_then(<[u8]>::first_chunk::<4>)
+            .map_or(0, |b| u32::from_be_bytes(*b) as usize)
+    };
+    let store_off = read_slot(STORE_SLOT);
+    let store_bytes = bytes.get(store_off..).ok_or(Unreadable {
+        offset: STORE_SLOT,
+        context: layout.store_past_end,
+    })?;
+    let store_err = store_error(store_off);
+
+    // Every pulled row lands in `pulled_rows`; slot 0 is the
+    // synthesized all-zero row.
     let mut pulled_rows: Vec<PulledRow> = Vec::with_capacity(kept.len() + 1);
-    // Reserve slot 0 for the synthesized all-zero row.
     pulled_rows.push(PulledRow {
         region_indexes: Vec::new(),
         deltas: Vec::new(),
     });
     // Output slot of every distinct row content seen so far. Identical
     // source rows are deduped onto the same inner slot to keep the
-    // table small. The first slot is the synthesized all-zero row,
-    // which absorbs source rows that are themselves empty.
+    // table small, across every map. The first slot is the
+    // synthesized all-zero row, which absorbs source rows that are
+    // themselves empty.
     let mut slot_by_row: BTreeMap<(Vec<u16>, Vec<i32>), u16> = BTreeMap::new();
     slot_by_row.insert((Vec::new(), Vec::new()), 0);
     // Output slot already resolved for a source `(outer, inner)`
@@ -76,124 +210,112 @@ pub(crate) fn subset_hvar(
     // near the store size. Subtable offsets that alias one large
     // subtable would otherwise let a small table cost quadratic time.
     let mut pull_budget = store_bytes.len().saturating_mul(4).saturating_add(1 << 16);
-    // Map `new_gid -> output_inner_index`. We assign inner indexes in
-    // first-appearance (i.e. kept order) so the layout is
-    // deterministic.
-    let mut new_inner_per_gid: Vec<u16> = Vec::with_capacity(kept.len());
 
-    for &old_gid in kept {
-        let (outer, inner) = if parsed.advance_map_off == 0 {
-            (0u16, old_gid)
-        } else {
-            match read_index_map(hvar_bytes, parsed.advance_map_off as usize, old_gid) {
-                Some(p) => p,
-                None => {
-                    // No mapping -> falls back to the synthesized
-                    // zero row at output inner 0.
-                    new_inner_per_gid.push(0);
-                    continue;
-                }
-            }
-        };
-        if let Some(&slot) = slot_by_pair.get(&(outer, inner)) {
-            new_inner_per_gid.push(slot);
+    // Per carried map: its header slot and `new_gid -> output inner`.
+    // Inner indexes are assigned in first-appearance order (maps in
+    // header order, glyphs in kept order) so the layout is
+    // deterministic.
+    let mut maps: Vec<(usize, Vec<u16>)> = Vec::with_capacity(layout.slots.len());
+    for &slot in layout.slots {
+        let map_off = read_slot(slot);
+        if map_off == 0 && slot != ADVANCE_SLOT {
             continue;
         }
-        let slot = match pull_row(store_bytes, outer, inner)? {
-            None => 0,
-            Some(row) => {
-                pull_budget = pull_budget
-                    .checked_sub(row.region_indexes.len() + row.deltas.len())
-                    .ok_or(SubsetError::Unsupported(
-                        "HVAR store rows overlap past the store size",
-                    ))?;
-                let key = (row.region_indexes, row.deltas);
-                match slot_by_row.get(&key) {
-                    Some(&slot) => slot,
+        let mut new_inner_per_gid: Vec<u16> = Vec::with_capacity(kept.len());
+        for &old_gid in kept {
+            let (outer, inner) = if map_off == 0 {
+                (0u16, old_gid)
+            } else {
+                match read_index_map(bytes, map_off, old_gid) {
+                    Some(p) => p,
                     None => {
-                        let idx = pulled_rows.len() as u16;
-                        pulled_rows.push(PulledRow {
-                            region_indexes: key.0.clone(),
-                            deltas: key.1.clone(),
-                        });
-                        slot_by_row.insert(key, idx);
-                        idx
+                        // No mapping -> falls back to the synthesized
+                        // zero row at output inner 0.
+                        new_inner_per_gid.push(0);
+                        continue;
                     }
                 }
+            };
+            if let Some(&out_slot) = slot_by_pair.get(&(outer, inner)) {
+                new_inner_per_gid.push(out_slot);
+                continue;
             }
-        };
-        slot_by_pair.insert((outer, inner), slot);
-        new_inner_per_gid.push(slot);
+            let out_slot = match pull_row(store_bytes, outer, inner).map_err(&store_err)? {
+                None => 0,
+                Some(row) => {
+                    pull_budget = pull_budget
+                        .checked_sub(row.region_indexes.len() + row.deltas.len())
+                        .ok_or(Unreadable {
+                            offset: store_off,
+                            context: layout.rows_overlap,
+                        })?;
+                    let key = (row.region_indexes, row.deltas);
+                    match slot_by_row.get(&key) {
+                        Some(&s) => s,
+                        None => {
+                            let idx = pulled_rows.len() as u16;
+                            pulled_rows.push(PulledRow {
+                                region_indexes: key.0.clone(),
+                                deltas: key.1.clone(),
+                            });
+                            slot_by_row.insert(key, idx);
+                            idx
+                        }
+                    }
+                }
+            };
+            slot_by_pair.insert((outer, inner), out_slot);
+            new_inner_per_gid.push(out_slot);
+        }
+        maps.push((slot, new_inner_per_gid));
     }
 
-    // Step 2: rebuild the ItemVariationStore from the pulled rows.
-    // Every output row is padded to the union of all rows' regions,
-    // so rows drawn from many small subtables can multiply the size.
-    // Refuse outputs far beyond anything the source could justify.
-    let (axis_count, regions) = read_regions(store_bytes)?;
-    let max_store_len = hvar_bytes.len().saturating_mul(256).max(1 << 24);
+    // Rebuild the ItemVariationStore from the pulled rows. Every
+    // output row is padded to the union of all rows' regions, so rows
+    // drawn from many small subtables can multiply the size. Refuse
+    // outputs far beyond anything the source could justify.
+    let (axis_count, regions) = read_regions(store_bytes).map_err(&store_err)?;
+    let max_store_len = bytes.len().saturating_mul(256).max(1 << 24);
     if rebuilt_store_len(&pulled_rows, axis_count) > max_store_len {
-        return Err(SubsetError::Unsupported("HVAR rebuilt store too large"));
+        return Err(Unreadable {
+            offset: store_off,
+            context: layout.too_large,
+        });
     }
     let rebuilt = rebuild_store(&pulled_rows, axis_count, &regions);
 
-    // Step 3: build the new DeltaSetIndexMap mapping
-    // new_gid -> (0, new_inner). Pick the densest format the inner
-    // range allows.
-    let max_inner = new_inner_per_gid.iter().copied().max().unwrap_or(0);
-    let map_bytes = build_index_map(&new_inner_per_gid, max_inner);
-
-    // Step 4: assemble the HVAR header.
-    let mut out: Vec<u8> = Vec::with_capacity(20 + map_bytes.len() + rebuilt.bytes.len());
+    // Assemble: the header, then the store right after it (so its
+    // offset is known before the maps are written), then each map.
+    let mut out: Vec<u8> = Vec::with_capacity(layout.header_len + rebuilt.bytes.len());
     out.extend_from_slice(&1u16.to_be_bytes()); // major
     out.extend_from_slice(&0u16.to_be_bytes()); // minor
-    let store_off_slot = out.len();
-    out.extend_from_slice(&0u32.to_be_bytes()); // itemVariationStoreOffset
-    let map_off_slot = out.len();
-    out.extend_from_slice(&0u32.to_be_bytes()); // advanceWidthMappingOffset
-    out.extend_from_slice(&0u32.to_be_bytes()); // lsbMappingOffset = 0
-    out.extend_from_slice(&0u32.to_be_bytes()); // rsbMappingOffset = 0
-
-    // Store comes first (right after the 20-byte header) so its
-    // offset is known before we write the map.
-    let store_off = out.len() as u32;
-    out[store_off_slot..store_off_slot + 4].copy_from_slice(&store_off.to_be_bytes());
+    out.resize(layout.header_len, 0);
+    write_offset(&mut out, STORE_SLOT, layout.header_len);
     out.extend_from_slice(&rebuilt.bytes);
-
-    let map_off = out.len() as u32;
-    out[map_off_slot..map_off_slot + 4].copy_from_slice(&map_off.to_be_bytes());
-    out.extend_from_slice(&map_bytes);
-
-    Ok(Some(out))
+    for (slot, new_inner_per_gid) in &maps {
+        let max_inner = new_inner_per_gid.iter().copied().max().unwrap_or(0);
+        let map_at = out.len();
+        write_offset(&mut out, *slot, map_at);
+        out.extend_from_slice(&build_index_map(new_inner_per_gid, max_inner));
+    }
+    Ok(out)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct HvarHeader {
-    store_off: usize,
-    advance_map_off: u32,
-}
-
-fn parse_hvar_header(bytes: &[u8]) -> Result<HvarHeader, SubsetError> {
-    if bytes.len() < 20 {
-        return Err(SubsetError::Unsupported("HVAR header truncated"));
+/// Writes `value` as the Offset32 at `slot`. A rebuilt table stays far
+/// below 4 GiB: the store is capped above and each map holds at most
+/// four bytes per glyph.
+fn write_offset(out: &mut [u8], slot: usize, value: usize) {
+    if let Some(field) = out.get_mut(slot..).and_then(<[u8]>::first_chunk_mut::<4>) {
+        *field = (value as u32).to_be_bytes();
     }
-    let major = u16::from_be_bytes([bytes[0], bytes[1]]);
-    if major != 1 {
-        return Err(SubsetError::Unsupported("HVAR major != 1"));
-    }
-    let store_off = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-    let advance_map_off = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    Ok(HvarHeader {
-        store_off,
-        advance_map_off,
-    })
 }
 
 /// Reads a `(outer, inner)` from a `DeltaSetIndexMap` at absolute
 /// offset `start`. Mirrors the parser in `sigilbuzz::tables::hvar`
 /// but lives here so the subsetter does not depend on the parser's
-/// return type.
-fn read_index_map(data: &[u8], start: usize, gid: u16) -> Option<(u16, u16)> {
+/// return type. A gid past the map's count takes the last entry;
+/// `None` when the map is empty or unreadable.
+pub(crate) fn read_index_map(data: &[u8], start: usize, gid: u16) -> Option<(u16, u16)> {
     let map = data.get(start..)?;
     // The map header is at least 4 bytes (format 0).
     if map.len() < 4 {
@@ -517,5 +639,158 @@ mod tests {
         let kept: Vec<u16> = (0..N).collect();
         let r = subset_hvar(&face, &kept);
         assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+    }
+
+    /// A format 0 DeltaSetIndexMap with one-byte entries that hold the
+    /// inner index alone (outer 0).
+    fn byte_index_map(inners: &[u8]) -> Vec<u8> {
+        let mut map = alloc::vec![0, 0x07]; // format 0, 1 byte, 8 inner bits
+        map.extend_from_slice(&(inners.len() as u16).to_be_bytes());
+        map.extend_from_slice(inners);
+        map
+    }
+
+    /// A VVAR around `store` with the given maps (advance, TSB, BSB,
+    /// vertical origin; `None` leaves the offset zero), in an SFNT
+    /// whose only table is that VVAR.
+    fn font_with_vvar(store: &[u8], maps: [Option<&[u8]>; 4]) -> Vec<u8> {
+        let mut vvar = Vec::new();
+        vvar.extend_from_slice(&1u16.to_be_bytes()); // major
+        vvar.extend_from_slice(&0u16.to_be_bytes()); // minor
+        vvar.extend_from_slice(&24u32.to_be_bytes()); // store
+        vvar.resize(24, 0);
+        vvar.extend_from_slice(store);
+        for (i, map) in maps.iter().enumerate() {
+            if let Some(map) = map {
+                let at = vvar.len() as u32;
+                vvar[8 + i * 4..12 + i * 4].copy_from_slice(&at.to_be_bytes());
+                vvar.extend_from_slice(map);
+            }
+        }
+        crate::sfnt::build(0x4F54_544F, &[(tag::VVAR, vvar)])
+    }
+
+    /// The Offset32 at `slot` of `table`.
+    fn offset_at(table: &[u8], slot: usize) -> usize {
+        u32::from_be_bytes(table[slot..slot + 4].try_into().unwrap()) as usize
+    }
+
+    #[test]
+    fn subset_vvar_keeps_every_map_the_source_has() {
+        use sigilbuzz::tables::variation_store::ItemVariationStore;
+        use sigilbuzz::tables::Vvar;
+
+        // One subtable over one all-zero region (scalar 1 everywhere),
+        // so each row's delta is its stored value: row i is 10 * i.
+        let store = test_store(
+            1,
+            1,
+            &[TestSubtable {
+                region_indexes: alloc::vec![0],
+                rows: (0..5i8).map(|i| alloc::vec![10 * i]).collect(),
+            }],
+            &[0],
+        );
+        // Six glyphs. Advance: gid % 5. TSB: 4 - gid % 5. No BSB map.
+        // Vertical origin: a three-entry map, so gids past it take the
+        // last entry.
+        let advance = byte_index_map(&[0, 1, 2, 3, 4, 0]);
+        let tsb = byte_index_map(&[4, 3, 2, 1, 0, 4]);
+        let vorg = byte_index_map(&[1, 2, 3]);
+        let maps = [
+            Some(advance.as_slice()),
+            Some(&tsb[..]),
+            None,
+            Some(&vorg[..]),
+        ];
+        let font = font_with_vvar(&store, maps);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let sink = Warnings::default();
+        let out = subset_vvar(&face, &[0, 2, 5], &sink).expect("VVAR kept");
+        assert!(sink.into_sorted().is_empty());
+
+        assert_eq!(offset_at(&out, 16), 0, "no BSB map in, none out");
+        let coords = [0.5];
+        let vvar = Vvar::parse(&out).expect("subset VVAR parses");
+        let advances: Vec<f32> = (0..3)
+            .map(|g| vvar.advance_height_delta(g, &coords))
+            .collect();
+        assert_eq!(advances, [0.0, 20.0, 0.0]);
+        let tsbs: Vec<Option<f32>> = (0..3)
+            .map(|g| vvar.top_side_bearing_delta(g, &coords))
+            .collect();
+        assert_eq!(tsbs, [Some(40.0), Some(20.0), Some(40.0)]);
+        // The core parser skips the vertical origin map; read it here.
+        let store = ItemVariationStore::parse(&out[offset_at(&out, STORE_SLOT)..]).unwrap();
+        let vorg_off = offset_at(&out, VVAR_VORG_SLOT);
+        let origins: Vec<f32> = (0..3)
+            .map(|g| {
+                let (outer, inner) = read_index_map(&out, vorg_off, g).unwrap();
+                store.delta(outer, inner, &coords)
+            })
+            .collect();
+        assert_eq!(origins, [10.0, 30.0, 30.0]);
+    }
+
+    #[test]
+    fn subset_vvar_without_an_advance_map_maps_glyph_ids_directly() {
+        use sigilbuzz::tables::Vvar;
+        let store = test_store(
+            1,
+            1,
+            &[TestSubtable {
+                region_indexes: alloc::vec![0],
+                rows: (0..4i8).map(|i| alloc::vec![i + 1]).collect(),
+            }],
+            &[0],
+        );
+        let font = font_with_vvar(&store, [None; 4]);
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let out = subset_vvar(&face, &[0, 3], &Warnings::default()).unwrap();
+        // The subset writes an explicit advance map and nothing else.
+        assert_ne!(offset_at(&out, 8), 0);
+        for slot in [12, 16, 20] {
+            assert_eq!(offset_at(&out, slot), 0);
+        }
+        let vvar = Vvar::parse(&out).unwrap();
+        assert_eq!(vvar.advance_height_delta(0, &[1.0]), 1.0);
+        assert_eq!(vvar.advance_height_delta(1, &[1.0]), 4.0);
+    }
+
+    #[test]
+    fn a_malformed_vvar_is_left_out_with_a_warning() {
+        let store = test_store(1, 0, &[], &[]);
+        let font = font_with_vvar(&store, [None; 4]);
+        let warned = |vvar: Vec<u8>| {
+            let font = crate::sfnt::build(0x4F54_544F, &[(tag::VVAR, vvar)]);
+            let face = Face::parse_bytes(&font, 0).unwrap();
+            let sink = Warnings::default();
+            assert!(subset_vvar(&face, &[0], &sink).is_none());
+            sink.into_sorted()
+                .iter()
+                .map(|w| (w.table, w.offset, w.context))
+                .collect::<Vec<_>>()
+        };
+        let face = Face::parse_bytes(&font, 0).unwrap();
+        let vvar = face.table_bytes(tag::VVAR).unwrap().to_vec();
+        assert_eq!(
+            warned(vvar[..20].to_vec()),
+            [(tag::VVAR, 0, "VVAR header truncated")]
+        );
+        let mut far = vvar.clone();
+        far[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            warned(far),
+            [(tag::VVAR, STORE_SLOT, "VVAR store offset past end")]
+        );
+        let mut cut = vvar.clone();
+        cut.truncate(26);
+        assert_eq!(
+            warned(cut).first().map(|w| (w.0, w.1)),
+            Some((tag::VVAR, 24))
+        );
+        let mut major = vvar;
+        major[1] = 2;
+        assert_eq!(warned(major), [(tag::VVAR, 0, "VVAR major != 1")]);
     }
 }

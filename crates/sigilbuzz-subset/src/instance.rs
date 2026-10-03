@@ -53,12 +53,15 @@
 //! variable surface see the same outline as a consumer that honors
 //! it at the chosen instance.
 //!
-//! # VVAR-aware vmtx
+//! # VVAR-aware vmtx and VORG
 //!
 //! Symmetric to the HVAR/hmtx bake. When the source carries `vmtx` +
 //! `VVAR` the per-glyph advance height + tsb deltas resolve at
 //! `coords` and fold into the rewritten `vmtx`; `VVAR` is then
 //! dropped. Sources without `VVAR` pass `vmtx` through unchanged.
+//! When `VVAR` also maps vertical origin deltas, they fold into `VORG`
+//! the same way, entries added for glyphs whose origin moves off the
+//! default. A malformed `VORG` is then left out and reported.
 //!
 //! # MVAR-aware OS/2 / hhea / post / vhea
 //!
@@ -134,7 +137,7 @@ use crate::warnings::Warnings;
 use crate::{SubsetError, SubsetWarning};
 use gdef_store::{prune_gdef_store, GdefBake};
 use glyf::bake_glyf_loca;
-use metrics::{bake_hmtx, bake_mvar_metrics, bake_vmtx};
+use metrics::{bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, VorgBake};
 use partial::{layout_variations, partial_instance, pinned_axes};
 
 pub(crate) use ivs::bake_ivs_partial;
@@ -308,8 +311,10 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     let hmtx_out = bake_hmtx(face, &coords, num_glyphs)?;
 
     // vmtx bake (when the source carries vmtx). VVAR deltas fold in
-    // here; vmtx-without-VVAR rides through unchanged.
+    // here; vmtx-without-VVAR rides through unchanged. The VVAR
+    // vertical origin deltas fold into VORG.
     let vmtx_bake_result = bake_vmtx(face, &coords, num_glyphs)?;
+    let vorg_bake = bake_vorg(face, &coords, num_glyphs, &warnings);
 
     // MVAR-aware bake of OS/2, hhea, post, vhea (when MVAR is present).
     let mvar_bake = bake_mvar_metrics(face, &coords)?;
@@ -366,6 +371,9 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         tables.push((tag::VHEA, vhea_out));
     } else if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
         tables.push((tag::VHEA, vhea_bytes));
+    }
+    if let VorgBake::Rebuilt(b) = &vorg_bake {
+        tables.push((tag::VORG, b.clone()));
     }
     if let Some(os2_bytes) = mvar_bake.os2.clone() {
         tables.push((*b"OS/2", os2_bytes));
@@ -432,6 +440,10 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         if rec.tag == tag::GPOS && gpos_baked.is_some() {
             continue;
         }
+        // A VORG the bake could not read is left out.
+        if rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped {
+            continue;
+        }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;
         tables.push((rec.tag, bytes.to_vec()));
     }
@@ -460,6 +472,7 @@ fn cff2_bake(
 
     let hmtx_out = bake_hmtx(face, coords, num_glyphs)?;
     let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs)?;
+    let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
     let mvar_bake = bake_mvar_metrics(face, coords)?;
 
     let head_out = face
@@ -501,6 +514,9 @@ fn cff2_bake(
         tables.push((tag::VHEA, vhea_out));
     } else if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
         tables.push((tag::VHEA, vhea_bytes));
+    }
+    if let VorgBake::Rebuilt(b) = &vorg_bake {
+        tables.push((tag::VORG, b.clone()));
     }
     if let Some(os2_bytes) = mvar_bake.os2.clone() {
         tables.push((*b"OS/2", os2_bytes));
@@ -548,6 +564,9 @@ fn cff2_bake(
             continue;
         }
         if rec.tag == tag::GPOS && gpos_baked.is_some() {
+            continue;
+        }
+        if rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped {
             continue;
         }
         let bytes = face.table_bytes(rec.tag).map_err(SubsetError::from)?;

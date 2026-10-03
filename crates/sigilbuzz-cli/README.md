@@ -51,16 +51,21 @@ feature on, and `-tag` to turn it off.
 
 ### `sigilbuzz subset`
 
-Cut a font down to a set of glyphs or codepoints.
+Cut a font down to a set of glyphs, codepoints, or the characters of some text.
 
 ```sh
 sigilbuzz subset FONT.ttf OUT.ttf --gids 1,2,3
 sigilbuzz subset FONT.ttf OUT.ttf --gids 0..=255
 sigilbuzz subset FONT.ttf OUT.ttf --unicodes A,B,U+1F600
 sigilbuzz subset FONT.ttf OUT.ttf --gids 0,1 --unicodes 'H,i' --drop-layout
+sigilbuzz subset FONT.otf OUT.otf --text '세로쓰기' --text-file article.txt --skip-missing
 ```
 
-You can combine `--gids` and `--unicodes`. They are merged before subsetting.
+You can combine `--gids`, `--unicodes`, `--text`, and `--text-file`. They are merged
+before subsetting. `--text` and `--text-file` keep each distinct character of the text;
+`--text-file` reads UTF-8 and leaves out line breaks and a leading byte order mark.
+A requested character the font has no glyph for is an error, unless `--skip-missing`
+is given: then it is skipped, and the command reports how many were.
 `--drop-layout` and `--drop-variations` drop tables that are kept by default.
 `--retain-hints` keeps hinting instructions, which are dropped by default.
 
