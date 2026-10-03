@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::cell::{OnceCell, RefCell};
 
 use crate::error::{Error, Result};
-use crate::tables::cff::{read_index2, BlendContext, FdSelect, Index, RegionCache};
+use crate::tables::cff::{read_index2, BlendContext, CharstringSink, FdSelect, Index, RegionCache};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
@@ -151,7 +151,7 @@ impl<'a> Cff2<'a> {
     /// [`Cff2::outline`] with the variation store, the Private DICTs, and
     /// the region scalars read once into `shared` and kept for the next
     /// glyph. Every call with one `shared` must pass the same `coords`.
-    pub(crate) fn outline_shared<S: OutlineSink>(
+    pub(crate) fn outline_shared<S: CharstringSink>(
         &self,
         glyph_id: u16,
         coords: &[f32],

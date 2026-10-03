@@ -6,9 +6,10 @@ use core::cell::OnceCell;
 
 use crate::error::{Error, Result};
 use crate::face::{varied_glyph_bounds, Face};
+use crate::tables::cff::CharstringSink;
 use crate::tables::cff2::Cff2Shared;
 use crate::tables::glyf::PhantomMetrics;
-use crate::tables::outline::OutlineSink;
+use crate::tables::parse::hb_roundf64;
 use crate::tables::{tag, Cff, Cff2, Glyf, Gvar, Hmtx, Loca, PathOp, Varc, Vmtx};
 
 /// HarfBuzz's `hb_glyph_extents_t`, in font design units: the left and
@@ -119,7 +120,7 @@ impl<'a> ExtentsTables<'a> {
         let mut b = ControlBox::default();
         match cff.as_ref().map_err(Clone::clone)? {
             CffTable::Cff2(cff2, shared) => cff2.outline_shared(gid, coords, shared, &mut b)?,
-            CffTable::Cff(cff) => cff.outline(gid, &mut b)?,
+            CffTable::Cff(cff) => cff.draw(gid, &mut b)?,
         };
         Ok(Some(b.extents()))
     }
@@ -179,28 +180,29 @@ impl<'a> ExtentsTables<'a> {
 }
 
 /// The box of an outline's points, control points included, as
-/// HarfBuzz's charstring extents collect it: a move counts once a
+/// HarfBuzz's charstring extents collect it: in `f64`, the precision
+/// the charstring is evaluated in, and with a move counted once a
 /// segment starts from it, so a move that starts no segment does not
 /// count.
 struct ControlBox {
-    min: (f32, f32),
-    max: (f32, f32),
+    min: (f64, f64),
+    max: (f64, f64),
     /// The last move, until a segment starts from it.
-    pending: Option<(f32, f32)>,
+    pending: Option<(f64, f64)>,
 }
 
 impl Default for ControlBox {
     fn default() -> Self {
         Self {
-            min: (f32::INFINITY, f32::INFINITY),
-            max: (f32::NEG_INFINITY, f32::NEG_INFINITY),
+            min: (f64::INFINITY, f64::INFINITY),
+            max: (f64::NEG_INFINITY, f64::NEG_INFINITY),
             pending: None,
         }
     }
 }
 
 impl ControlBox {
-    fn add(&mut self, x: f32, y: f32) {
+    fn add(&mut self, x: f64, y: f64) {
         self.min = (self.min.0.min(x), self.min.1.min(y));
         self.max = (self.max.0.max(x), self.max.1.max(y));
     }
@@ -212,13 +214,23 @@ impl ControlBox {
         }
     }
 
-    /// Adds every point of `ops`.
+    /// Adds every point of `ops`, a drawn outline's.
     fn add_ops(&mut self, ops: &[PathOp]) {
+        let p = |x: f32, y: f32| (f64::from(x), f64::from(y));
         for op in ops {
             match *op {
-                PathOp::MoveTo { x, y } => self.move_to(x, y),
-                PathOp::LineTo { x, y } => self.line_to(x, y),
-                PathOp::QuadTo { cx, cy, x, y } => self.quad_to(cx, cy, x, y),
+                PathOp::MoveTo { x, y } => self.pending = Some(p(x, y)),
+                PathOp::LineTo { x, y } => {
+                    self.start_segment();
+                    let (x, y) = p(x, y);
+                    self.add(x, y);
+                }
+                PathOp::QuadTo { cx, cy, x, y } => {
+                    self.start_segment();
+                    for (x, y) in [p(cx, cy), p(x, y)] {
+                        self.add(x, y);
+                    }
+                }
                 PathOp::CubicTo {
                     c1x,
                     c1y,
@@ -226,44 +238,49 @@ impl ControlBox {
                     c2y,
                     x,
                     y,
-                } => self.curve_to(c1x, c1y, c2x, c2y, x, y),
-                PathOp::Close => self.close(),
+                } => {
+                    self.start_segment();
+                    for (x, y) in [p(c1x, c1y), p(c2x, c2y), p(x, y)] {
+                        self.add(x, y);
+                    }
+                }
+                PathOp::Close => {}
             }
         }
     }
 
-    /// The box with each edge rounded as HarfBuzz's `roundf` rounds,
-    /// halves up; a box with no width (or no height) has zero x extents
-    /// (or y extents), as in HarfBuzz.
+    /// The box with each edge rounded as HarfBuzz's `roundf` rounds a
+    /// `double`, `floor(x + 0.5)`, halves up, and the width and height
+    /// taken between the rounded edges and clamped to `i32`, as in
+    /// HarfBuzz. A box with no width (or no height) has zero x extents
+    /// (or y extents).
     fn extents(&self) -> Extents {
-        let round = crate::tables::parse::hb_round;
+        // The bearing at `from` and the extent to `to`, both rounded;
+        // `as` saturates, as HarfBuzz's `hb_clamp_to` clamps.
+        let edge = |from: f64, to: f64| {
+            let (from, to) = (hb_roundf64(from), hb_roundf64(to));
+            (from as i32, (to - from) as i32)
+        };
         let mut e = Extents::default();
         if self.min.0 < self.max.0 {
-            e.x_bearing = round(self.min.0);
-            e.width = round(self.max.0) - e.x_bearing;
+            (e.x_bearing, e.width) = edge(self.min.0, self.max.0);
         }
         if self.min.1 < self.max.1 {
-            e.y_bearing = round(self.max.1);
-            e.height = round(self.min.1) - e.y_bearing;
+            (e.y_bearing, e.height) = edge(self.max.1, self.min.1);
         }
         e
     }
 }
 
-impl OutlineSink for ControlBox {
-    fn move_to(&mut self, x: f32, y: f32) {
+impl CharstringSink for ControlBox {
+    fn move_to(&mut self, x: f64, y: f64) {
         self.pending = Some((x, y));
     }
-    fn line_to(&mut self, x: f32, y: f32) {
+    fn line_to(&mut self, x: f64, y: f64) {
         self.start_segment();
         self.add(x, y);
     }
-    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
-        self.start_segment();
-        self.add(cx, cy);
-        self.add(x, y);
-    }
-    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
+    fn curve_to(&mut self, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64) {
         self.start_segment();
         self.add(c1x, c1y);
         self.add(c2x, c2y);
@@ -275,6 +292,8 @@ impl OutlineSink for ControlBox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::cff::{op_code, Index, Interp2};
+    use crate::tables::Outline;
     use crate::Blob;
 
     fn control_box(ops: &[PathOp]) -> Extents {
@@ -284,11 +303,13 @@ mod tests {
     }
 
     #[test]
-    fn cff_extents_match_the_box_of_the_drawn_outline() {
-        // The extents run each charstring into a box with the tables
-        // read once; they must equal the box of the outline the face
-        // draws, glyph by glyph, at the default instance and away from
-        // it, whatever order the glyphs come in.
+    fn cff_extents_are_the_same_with_the_tables_read_once() {
+        // The extents keep the CFF table, the variation store, the
+        // Private DICTs and the region scalars for the next glyph. Every
+        // glyph must get the extents a fresh read gives it, at the
+        // default instance and away from it, whatever order the glyphs
+        // come in, and they must box the outline the face draws, which
+        // only differs by its points' rounding to f32.
         let fonts: [(&[u8], &[&[f32]]); 2] = [
             (
                 include_bytes!("../../../tests/fonts/SourceCodePro-Latin-Subset.otf"),
@@ -307,15 +328,71 @@ mod tests {
             for &coords in settings {
                 let tables = ExtentsTables::default();
                 for gid in (0..n).rev().chain(0..n) {
-                    let want = face
+                    let fresh = ExtentsTables::default().glyph_extents(&face, coords, &hmtx, gid);
+                    let got = tables.glyph_extents(&face, coords, &hmtx, gid).unwrap();
+                    assert_eq!(got, fresh.unwrap(), "glyph {gid} at {coords:?}");
+                    let drawn = face
                         .glyph_outline_at_coords(gid, coords)
                         .unwrap()
                         .map_or_else(Extents::default, |o| control_box(o.ops()));
-                    let got = tables.glyph_extents(&face, coords, &hmtx, gid).unwrap();
-                    assert_eq!(got, Some(want), "glyph {gid} at {coords:?}");
+                    let got = got.unwrap();
+                    for (a, b) in [
+                        (got.x_bearing, drawn.x_bearing),
+                        (got.y_bearing, drawn.y_bearing),
+                        (got.width, drawn.width),
+                        (got.height, drawn.height),
+                    ] {
+                        assert!(
+                            (a - b).abs() <= 1,
+                            "glyph {gid} at {coords:?}: {got:?} {drawn:?}"
+                        );
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn cff_extents_keep_the_charstring_precision() {
+        // `0 0 rmoveto 100 749.4999847 rlineto`, the second operand a
+        // 16.16 number, 0x02ED7FFF / 65536. HarfBuzz evaluates
+        // charstrings in double, so the top edge is just under 749.5
+        // and rounds to 749. In f32 the operand is 749.5 exactly, which
+        // rounds to 750: the outline, drawn in f32, has that.
+        let cs = [
+            139,
+            139,
+            op_code::RMOVETO,
+            255,
+            0x00,
+            0x64,
+            0x00,
+            0x00,
+            255,
+            0x02,
+            0xED,
+            0x7F,
+            0xFF,
+            op_code::RLINETO,
+        ];
+        let mut b = ControlBox::default();
+        let mut interp = Interp2::new(Index::default(), Index::default(), &mut b, None);
+        interp.run(&cs, 0).unwrap();
+        interp.finish();
+        assert_eq!(
+            b.extents(),
+            Extents {
+                x_bearing: 0,
+                y_bearing: 749,
+                width: 100,
+                height: -749,
+            }
+        );
+        let mut outline = Outline::new();
+        let mut interp = Interp2::new(Index::default(), Index::default(), &mut outline, None);
+        interp.run(&cs, 0).unwrap();
+        interp.finish();
+        assert_eq!(outline.ops()[1], PathOp::LineTo { x: 100.0, y: 749.5 });
     }
 
     #[test]

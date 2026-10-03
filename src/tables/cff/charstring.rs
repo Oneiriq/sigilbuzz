@@ -9,7 +9,7 @@ use super::index::Index;
 use super::op_code;
 use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
-use crate::tables::parse::{abs_f32, Reader};
+use crate::tables::parse::{abs_f64, Reader};
 
 /// Subroutine recursion cap. CFF spec says 10 per Type 2.
 const MAX_SUBR_DEPTH: u8 = 10;
@@ -31,15 +31,49 @@ const MAX_CHARSTRING_OPS: u32 = 100_000;
 // Type 2 charstring interpreter.
 // ----------------------------------------------------------------------------
 
-pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
+/// What a charstring draws into. The interpreter evaluates charstrings
+/// in `f64`, as HarfBuzz evaluates them in `double`: operands, blends,
+/// and the pen. Every [`OutlineSink`] is a `CharstringSink` that takes
+/// each point rounded to `f32`, as HarfBuzz's draw callbacks take
+/// `float`s; the shaper's glyph extents keep the `f64` points, as
+/// HarfBuzz's charstring extents do.
+pub(crate) trait CharstringSink {
+    /// Starts a contour at `(x, y)`.
+    fn move_to(&mut self, x: f64, y: f64);
+    /// Draws a line to `(x, y)`.
+    fn line_to(&mut self, x: f64, y: f64);
+    /// Draws a cubic curve to `(x, y)`.
+    fn curve_to(&mut self, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64);
+    /// Closes the contour.
+    fn close(&mut self);
+}
+
+impl<S: OutlineSink + ?Sized> CharstringSink for S {
+    fn move_to(&mut self, x: f64, y: f64) {
+        OutlineSink::move_to(self, x as f32, y as f32);
+    }
+    fn line_to(&mut self, x: f64, y: f64) {
+        OutlineSink::line_to(self, x as f32, y as f32);
+    }
+    fn curve_to(&mut self, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64) {
+        OutlineSink::curve_to(
+            self, c1x as f32, c1y as f32, c2x as f32, c2y as f32, x as f32, y as f32,
+        );
+    }
+    fn close(&mut self) {
+        OutlineSink::close(self);
+    }
+}
+
+pub(crate) struct Interp<'a, 'b, S: CharstringSink> {
     global: Index<'a>,
     local: Index<'a>,
     sink: &'b mut S,
     /// Operand stack. CFF spec caps this at 48 for CFF1, 513 for CFF2.
-    stack: Vec<f32>,
+    stack: Vec<f64>,
     /// Current pen position.
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
     /// Running stem count, for width determination and hintmask
     /// padding.
     stem_count: u32,
@@ -78,9 +112,9 @@ pub(crate) struct Interp<'a, 'b, S: OutlineSink> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Seac {
     /// Accent origin x, relative to the base character's origin.
-    pub(crate) adx: f32,
+    pub(crate) adx: f64,
     /// Accent origin y, relative to the base character's origin.
-    pub(crate) ady: f32,
+    pub(crate) ady: f64,
     /// SID of the base character.
     pub(crate) base: u16,
     /// SID of the accent character.
@@ -117,7 +151,7 @@ pub(crate) struct BlendContext<'b> {
     pub regions: Option<&'b RegionCache>,
 }
 
-impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
+impl<'a, 'b, S: CharstringSink> Interp<'a, 'b, S> {
     pub(crate) fn new(global: Index<'a>, local: Index<'a>, sink: &'b mut S, is_cff2: bool) -> Self {
         Self {
             global,
@@ -146,7 +180,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
     /// Makes this interpreter draw a seac base or accent: the pen starts
     /// at the component's origin `(x, y)` instead of `(0, 0)`, and a
     /// seac inside the component is an error.
-    pub(crate) fn start_seac_component(&mut self, x: f32, y: f32) {
+    pub(crate) fn start_seac_component(&mut self, x: f64, y: f64) {
         self.x = x;
         self.y = y;
         self.seac_component = true;
@@ -178,22 +212,22 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             }
             let b0 = r.read_u8()?;
             if (32..=246).contains(&b0) {
-                self.push((i32::from(b0) - 139) as f32)?;
+                self.push(f64::from(i32::from(b0) - 139))?;
             } else if (247..=250).contains(&b0) {
                 let b1 = r.read_u8()?;
-                let v = ((i32::from(b0) - 247) * 256 + i32::from(b1) + 108) as f32;
+                let v = f64::from((i32::from(b0) - 247) * 256 + i32::from(b1) + 108);
                 self.push(v)?;
             } else if (251..=254).contains(&b0) {
                 let b1 = r.read_u8()?;
-                let v = (-(i32::from(b0) - 251) * 256 - i32::from(b1) - 108) as f32;
+                let v = f64::from(-(i32::from(b0) - 251) * 256 - i32::from(b1) - 108);
                 self.push(v)?;
             } else if b0 == 255 {
                 // 16.16 fixed.
                 let raw = r.read_i32()?;
-                self.push(raw as f32 / 65536.0)?;
+                self.push(f64::from(raw) / 65536.0)?;
             } else if b0 == op_code::SHORTINT {
                 let v = r.read_i16()?;
-                self.push(f32::from(v))?;
+                self.push(f64::from(v))?;
             } else {
                 // Operator.
                 self.exec_op(b0, &mut r, depth)?;
@@ -518,7 +552,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             });
         }
         let n = self.stack.len();
-        let sid = |code: f32| {
+        let sid = |code: f64| {
             standard_encoding_sid(code).ok_or(Error::Malformed {
                 offset: at,
                 context: "CFF seac code not in the Standard Encoding",
@@ -532,7 +566,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         })
     }
 
-    fn alternating_curveto(&mut self, args: &[f32], start_horiz: bool) -> Result<()> {
+    fn alternating_curveto(&mut self, args: &[f64], start_horiz: bool) -> Result<()> {
         // HVCURVETO (start_horiz=true) and VHCURVETO alternate the
         // starting tangent direction per 4-arg group. Each group
         // lays out (d1, d2, d3, d4), with an optional trailing d5
@@ -618,7 +652,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let a = core::mem::take(&mut self.stack);
                     let dx_total = a[0] + a[2] + a[4] + a[6] + a[8];
                     let dy_total = a[1] + a[3] + a[5] + a[7] + a[9];
-                    let (dx_final, dy_final) = if abs_f32(dx_total) > abs_f32(dy_total) {
+                    let (dx_final, dy_final) = if abs_f64(dx_total) > abs_f64(dy_total) {
                         (a[10], -dy_total)
                     } else {
                         (-dx_total, a[10])
@@ -635,7 +669,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         Ok(())
     }
 
-    fn rr_curve(&mut self, a: &[f32]) {
+    fn rr_curve(&mut self, a: &[f64]) {
         let c1x = self.x + a[0];
         let c1y = self.y + a[1];
         let c2x = c1x + a[2];
@@ -693,12 +727,12 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         // summed and added in place. The sums and the order of the
         // additions are the same as summing every row first.
         for i in 0..n {
-            let mut accum = 0.0_f32;
+            let mut accum = 0.0_f64;
             if let Some(r) = regions {
                 for j in 0..n_regions {
                     let d = self.stack[start + n + i * n_regions + j];
                     if let Some(&s) = r.scalars.get(j) {
-                        accum += s * d;
+                        accum += f64::from(s) * d;
                     }
                 }
             }
@@ -744,7 +778,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         self.blend_regions = Some(regions);
     }
 
-    fn push(&mut self, v: f32) -> Result<()> {
+    fn push(&mut self, v: f64) -> Result<()> {
         let limit = if self.is_cff2 {
             CFF2_STACK_LIMIT
         } else {
@@ -760,7 +794,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<f32> {
+    fn pop(&mut self) -> Result<f64> {
         self.stack.pop().ok_or(Error::Malformed {
             offset: 0,
             context: "CFF charstring: stack underflow",
@@ -770,7 +804,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
     /// Hands `args`, the operands a drawing operator took off the stack,
     /// back to the stack, emptied: the operator clears the stack, and the
     /// next one reuses the allocation instead of growing a new one.
-    fn recycle(&mut self, mut args: Vec<f32>) {
+    fn recycle(&mut self, mut args: Vec<f64>) {
         args.clear();
         self.stack = args;
     }
@@ -815,11 +849,11 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
 /// Thin CFF2 wrapper around [`Interp`] with blend context wired in
 /// and `is_cff2 = true`. Sharing the same interpreter keeps the
 /// charstring op table in one place.
-pub(crate) struct Interp2<'a, 'b, S: OutlineSink> {
+pub(crate) struct Interp2<'a, 'b, S: CharstringSink> {
     inner: Interp<'a, 'b, S>,
 }
 
-impl<'a, 'b, S: OutlineSink> Interp2<'a, 'b, S> {
+impl<'a, 'b, S: CharstringSink> Interp2<'a, 'b, S> {
     pub(crate) fn new(
         global: Index<'a>,
         local: Index<'a>,
@@ -855,7 +889,7 @@ pub(super) fn subr_bias(count: usize) -> i32 {
 /// to an index into `subrs`. Blended CFF2 operands can hold any
 /// float, so the sum is checked and negative or huge indices resolve
 /// to `None`.
-fn biased_subr(subrs: &Index<'_>, idx: f32) -> Option<usize> {
+fn biased_subr(subrs: &Index<'_>, idx: f64) -> Option<usize> {
     let i = (idx as i32).checked_add(subr_bias(subrs.len()))?;
     let i = usize::try_from(i).ok()?;
     (i < subrs.len()).then_some(i)

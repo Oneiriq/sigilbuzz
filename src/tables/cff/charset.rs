@@ -38,7 +38,7 @@ const STANDARD_ENCODING: [u8; 256] = [
 /// `None` when the operand is not a code from 0 to 255, or the encoding
 /// leaves that code undefined. A fractional code is truncated, as
 /// HarfBuzz and FreeType do.
-pub(super) fn standard_encoding_sid(code: f32) -> Option<u16> {
+pub(super) fn standard_encoding_sid(code: f64) -> Option<u16> {
     if !(0.0..256.0).contains(&code) {
         return None;
     }
