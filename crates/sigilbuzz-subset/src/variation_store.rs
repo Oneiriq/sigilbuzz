@@ -154,6 +154,14 @@ pub(crate) fn rebuilt_store_len(rows: &[PulledRow], source_axis_count: u16) -> u
         .saturating_add(subtable_rows)
 }
 
+/// Most rows the rebuilt subtable holds: its `itemCount` is a `u16`.
+pub(crate) const MAX_ROWS: usize = 0xFFFF;
+
+/// Most regions the rebuilt subtable references. Every column is wide,
+/// so `wordDeltaCount` equals `regionIndexCount`, and the top bit of
+/// `wordDeltaCount` is the `LONG_WORDS` flag.
+const MAX_REGIONS: usize = 0x7FFF;
+
 /// Rebuilds an `ItemVariationStore` from a kept-row set. The output
 /// has exactly one `ItemVariationData` subtable (outer index 0)
 /// containing every kept row in the order supplied. Region indexes
@@ -162,11 +170,16 @@ pub(crate) fn rebuilt_store_len(rows: &[PulledRow], source_axis_count: u16) -> u
 /// HVAR we have measured already uses this form for the bulk of its
 /// rows, and the byte-budget difference for short rows is small
 /// against the table's overall size.
+///
+/// Fails with [`SubsetError::Unsupported`] when the rows do not fit
+/// one subtable: more than [`MAX_ROWS`] of them, or more than 32,767
+/// distinct regions between them. Writing either count would wrap it,
+/// and readers would then find the wrong row for a glyph.
 pub(crate) fn rebuild_store(
     rows: &[PulledRow],
     source_axis_count: u16,
     source_regions: &[RegionTriple],
-) -> RebuiltStore {
+) -> Result<RebuiltStore, SubsetError> {
     // Collect the union of regions referenced by the kept rows in
     // first-appearance order, which keeps the output deterministic.
     let (kept_regions, position) = kept_regions(rows);
@@ -177,7 +190,14 @@ pub(crate) fn rebuild_store(
     // they didn't reference. This lets the output use a single
     // shared region-index list for every row, which keeps the
     // emitter trivial and the layout deterministic.
-    let region_index_count = kept_regions.len() as u16;
+    let region_index_count = u16::try_from(kept_regions.len())
+        .ok()
+        .filter(|&count| usize::from(count) <= MAX_REGIONS)
+        .ok_or(SubsetError::Unsupported(
+            "ItemVariationStore rows reference more than 32,767 regions",
+        ))?;
+    let item_count = u16::try_from(rows.len())
+        .map_err(|_| SubsetError::Unsupported("ItemVariationStore has more than 65,535 rows"))?;
 
     // ----- Serialize -----
     let mut out: Vec<u8> = Vec::new();
@@ -214,7 +234,6 @@ pub(crate) fn rebuild_store(
     let subtable_off = out.len() as u32;
     patch_u32(&mut out, subtable_off_slot, subtable_off);
 
-    let item_count = rows.len() as u16;
     out.extend_from_slice(&item_count.to_be_bytes());
     // wordDeltaCount == regionIndexCount (every column is wide i16),
     // long_words = false. wordDeltaCount mask is the low 15 bits.
@@ -246,11 +265,11 @@ pub(crate) fn rebuild_store(
         }
     }
 
-    RebuiltStore {
+    Ok(RebuiltStore {
         bytes: out,
         #[cfg(test)]
         item_count: u32::from(item_count),
-    }
+    })
 }
 
 /// Overwrites the big-endian `u32` slot at `off` in `out`.
@@ -436,7 +455,7 @@ mod tests {
                 deltas: alloc::vec![20],
             },
         ];
-        let rebuilt = rebuild_store(&rows, 1, &regions);
+        let rebuilt = rebuild_store(&rows, 1, &regions).unwrap();
         // Item count is 2.
         assert_eq!(rebuilt.item_count, 2);
         // Round-trip the output through pull_row to verify the
@@ -449,5 +468,55 @@ mod tests {
         assert_eq!(pulled0.deltas, alloc::vec![10, 0]);
         // Second row referenced old_region 0 -> slot 1.
         assert_eq!(pulled1.deltas, alloc::vec![0, 20]);
+    }
+
+    fn row(region_indexes: Vec<u16>) -> PulledRow {
+        let deltas = alloc::vec![1; region_indexes.len()];
+        PulledRow {
+            region_indexes,
+            deltas,
+        }
+    }
+
+    #[test]
+    fn rebuild_refuses_more_rows_than_item_count_holds() {
+        let rows = alloc::vec![row(alloc::vec![0]); MAX_ROWS];
+        let rebuilt = rebuild_store(&rows, 1, &[]).expect("65,535 rows fit");
+        assert_eq!(rebuilt.item_count, 65_535);
+        let last = pull_row(&rebuilt.bytes, 0, 65_534).unwrap().unwrap();
+        assert_eq!(last.deltas, alloc::vec![1]);
+
+        // One more used to wrap itemCount to 0.
+        let rows = alloc::vec![row(alloc::vec![0]); MAX_ROWS + 1];
+        assert_eq!(
+            rebuild_store(&rows, 1, &[]).err(),
+            Some(SubsetError::Unsupported(
+                "ItemVariationStore has more than 65,535 rows"
+            ))
+        );
+    }
+
+    #[test]
+    fn rebuild_refuses_more_regions_than_word_delta_count_holds() {
+        let rebuilt = rebuild_store(&[row((0..0x7FFF).collect())], 0, &[]).expect("fits");
+        let pulled = pull_row(&rebuilt.bytes, 0, 0).unwrap().unwrap();
+        assert_eq!(pulled.deltas.len(), 0x7FFF);
+
+        // Region 32,768 used to set the LONG_WORDS bit of wordDeltaCount,
+        // and 65,536 regions wrapped regionIndexCount to 0.
+        for count in [0x8000u32, 0x1_0000] {
+            let rows: Vec<PulledRow> = (0..count)
+                .collect::<Vec<u32>>()
+                .chunks(0x4000)
+                .map(|chunk| row(chunk.iter().map(|&r| r as u16).collect()))
+                .collect();
+            assert_eq!(
+                rebuild_store(&rows, 0, &[]).err(),
+                Some(SubsetError::Unsupported(
+                    "ItemVariationStore rows reference more than 32,767 regions"
+                )),
+                "{count} regions"
+            );
+        }
     }
 }
