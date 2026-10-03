@@ -8,7 +8,7 @@ use super::reorder::{
 use super::*;
 use crate::ot::syllabic::syllable_ranges;
 use crate::tables::layout::skip_iter::{match_prop, MatchGlyph};
-use alloc::vec;
+use alloc::{format, vec};
 
 fn cps(s: &str) -> Vec<char> {
     s.chars().collect()

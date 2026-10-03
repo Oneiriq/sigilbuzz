@@ -1,5 +1,6 @@
 use super::*;
 use crate::buffer::char_class;
+use alloc::string::String;
 
 /// Runs the constraints of `script` over `text`, one cluster per
 /// character (its index), and returns the characters and clusters.
