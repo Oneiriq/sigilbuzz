@@ -582,6 +582,30 @@ fn subset_text_keeps_the_same_glyphs_as_unicodes() {
 }
 
 #[test]
+fn subset_text_skips_tabs_and_line_and_paragraph_breaks() {
+    // Open Sans has no glyph for a tab or a break, so these used to
+    // fail without --skip-missing: TAB from either flag, and a newline
+    // embedded in --text.
+    let (by_unicodes, stderr, ok) = subset_open_sans(
+        "subset_ctl_uni.ttf",
+        &["--unicodes".as_ref(), "H,i".as_ref()],
+    );
+    assert!(ok, "{stderr}");
+    let text = "H\ti\r\nH\u{2028}i\u{2029}";
+    let (by_text, stderr, ok) =
+        subset_open_sans("subset_ctl_text.ttf", &["--text".as_ref(), text.as_ref()]);
+    assert!(ok, "{stderr}");
+    assert_eq!(by_text, by_unicodes);
+    let file = write_tempfile("subset_ctl.txt", text.as_bytes());
+    let (by_file, stderr, ok) = subset_open_sans(
+        "subset_ctl_file.ttf",
+        &["--text-file".as_ref(), file.as_os_str()],
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(by_file, by_unicodes);
+}
+
+#[test]
 fn subset_text_combines_with_unicodes_and_gids() {
     let (split, stderr, ok) = subset_open_sans(
         "subset_split.ttf",
