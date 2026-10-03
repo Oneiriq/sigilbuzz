@@ -74,6 +74,12 @@
 //! etc.). It replaces the workaround of calling [`flatten`] one
 //! tiny `MoveTo + draw` op pair at a time per Bézier.
 //!
+//! Both return the edges the path draws and nothing more. A contour
+//! without `Close` stays open, so the workaround above still yields
+//! each edge exactly once. A fill treats an open contour as closed: a
+//! caller that fills the segments itself should close such contours
+//! first. The [`Rasterizer`] does that whenever it fills.
+//!
 //! ```
 //! use sigilbuzz_render::{flatten_grouped, FlattenedCurve, Affine, DEFAULT_TOLERANCE};
 //! use sigilbuzz::tables::PathOp;

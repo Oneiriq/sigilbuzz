@@ -21,7 +21,7 @@ use crate::affine::Affine;
 use crate::bitmaps;
 use crate::colrv1::rasterize_colrv1;
 use crate::error::RenderError;
-use crate::flatten::{flatten, flatten_limited, Segment, MAX_SEGMENTS};
+use crate::flatten::{flatten_fill, flatten_fill_limited, Segment, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap, Placement};
 use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER_DIM};
 
@@ -202,7 +202,7 @@ impl Rasterizer {
             dy: 0.0,
         };
 
-        let segs = flatten(outline.ops().iter().copied(), &xform, self.tolerance);
+        let segs = flatten_fill(outline.ops().iter().copied(), &xform, self.tolerance);
         if let Some(b) = raster_bounds(&segs) {
             if b.width > MAX_RASTER_DIM || b.height > MAX_RASTER_DIM {
                 return Err(RenderError::BadSize(size_pt));
@@ -346,7 +346,7 @@ impl Rasterizer {
             if outline.is_empty() {
                 continue;
             }
-            let segs = flatten_limited(
+            let segs = flatten_fill_limited(
                 outline.ops().iter().copied(),
                 &xform,
                 self.tolerance,
@@ -638,6 +638,57 @@ fn blit_layer(dst: &mut ColorPixmap, mask: &Pixmap, dx: u32, dy: u32, color: [u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::flatten::flatten;
+    use sigilbuzz::tables::PathOp;
+
+    /// A CFF-style contour: two cubics and no `Close`. CFF draws the
+    /// closing edge implicitly, here the line from (20, 200) back down to
+    /// the start at (20, 0).
+    fn open_cff_contour() -> Vec<PathOp> {
+        alloc::vec![
+            PathOp::MoveTo { x: 20.0, y: 0.0 },
+            PathOp::CubicTo {
+                c1x: 120.0,
+                c1y: 0.0,
+                c2x: 180.0,
+                c2y: 50.0,
+                x: 180.0,
+                y: 100.0,
+            },
+            PathOp::CubicTo {
+                c1x: 180.0,
+                c1y: 150.0,
+                c2x: 120.0,
+                c2y: 200.0,
+                x: 20.0,
+                y: 200.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn open_cff_contour_fills_like_its_closed_form() {
+        let xform = Affine::scale(0.1, -0.1);
+        let mut closed = open_cff_contour();
+        closed.push(PathOp::Close);
+        let want = raster(&flatten_fill(closed, &xform, 0.25));
+        let got = raster(&flatten_fill(open_cff_contour(), &xform, 0.25));
+        assert_eq!(got.pixmap, want.pixmap);
+        assert_eq!((got.origin_x, got.origin_y), (want.origin_x, want.origin_y));
+        // The middle of the D is solid, and nothing leaks past its edges.
+        let at = |x: i32, y: i32| {
+            got.pixmap
+                .get((x - got.origin_x) as u32, (y - got.origin_y) as u32)
+        };
+        assert_eq!(at(9, -10), 255);
+        assert_eq!(at(0, -10), 0);
+        assert_eq!(at(19, -10), 0);
+        // The public flatten leaves the contour open, and filling those
+        // edges as they are does not give the glyph.
+        let unclosed = raster(&flatten(open_cff_contour(), &xform, 0.25));
+        assert_ne!(unclosed.pixmap, want.pixmap);
+    }
 
     #[test]
     fn rasterizer_default_and_with_tolerance() {

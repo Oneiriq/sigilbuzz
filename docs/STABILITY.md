@@ -94,7 +94,15 @@ signatures only change in a major version.
 
 - `Rasterizer`, `Pixmap`, `ColorPixmap`, `RenderError`
 - `Affine`, `flatten`, `flatten_grouped`, `FlattenedCurve`, `Segment`,
-  `DEFAULT_TOLERANCE`
+  `DEFAULT_TOLERANCE`. `flatten` and `flatten_grouped` return the edges a path draws:
+  a contour without `Close` stays open, and only `Close` emits a closing edge. That is
+  part of the contract. The rasterizer closes open contours on its own fill paths.
+- Added in 0.10.0: `Placement` and the `_placed` twin of each `Rasterizer` entry point
+  (`rasterize_glyph_placed`, `rasterize_colrv0_glyph_placed`,
+  `rasterize_colrv1_glyph_placed`, `rasterize_bitmap_glyph_placed`,
+  `rasterize_svg_glyph_placed`, `rasterize_svg_glyph_with_text_paths_placed`), plus the
+  free function `rasterize_bitmap_glyph_placed`. Each returns the image with its offset
+  from the pen position on the baseline, in whole pixels with y down.
 - `encode_png`, `encode_png_alpha`
 - `decode_ebdt_mono`, `decode_png`, `rasterize_bitmap_glyph`, `rescale_bilinear`
 
@@ -263,7 +271,10 @@ After 1.0:
   - `sigilbuzz::tables::{Outline, PathOp, Fvar}`
   - `sigilbuzz_render::{Affine, DEFAULT_TOLERANCE, flatten}`
 
-  These are all Tier 1 and have kept the same shape since 0.19.
+  These are all Tier 1 and have kept the same shape since 0.19. The MSDF generator
+  flattens one `MoveTo` plus one drawing op at a time, so it relies on `flatten`
+  leaving a contour without `Close` open: a closing edge would add a reversed duplicate
+  of every edge it draws.
 - A software rasterizer uses the outline and render APIs under the same Tier 1 terms.
 
 If you build on sigilbuzz, open an issue or pull request that links to your usage so

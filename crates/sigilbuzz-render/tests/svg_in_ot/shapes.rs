@@ -235,3 +235,31 @@ fn svg_rect_with_dasharray_strokes_all_four_edges() {
     assert!(any_opaque(19..=22, 20..=80), "left edge missing dashes");
     assert!(any_opaque(78..=81, 20..=80), "right edge missing dashes");
 }
+
+/// A filled path whose subpath has no `Z` fills as if it were closed:
+/// fill rules close an open subpath, so it may not leave an unbalanced
+/// edge that streaks across the glyph.
+#[test]
+fn svg_open_path_fills_like_its_closed_form() {
+    let doc = |close: &str| {
+        format!(
+            "<svg viewBox=\"0 0 100 100\">\
+             <path d=\"M 10 10 C 60 10 90 40 90 50 C 90 60 60 90 10 90{close}\" fill=\"#000\"/>\
+             </svg>"
+        )
+    };
+    let render = |payload: String| {
+        let font = build_svg_font(payload.as_bytes());
+        let blob = Blob::new(&font);
+        let face = Face::parse(&blob, 0).unwrap();
+        Rasterizer::new()
+            .rasterize_svg_glyph(&face, 1, 100.0, &[])
+            .unwrap()
+    };
+    let open = render(doc(""));
+    let closed = render(doc(" Z"));
+    assert_eq!(open, closed);
+    // Inside the D shape, and left of its straight edge.
+    assert_eq!(open.get(40, 50)[3], 255);
+    assert_eq!(open.get(5, 50)[3], 0);
+}

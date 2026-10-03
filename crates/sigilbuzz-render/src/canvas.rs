@@ -45,7 +45,7 @@ use sigilbuzz_paint::{CompositeMode, GradientKind, Transform2D};
 
 use crate::affine::Affine;
 use crate::colrv1::{composite_layer, mul_alpha, to_premul, PreparedGradient};
-use crate::flatten::{flatten_limited, MAX_SEGMENTS};
+use crate::flatten::{flatten_fill_limited, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap, Placement};
 use crate::raster::{rasterize_in, Window};
 
@@ -274,7 +274,7 @@ impl<'f, 'a, 'c, 'r> RasterSink<'f, 'a, 'c, 'r> {
                 rect: NO_PIXELS,
             });
         }
-        let segments = flatten_limited(
+        let segments = flatten_fill_limited(
             ops.iter().copied(),
             &affine,
             self.tolerance,

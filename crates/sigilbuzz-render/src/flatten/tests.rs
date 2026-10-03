@@ -49,11 +49,8 @@ fn quadratic_subdivides_to_chord_when_tight() {
     );
     // First segment starts at (0,0).
     assert!((segs[0].x0).abs() < 1e-5);
-    // The last chord ends at (100,0), and the implicit close of the
-    // open contour returns from there to (0,0).
-    assert!((segs[segs.len() - 2].x1 - 100.0).abs() < 1e-5);
-    let close = segs[segs.len() - 1];
-    assert!((close.x0 - 100.0).abs() < 1e-5 && close.x1.abs() < 1e-5);
+    // Last segment ends at (100,0): the open contour is not closed.
+    assert!((segs[segs.len() - 1].x1 - 100.0).abs() < 1e-5);
 }
 
 #[test]
@@ -171,15 +168,13 @@ fn flatten_grouped_tight_tolerance_subdivides_cubic_heavily() {
         },
     ];
     let curves = flatten_grouped(ops, &Affine::identity(), 0.01);
-    // The cubic, then the implicit close-line of the open contour.
-    assert_eq!(curves.len(), 2);
+    assert_eq!(curves.len(), 1);
     match &curves[0] {
         FlattenedCurve::Cubic(segs) => {
             assert!(segs.len() > 8, "tight tolerance got {} segs", segs.len());
         }
         other => panic!("expected Cubic, got {other:?}"),
     }
-    assert!(matches!(curves[1], FlattenedCurve::Line(_)));
 }
 
 #[test]
@@ -402,18 +397,16 @@ fn non_finite_curves_emit_a_single_chord() {
             y: 5.0,
         },
     ];
-    // One chord per curve, plus the implicit close of the open contour.
-    assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 3);
+    assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 2);
     let grouped = flatten_grouped(ops, &Affine::identity(), 0.25);
-    assert_eq!(grouped.len(), 3);
-    assert!(grouped[..2].iter().all(|c| match c {
+    assert_eq!(grouped.len(), 2);
+    assert!(grouped.iter().all(|c| match c {
         FlattenedCurve::Quad(s) | FlattenedCurve::Cubic(s) => s.len() == 1,
         FlattenedCurve::Line(_) => false,
     }));
-    assert!(matches!(grouped[2], FlattenedCurve::Line(_)));
 }
 
-// -------- implicit close of open contours --------
+// -------- open contours: kept open by `flatten`, closed for a fill --------
 
 fn line_path(points: &[(f32, f32)]) -> Vec<PathOp> {
     let mut ops = Vec::new();
@@ -444,9 +437,74 @@ fn two_contours(close: bool) -> Vec<PathOp> {
 }
 
 #[test]
-fn open_contour_is_closed_at_the_end() {
+fn flatten_keeps_a_single_draw_open() {
+    // An MSDF generator flattens a glyph one `MoveTo` plus one draw at
+    // a time. Each call must yield that draw's chords and nothing
+    // else: a closing edge would add a reversed duplicate of the edge.
+    let line = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 0.0 },
+    ];
+    assert_eq!(
+        flatten(line, &Affine::identity(), 0.25),
+        alloc::vec![Segment {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 0.0
+        }]
+    );
+    let grouped = flatten_grouped(line, &Affine::identity(), 0.25);
+    assert_eq!(grouped.len(), 1);
+    assert!(matches!(grouped[0], FlattenedCurve::Line(_)));
+
+    let quad = [
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::QuadTo {
+            cx: 50.0,
+            cy: 100.0,
+            x: 100.0,
+            y: 0.0,
+        },
+    ];
+    let segs = flatten(quad, &Affine::identity(), 0.25);
+    assert!(segs.len() > 1);
+    // One chain from (0, 0) to (100, 0), never back.
+    assert!(segs
+        .windows(2)
+        .all(|w| w[0].x1 == w[1].x0 && w[0].y1 == w[1].y0));
+    let last = segs[segs.len() - 1];
+    assert_eq!((last.x1, last.y1), (100.0, 0.0));
+    assert_eq!(flatten_grouped(quad, &Affine::identity(), 0.25).len(), 1);
+
+    // A fill closes the same contour.
+    let filled = flatten_fill(line, &Affine::identity(), 0.25);
+    assert_eq!(filled.len(), 2);
+    assert_eq!((filled[1].x1, filled[1].y1), (0.0, 0.0));
+}
+
+#[test]
+fn flatten_leaves_open_contours_open() {
+    let segs = flatten(two_contours(false), &Affine::identity(), 0.25);
+    // Two triangle edges and three square edges, no close-lines.
+    assert_eq!(segs.len(), 5);
+    assert_eq!((segs[1].x1, segs[1].y1), (10.0, 10.0));
+    assert_eq!((segs[2].x0, segs[2].y0), (20.0, 0.0));
+    // An explicit Close still closes.
+    assert_eq!(
+        flatten(two_contours(true), &Affine::identity(), 0.25).len(),
+        7
+    );
+    // The grouped form draws the same edges.
+    let grouped = flatten_grouped(two_contours(false), &Affine::identity(), 0.25);
+    assert_eq!(grouped.len(), 5);
+    assert_eq!(ungroup(&grouped), segs);
+}
+
+#[test]
+fn fill_flattening_closes_an_open_contour_at_the_end() {
     let open = line_path(&TRIANGLE);
-    let segs = flatten(open.iter().copied(), &Affine::identity(), 0.25);
+    let segs = flatten_fill(open.iter().copied(), &Affine::identity(), 0.25);
     assert_eq!(segs.len(), 3);
     assert_eq!(
         segs[2],
@@ -459,70 +517,55 @@ fn open_contour_is_closed_at_the_end() {
     );
     let mut closed = open;
     closed.push(PathOp::Close);
+    assert_eq!(
+        segs,
+        flatten_fill(closed.iter().copied(), &Affine::identity(), 0.25)
+    );
     assert_eq!(segs, flatten(closed, &Affine::identity(), 0.25));
 }
 
 #[test]
-fn open_contour_is_closed_at_the_next_moveto() {
+fn fill_flattening_closes_an_open_contour_at_the_next_moveto() {
     // The triangle's close-line comes before the square's first edge.
-    let segs = flatten(two_contours(false), &Affine::identity(), 0.25);
+    let segs = flatten_fill(two_contours(false), &Affine::identity(), 0.25);
     assert_eq!(segs.len(), 7);
     assert_eq!((segs[2].x1, segs[2].y1), (0.0, 0.0));
     assert_eq!((segs[3].x0, segs[3].y0), (20.0, 0.0));
-    assert_eq!(segs, flatten(two_contours(true), &Affine::identity(), 0.25));
+    assert_eq!(
+        segs,
+        flatten_fill(two_contours(true), &Affine::identity(), 0.25)
+    );
 }
 
 #[test]
 fn closed_contours_get_no_second_close() {
     // Close already returned the pen to the start, so neither the next
-    // MoveTo nor the end of the path adds another segment.
-    let segs = flatten(two_contours(true), &Affine::identity(), 0.25);
+    // MoveTo nor the end of the path adds another segment, and the fill
+    // flattening matches the public one.
+    let segs = flatten_fill(two_contours(true), &Affine::identity(), 0.25);
     assert_eq!(segs.len(), 7);
+    assert_eq!(segs, flatten(two_contours(true), &Affine::identity(), 0.25));
 }
 
 #[test]
 fn contour_back_at_its_start_needs_no_close() {
     let ops = line_path(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)]);
-    assert_eq!(flatten(ops, &Affine::identity(), 0.25).len(), 3);
+    assert_eq!(
+        flatten(ops.iter().copied(), &Affine::identity(), 0.25).len(),
+        3
+    );
+    assert_eq!(flatten_fill(ops, &Affine::identity(), 0.25).len(), 3);
 }
 
 #[test]
-fn flatten_open_leaves_open_contours_open() {
-    let segs = flatten_open(two_contours(false), &Affine::identity(), 0.25);
-    // Two triangle edges and three square edges, no close-lines.
-    assert_eq!(segs.len(), 5);
-    assert_eq!((segs[1].x1, segs[1].y1), (10.0, 10.0));
-    assert_eq!((segs[2].x0, segs[2].y0), (20.0, 0.0));
-    // An explicit Close still closes.
-    assert_eq!(
-        flatten_open(two_contours(true), &Affine::identity(), 0.25).len(),
-        7
-    );
-}
-
-#[test]
-fn flatten_grouped_closes_open_contours_with_lines() {
-    let grouped = flatten_grouped(two_contours(false), &Affine::identity(), 0.25);
-    assert_eq!(
-        grouped,
-        flatten_grouped(two_contours(true), &Affine::identity(), 0.25)
-    );
-    assert_eq!(grouped.len(), 7);
-    assert!(grouped.iter().all(|c| matches!(c, FlattenedCurve::Line(_))));
-    assert_eq!(
-        ungroup(&grouped),
-        flatten(two_contours(false), &Affine::identity(), 0.25)
-    );
-}
-
-#[test]
-fn draw_after_close_is_closed_again() {
+fn draw_after_close_is_closed_again_for_a_fill() {
     // After Close the pen sits at the contour start. A LineTo from there
-    // reopens the contour, so the end of the path closes it again.
+    // reopens the contour, so the end of the path closes it again for a
+    // fill, and stays open otherwise.
     let mut ops = line_path(&TRIANGLE);
     ops.push(PathOp::Close);
     ops.push(PathOp::LineTo { x: 0.0, y: 10.0 });
-    let segs = flatten(ops.iter().copied(), &Affine::identity(), 0.25);
+    let segs = flatten_fill(ops.iter().copied(), &Affine::identity(), 0.25);
     assert_eq!(segs.len(), 5);
     assert_eq!(
         segs[4],
@@ -533,9 +576,11 @@ fn draw_after_close_is_closed_again() {
             y1: 0.0
         }
     );
+    let open = flatten(ops.iter().copied(), &Affine::identity(), 0.25);
+    assert_eq!(open[..], segs[..4]);
     assert_eq!(
         ungroup(&flatten_grouped(ops, &Affine::identity(), 0.25)),
-        segs
+        open
     );
 }
 
