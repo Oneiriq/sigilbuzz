@@ -20,9 +20,11 @@ fn feature(tag: &[u8; 4], value: u32) -> Feature {
 }
 
 /// Lookup table for [`stage_lookups`]: `abvm` -> [4], `mark` -> [2, 5],
-/// `mkmk` -> [5], `kern` -> [1], `dist` -> [1, 3], `ss01` -> [0].
+/// `mkmk` -> [5], `kern` -> [1], `dist` -> [1, 3], `ss01` -> [0],
+/// `rvrn` -> [6].
 fn lookups(tag: [u8; 4]) -> Vec<u16> {
     match &tag {
+        b"rvrn" => vec![6],
         b"abvm" => vec![4],
         b"mark" => vec![2, 5],
         b"mkmk" => vec![5],
@@ -41,7 +43,7 @@ fn indices(stage: &[StageLookup]) -> Vec<u16> {
 fn stage_merges_features_in_lookup_order_and_runs_shared_lookups_once() {
     let stage = stage_lookups(&[], true, &[], lookups);
     // `dist` and `kern` share lookup 1: it runs once.
-    assert_eq!(indices(&stage), [1, 2, 3, 4, 5]);
+    assert_eq!(indices(&stage), [1, 2, 3, 4, 5, 6]);
     // Lookups of `mark` / `mkmk` do not pass over ZWJ.
     let zwj = |i: u16| {
         stage
@@ -58,7 +60,7 @@ fn stage_merges_features_in_lookup_order_and_runs_shared_lookups_once() {
 #[test]
 fn a_user_enabled_default_feature_is_not_applied_twice() {
     let with_dist = stage_lookups(&[feature(b"dist", 1)], true, &[], lookups);
-    assert_eq!(indices(&with_dist), [1, 2, 3, 4, 5]);
+    assert_eq!(indices(&with_dist), [1, 2, 3, 4, 5, 6]);
 }
 
 #[test]
@@ -68,6 +70,7 @@ fn user_features_join_and_disabled_defaults_leave_the_stage() {
             feature(b"ss01", 1),
             feature(b"kern", 0),
             feature(b"dist", 0),
+            feature(b"rvrn", 0),
         ],
         true,
         &[],
@@ -82,7 +85,7 @@ fn the_required_feature_joins_the_stage_whatever_its_tag() {
     // tag, 1 to `kern`, which the caller turned off.
     let off = [feature(b"kern", 0), feature(b"dist", 0)];
     let stage = stage_lookups(&off, true, &[7, 1], lookups);
-    assert_eq!(indices(&stage), [1, 2, 4, 5, 7]);
+    assert_eq!(indices(&stage), [1, 2, 4, 5, 6, 7]);
     let auto = stage.iter().find(|l| l.index == 7).unwrap().joiners;
     assert_eq!(auto, Joiners::AUTO);
     // Shared with `mark`, a required lookup gets its manual joiners.
@@ -94,10 +97,10 @@ fn the_required_feature_joins_the_stage_whatever_its_tag() {
 #[test]
 fn vertical_runs_leave_out_the_horizontal_defaults() {
     let stage = stage_lookups(&[], false, &[], lookups);
-    assert_eq!(indices(&stage), [2, 4, 5]);
+    assert_eq!(indices(&stage), [2, 4, 5, 6]);
     // A caller can still ask for one.
     let stage = stage_lookups(&[feature(b"kern", 1)], false, &[], lookups);
-    assert_eq!(indices(&stage), [1, 2, 4, 5]);
+    assert_eq!(indices(&stage), [1, 2, 4, 5, 6]);
 }
 
 fn glyph(gid: u32) -> Glyph {

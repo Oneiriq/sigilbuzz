@@ -738,3 +738,124 @@ fn shared_conditions_cost_no_more_than_the_table_size_allows() {
 
 /// Shaping calls each timing makes.
 const ROUNDS: u32 = 20;
+
+const OPEN_SANS: &[u8] = include_bytes!("fixtures/opensans_regular.ttf");
+
+/// A ScriptList with `DFLT` and `latn`, whose default language systems
+/// both list feature 0 alone.
+fn one_feature_script_list() -> Vec<u8> {
+    let mut out = vec![0, 2];
+    out.extend_from_slice(b"DFLT\0\x0E");
+    out.extend_from_slice(b"latn\0\x0E");
+    // The Script both records name: a default language system right
+    // after it, and no others.
+    out.extend_from_slice(&[0, 4, 0, 0]);
+    // No lookupOrder, no required feature, feature 0.
+    out.extend_from_slice(&[0, 0, 0xFF, 0xFF, 0, 1, 0, 0]);
+    out
+}
+
+/// A FeatureList of one `rvrn` feature with `lookups`.
+fn rvrn_feature_list(lookups: &[u16]) -> Vec<u8> {
+    let mut out = vec![0, 1];
+    out.extend_from_slice(b"rvrn\0\x08");
+    out.extend_from_slice(&[0, 0]); // featureParamsOffset
+    out.extend_from_slice(&(lookups.len() as u16).to_be_bytes());
+    for l in lookups {
+        out.extend_from_slice(&l.to_be_bytes());
+    }
+    out
+}
+
+/// A LookupList of one lookup of `lookup_type` with the one subtable
+/// `subtable`.
+fn one_lookup_list(lookup_type: u16, subtable: &[u8]) -> Vec<u8> {
+    let mut out = vec![0, 1, 0, 4];
+    out.extend_from_slice(&lookup_type.to_be_bytes());
+    // No lookupFlag, one subtable, right after the lookup.
+    out.extend_from_slice(&[0, 0, 0, 1, 0, 8]);
+    out.extend_from_slice(subtable);
+    out
+}
+
+/// A GSUB or GPOS of the three lists, version 1.1 with `variations`
+/// when there are some.
+fn layout_table(
+    scripts: &[u8],
+    features: &[u8],
+    lookups: &[u8],
+    variations: Option<&[u8]>,
+) -> Vec<u8> {
+    let header = if variations.is_some() { 14 } else { 10 };
+    let feature_list = header + scripts.len();
+    let lookup_list = feature_list + features.len();
+    let mut out = vec![0, 1, 0, u8::from(variations.is_some())];
+    for offset in [header, feature_list, lookup_list] {
+        out.extend_from_slice(&(offset as u16).to_be_bytes());
+    }
+    if variations.is_some() {
+        let offset = lookup_list + lookups.len();
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+    }
+    out.extend_from_slice(scripts);
+    out.extend_from_slice(features);
+    out.extend_from_slice(lookups);
+    out.extend_from_slice(variations.unwrap_or(&[]));
+    out
+}
+
+/// Open Sans with a GSUB whose `rvrn` has no lookups until its one
+/// FeatureVariations record, which holds everywhere, gives it an
+/// AlternateSubst lookup from `a` (glyph 68) to `b`, `c`, and `d` (69
+/// to 71), and a GPOS whose `rvrn` adds 100 units to the advance of
+/// all four.
+fn open_sans_with_rvrn() -> Vec<u8> {
+    // Format 1: Coverage at 16, one AlternateSet, at 8.
+    let alternates = [
+        0, 1, 0, 16, 0, 1, 0, 8, 0, 3, 0, 69, 0, 70, 0, 71, 0, 1, 0, 1, 0, 68,
+    ];
+    let variations = [
+        0, 1, 0, 0, 0, 0, 0, 1, // header
+        0, 0, 0, 0, 0, 0, 0, 16, // null ConditionSet, substitution
+        0, 1, 0, 0, 0, 1, // FeatureTableSubstitution
+        0, 0, 0, 0, 0, 12, // feature 0
+        0, 0, 0, 1, 0, 0, // the alternate Feature: lookup 0
+    ];
+    let gsub = layout_table(
+        &one_feature_script_list(),
+        &rvrn_feature_list(&[]),
+        &one_lookup_list(3, &alternates),
+        Some(&variations),
+    );
+    // Format 1: Coverage at 8, an XAdvance of 100 for every glyph.
+    let advance = [
+        0, 1, 0, 8, 0, 4, 0, 100, 0, 1, 0, 4, 0, 68, 0, 69, 0, 70, 0, 71,
+    ];
+    let gpos = layout_table(
+        &one_feature_script_list(),
+        &rvrn_feature_list(&[0]),
+        &one_lookup_list(1, &advance),
+        None,
+    );
+    with_tables(OPEN_SANS, &[(*b"GSUB", gsub), (*b"GPOS", gpos)])
+}
+
+#[test]
+fn the_rvrn_value_picks_the_alternate_and_rvrn_positions_too() {
+    // HarfBuzz 14.5.0: the value of `rvrn` picks the alternate, 1 for
+    // the first, and one past the last substitutes nothing. GPOS
+    // `rvrn` adds its 100 units unless `rvrn` is off.
+    let font = open_sans_with_rvrn();
+    let rows = |features: &[Feature]| font_rows(&font, None, None, "a", features);
+    let rvrn = |value| Feature {
+        tag: *b"rvrn",
+        value,
+    };
+    assert_eq!(rows(&[]), [(69, 0, 1355, 0, 0)]);
+    assert_eq!(rows(&[rvrn(1)]), [(69, 0, 1355, 0, 0)]);
+    assert_eq!(rows(&[rvrn(2)]), [(70, 0, 1075, 0, 0)]);
+    assert_eq!(rows(&[rvrn(3)]), [(71, 0, 1355, 0, 0)]);
+    assert_eq!(rows(&[rvrn(4)]), [(68, 0, 1239, 0, 0)]);
+    assert_eq!(rows(&[rvrn(255)]), [(68, 0, 1239, 0, 0)]);
+    assert_eq!(rows(&[rvrn(0)]), [(68, 0, 1139, 0, 0)]);
+}
