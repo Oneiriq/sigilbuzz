@@ -45,6 +45,7 @@ use crate::tables::parse::Reader;
 use crate::tables::{tag, Cmap, Head, Hhea, Hmtx, Maxp, Name, Vhea, Vmtx, Vorg};
 
 pub use color::GlyphBitmapEntry;
+pub(crate) use outlines::varied_glyph_bounds;
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

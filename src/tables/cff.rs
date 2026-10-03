@@ -47,7 +47,7 @@ use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 
-pub(crate) use charstring::{BlendContext, Interp2};
+pub(crate) use charstring::{BlendContext, Interp2, RegionCache};
 pub(crate) use dict::FdSelect;
 pub(crate) use index::{read_index2, Index};
 

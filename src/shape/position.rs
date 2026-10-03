@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::cell::{OnceCell, RefCell};
 
 use super::attach::{self, Attach};
-use super::fallback::{self, glyph_extents, MarkPositioner};
+use super::fallback::{self, Extents, ExtentsTables, MarkPositioner};
 use super::glyph_flags::FlagCx;
 use super::gpos::{self, GposCx};
 use super::shaper::{MarkZeroing, Shaper};
@@ -251,7 +251,6 @@ pub(super) fn position(
         };
         let positioner = MarkPositioner {
             face,
-            coords: input.var.coords,
             gdef: input.gdef,
             direction,
             ligature_direction,
@@ -405,6 +404,8 @@ pub(super) struct FontAdvances<'a, 'c> {
     v_phantom: RefCell<BTreeMap<u16, Option<PhantomPoints>>>,
     /// Vertical origins computed so far, by glyph.
     v_origins: RefCell<BTreeMap<u16, i32>>,
+    /// The tables glyph extents come from, read when first needed.
+    extents: ExtentsTables<'a>,
 }
 
 /// A glyph's four phantom points: left and right in x, top and bottom
@@ -463,7 +464,18 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             h_phantom: RefCell::default(),
             v_phantom: RefCell::default(),
             v_origins: RefCell::default(),
+            extents: ExtentsTables::default(),
         })
+    }
+
+    /// The ink extents of glyph `id` at the call's coords, as HarfBuzz's
+    /// `hb_font_get_glyph_extents` computes them, or `None` when the
+    /// font has no `glyf`, `CFF ` or `CFF2` (see
+    /// [`ExtentsTables::glyph_extents`]). The tables are read once per
+    /// call.
+    pub(super) fn glyph_extents(&self, id: u16) -> Result<Option<Extents>> {
+        self.extents
+            .glyph_extents(self.face, self.coords, &self.hmtx, id)
     }
 
     /// The horizontal advance of glyph `id`, in font units.
@@ -565,7 +577,7 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
                 .map_or(self.upem, |pp| hb_round(pp[2].1));
         }
         let font_advance = i64::from(self.ascender) - i64::from(self.descender);
-        match glyph_extents(self.face, self.coords, id) {
+        match self.glyph_extents(id) {
             Ok(Some(e)) => {
                 let origin = i64::from(e.y_bearing) + ((font_advance + i64::from(e.height)) >> 1);
                 origin.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32

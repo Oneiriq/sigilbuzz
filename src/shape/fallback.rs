@@ -16,7 +16,7 @@
 mod extents;
 mod marks;
 
-pub(super) use extents::glyph_extents;
+pub(super) use extents::{Extents, ExtentsTables};
 pub(super) use marks::{recategorize_combining_class, MarkPositioner};
 
 use super::position::FontAdvances;

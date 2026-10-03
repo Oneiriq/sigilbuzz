@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::hb_roundf;
-use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Loca, Outline, PathOp};
+use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Gvar, Loca, Outline, PathOp};
 
 impl<'a> Face<'a> {
     /// Parses the `loca` table. Pulls the offset format from `head`
@@ -101,16 +101,8 @@ impl<'a> Face<'a> {
             hmtx: &hmtx,
             vmtx: vmtx.as_ref(),
         };
-        let mut points = PointBox::default();
-        glyf.outline_at_coords(
-            &loca,
-            glyph_id,
-            Some(&gvar),
-            coords,
-            Some(&metrics),
-            &mut points,
-        )?;
-        Ok(Some(points.bounds(base.num_contours)))
+        let tables = (&glyf, &loca, &gvar);
+        varied_glyph_bounds(tables, glyph_id, coords, &metrics, base.num_contours).map(Some)
     }
 
     /// Parses the `CFF ` (Compact Font Format 1) table.
@@ -269,6 +261,31 @@ impl<'a> Face<'a> {
         )?;
         Ok(drew.then_some(out))
     }
+}
+
+/// The box of glyph `glyph_id`'s outline walked at `coords` with the
+/// `glyf`, `loca` and `gvar` of `tables`, as
+/// [`Face::glyph_bounds_at_coords`] computes it away from the default
+/// instance, with `num_contours` from the glyph header. The shaper's
+/// glyph extents call it with tables it reads once per shaping call.
+pub(crate) fn varied_glyph_bounds(
+    tables: (&Glyf<'_>, &Loca<'_>, &Gvar<'_>),
+    glyph_id: u16,
+    coords: &[f32],
+    metrics: &PhantomMetrics<'_>,
+    num_contours: i16,
+) -> Result<GlyphBounds> {
+    let (glyf, loca, gvar) = tables;
+    let mut points = PointBox::default();
+    glyf.outline_at_coords(
+        loca,
+        glyph_id,
+        Some(gvar),
+        coords,
+        Some(metrics),
+        &mut points,
+    )?;
+    Ok(points.bounds(num_contours))
 }
 
 /// Bounding box of every point an outline walk emits, off-curve

@@ -1,6 +1,8 @@
 //! Type 2 charstring interpreter, shared by `CFF ` and `CFF2`.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use super::charset::standard_encoding_sid;
 use super::index::Index;
@@ -85,8 +87,11 @@ pub(crate) struct Seac {
     pub(crate) accent: u16,
 }
 
-/// Variation store data for one `vsindex`, computed once per outline.
-struct BlendRegions {
+/// Variation store data for one `vsindex`, computed once per outline,
+/// or once for many outlines at the same coords with a
+/// [`RegionCache`].
+#[derive(Clone)]
+pub(crate) struct BlendRegions {
     /// The `vsindex` these values belong to.
     vsindex: u16,
     /// Regions per delta row, from the ItemVariationData subtable.
@@ -96,6 +101,10 @@ struct BlendRegions {
     scalars: Vec<f32>,
 }
 
+/// The [`BlendRegions`] of each `vsindex` computed so far, for outlines
+/// drawn with one variation store at one set of coords.
+pub(crate) type RegionCache = RefCell<BTreeMap<u16, BlendRegions>>;
+
 pub(crate) struct BlendContext<'b> {
     /// Normalized coords; one per axis.
     pub coords: &'b [f32],
@@ -103,6 +112,9 @@ pub(crate) struct BlendContext<'b> {
     pub ivs: &'b crate::tables::variation_store::ItemVariationStore<'b>,
     /// Current vsindex.
     pub vsindex: u16,
+    /// Region data other outlines with this store at these coords
+    /// already computed, and that this one adds to.
+    pub regions: Option<&'b RegionCache>,
 }
 
 impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
@@ -111,7 +123,11 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             global,
             local,
             sink,
-            stack: Vec::with_capacity(48),
+            stack: Vec::with_capacity(if is_cff2 {
+                CFF2_STACK_LIMIT
+            } else {
+                CFF1_STACK_LIMIT
+            }),
             x: 0.0,
             y: 0.0,
             stem_count: 0,
@@ -243,6 +259,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     self.sink.line_to(self.x, self.y);
                     i += 2;
                 }
+                self.recycle(args);
             }
             op_code::HLINETO => {
                 // Alternating horizontal/vertical, starting horizontal.
@@ -257,6 +274,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     self.sink.line_to(self.x, self.y);
                     horiz = !horiz;
                 }
+                self.recycle(args);
             }
             op_code::VLINETO => {
                 let args = core::mem::take(&mut self.stack);
@@ -270,6 +288,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     self.sink.line_to(self.x, self.y);
                     horiz = !horiz;
                 }
+                self.recycle(args);
             }
             op_code::RRCURVETO => {
                 let args = core::mem::take(&mut self.stack);
@@ -286,6 +305,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     self.y = y;
                     i += 6;
                 }
+                self.recycle(args);
             }
             op_code::HHCURVETO => {
                 let args = core::mem::take(&mut self.stack);
@@ -309,6 +329,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     y_start = self.y;
                     i += 4;
                 }
+                self.recycle(args);
             }
             op_code::VVCURVETO => {
                 let args = core::mem::take(&mut self.stack);
@@ -332,14 +353,17 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     x_start = self.x;
                     i += 4;
                 }
+                self.recycle(args);
             }
             op_code::HVCURVETO => {
                 let args = core::mem::take(&mut self.stack);
                 self.alternating_curveto(&args, true)?;
+                self.recycle(args);
             }
             op_code::VHCURVETO => {
                 let args = core::mem::take(&mut self.stack);
                 self.alternating_curveto(&args, false)?;
+                self.recycle(args);
             }
             op_code::RCURVELINE => {
                 let args = core::mem::take(&mut self.stack);
@@ -363,6 +387,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     self.y += args[i + 1];
                     self.sink.line_to(self.x, self.y);
                 }
+                self.recycle(args);
             }
             op_code::RLINECURVE => {
                 let args = core::mem::take(&mut self.stack);
@@ -385,6 +410,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     self.x = x;
                     self.y = y;
                 }
+                self.recycle(args);
             }
             op_code::CALLSUBR => {
                 let idx = self.pop()?;
@@ -555,6 +581,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let a = core::mem::take(&mut self.stack);
                     self.rr_curve(&a[..6]);
                     self.rr_curve(&a[6..12]);
+                    self.recycle(a);
                 }
             }
             op_code::ESC_HFLEX => {
@@ -566,6 +593,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let c2 = [a[4], 0.0, a[5], -a[2], a[6], 0.0];
                     self.rr_curve(&c1);
                     self.rr_curve(&c2);
+                    self.recycle(a);
                 }
             }
             op_code::ESC_HFLEX1 => {
@@ -581,6 +609,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let c2 = [a[5], 0.0, a[6], a[7], a[8], -dy_total];
                     self.rr_curve(&c1);
                     self.rr_curve(&c2);
+                    self.recycle(a);
                 }
             }
             op_code::ESC_FLEX1 => {
@@ -598,6 +627,7 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
                     let c2 = [a[6], a[7], a[8], a[9], dx_final, dy_final];
                     self.rr_curve(&c1);
                     self.rr_curve(&c2);
+                    self.recycle(a);
                 }
             }
             _ => {}
@@ -692,14 +722,26 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
         {
             return;
         }
-        self.blend_regions = Some(BlendRegions {
-            vsindex: b.vsindex,
-            count: b.ivs.variation_region_count(b.vsindex),
-            scalars: b
-                .ivs
-                .region_scalars(b.vsindex, b.coords)
-                .unwrap_or_default(),
+        // The cache is only borrowed here, never across another borrow
+        // of it, so the borrows succeed.
+        let cached = b
+            .regions
+            .and_then(|c| c.try_borrow().ok()?.get(&b.vsindex).cloned());
+        let regions = cached.unwrap_or_else(|| {
+            let regions = BlendRegions {
+                vsindex: b.vsindex,
+                count: b.ivs.variation_region_count(b.vsindex),
+                scalars: b
+                    .ivs
+                    .region_scalars(b.vsindex, b.coords)
+                    .unwrap_or_default(),
+            };
+            if let Some(mut cache) = b.regions.and_then(|c| c.try_borrow_mut().ok()) {
+                cache.insert(b.vsindex, regions.clone());
+            }
+            regions
         });
+        self.blend_regions = Some(regions);
     }
 
     fn push(&mut self, v: f32) -> Result<()> {
@@ -723,6 +765,14 @@ impl<'a, 'b, S: OutlineSink> Interp<'a, 'b, S> {
             offset: 0,
             context: "CFF charstring: stack underflow",
         })
+    }
+
+    /// Hands `args`, the operands a drawing operator took off the stack,
+    /// back to the stack, emptied: the operator clears the stack, and the
+    /// next one reuses the allocation instead of growing a new one.
+    fn recycle(&mut self, mut args: Vec<f32>) {
+        args.clear();
+        self.stack = args;
     }
 
     fn maybe_consume_width(&mut self) {

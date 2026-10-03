@@ -26,10 +26,12 @@
 //! are often drawn one glyph at a time at changing coordinates, so the
 //! per-call cost matters more here than anywhere else.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::{OnceCell, RefCell};
 
 use crate::error::{Error, Result};
-use crate::tables::cff::{read_index2, BlendContext, FdSelect, Index};
+use crate::tables::cff::{read_index2, BlendContext, FdSelect, Index, RegionCache};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
@@ -143,12 +145,42 @@ impl<'a> Cff2<'a> {
         coords: &[f32],
         sink: &mut S,
     ) -> Result<bool> {
+        self.outline_shared(glyph_id, coords, &Cff2Shared::default(), sink)
+    }
+
+    /// [`Cff2::outline`] with the variation store, the Private DICTs, and
+    /// the region scalars read once into `shared` and kept for the next
+    /// glyph. Every call with one `shared` must pass the same `coords`.
+    pub(crate) fn outline_shared<S: OutlineSink>(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        shared: &Cff2Shared<'a>,
+        sink: &mut S,
+    ) -> Result<bool> {
         let gid = usize::from(glyph_id);
         if gid >= self.char_strings.len() {
             return Ok(false);
         }
         let cs = self.char_strings.get(gid)?;
-        let private = self.private(gid)?;
+        let fd = self.fd_select.as_ref().map_or(0, |s| s.fd_for_glyph(gid));
+        // The cache is only borrowed here, never across another borrow
+        // of it, so the borrows succeed.
+        let cached = shared
+            .privates
+            .try_borrow()
+            .ok()
+            .and_then(|p| p.get(&fd).copied());
+        let private = match cached {
+            Some(private) => private,
+            None => {
+                let private = self.private(usize::from(fd))?;
+                if let Ok(mut cache) = shared.privates.try_borrow_mut() {
+                    cache.insert(fd, private);
+                }
+                private
+            }
+        };
 
         // Parse the variation store. CFF2 charstrings call `blend`
         // even at the default instance (empty coords). The operator
@@ -159,22 +191,11 @@ impl<'a> Cff2<'a> {
         // operands left over from earlier ops. Resolving the IVS up
         // front pins `n_regions` from the spec, so the stack stays
         // balanced regardless of coord vector.
-        let ivs = if let Some(off) = self.vstore_off {
-            // CFF2 VariationStore: u16 length prefix, then the
-            // ItemVariationStore bytes.
-            let mut vr = Reader::at(self.data, off as usize)?;
-            let len = vr.read_u16()? as usize;
-            let start = vr.position();
-            if self.data.len() < start + len {
-                return Err(Error::Truncated {
-                    offset: start + len,
-                    context: "CFF2 VariationStore truncated",
-                });
-            }
-            Some(ItemVariationStore::parse(&self.data[start..start + len])?)
-        } else {
-            None
-        };
+        let ivs = shared
+            .ivs
+            .get_or_init(|| self.variation_store())
+            .as_ref()
+            .map_err(Clone::clone)?;
 
         // The Private DICT may name the ItemVariationData subtable that
         // the glyph blends with until its charstring picks another.
@@ -182,6 +203,7 @@ impl<'a> Cff2<'a> {
             coords,
             ivs,
             vsindex: private.vsindex,
+            regions: Some(&shared.regions),
         });
         let mut interp =
             crate::tables::cff::Interp2::new(self.global_subrs, private.local_subrs, sink, blend);
@@ -192,11 +214,32 @@ impl<'a> Cff2<'a> {
         Ok(true)
     }
 
-    /// The Private DICT of glyph `gid`, from the Font DICT that FDSelect
-    /// picks. A glyph whose FD has no Font DICT, or whose Font DICT has
+    /// The table's ItemVariationStore, or `None` when the Top DICT names
+    /// none.
+    fn variation_store(&self) -> Result<Option<ItemVariationStore<'a>>> {
+        let Some(off) = self.vstore_off else {
+            return Ok(None);
+        };
+        // CFF2 VariationStore: u16 length prefix, then the
+        // ItemVariationStore bytes.
+        let mut vr = Reader::at(self.data, off as usize)?;
+        let len = vr.read_u16()? as usize;
+        let start = vr.position();
+        if self.data.len() < start + len {
+            return Err(Error::Truncated {
+                offset: start + len,
+                context: "CFF2 VariationStore truncated",
+            });
+        }
+        Ok(Some(ItemVariationStore::parse(
+            &self.data[start..start + len],
+        )?))
+    }
+
+    /// The Private DICT of Font DICT `fd`, the one FDSelect picks for a
+    /// glyph. A glyph whose FD has no Font DICT, or whose Font DICT has
     /// no Private DICT, gets the defaults: no Local Subrs and vsindex 0.
-    fn private(&self, gid: usize) -> Result<Private<'a>> {
-        let fd = usize::from(self.fd_select.as_ref().map_or(0, |s| s.fd_for_glyph(gid)));
+    fn private(&self, fd: usize) -> Result<Private<'a>> {
         if fd >= self.fd_array.len() {
             return Ok(Private::default());
         }
@@ -207,6 +250,18 @@ impl<'a> Cff2<'a> {
         let priv_bytes = slice_at(self.data, off as usize, size as usize)?;
         read_private(self.data, priv_bytes, off as usize)
     }
+}
+
+/// What the outlines of many glyphs at one set of coords share, read
+/// once by [`Cff2::outline_shared`]: the variation store, the Private
+/// DICT of each Font DICT, and the region scalars of each `vsindex`.
+/// A Private DICT that fails to read is not kept, so it fails every
+/// glyph that uses it.
+#[derive(Default)]
+pub(crate) struct Cff2Shared<'a> {
+    ivs: OnceCell<Result<Option<ItemVariationStore<'a>>>>,
+    privates: RefCell<BTreeMap<u16, Private<'a>>>,
+    regions: RegionCache,
 }
 
 // ----------------------------------------------------------------------------
@@ -334,7 +389,7 @@ fn slice_at(data: &[u8], off: usize, len: usize) -> Result<&[u8]> {
 }
 
 /// What a glyph's Private DICT gives its charstring.
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Private<'a> {
     /// Local Subrs. Operator 19, relative to the Private DICT.
     local_subrs: Index<'a>,
@@ -439,6 +494,7 @@ mod tests {
             coords: &coords,
             ivs: &ivs,
             vsindex: 0,
+            regions: None,
         };
         let mut interp = Interp2::new(Index::default(), Index::default(), &mut out, Some(blend));
         interp.run(&cs, 0).unwrap();
@@ -535,6 +591,7 @@ mod tests {
             coords: &coords,
             ivs: &ivs,
             vsindex: 0,
+            regions: None,
         };
         let mut out = Outline::new();
         let mut interp = Interp2::new(Index::default(), Index::default(), &mut out, Some(blend));
@@ -889,6 +946,7 @@ mod tests {
             coords: &coords,
             ivs: &ivs,
             vsindex: 0,
+            regions: None,
         };
         let mut out = Outline::new();
         let mut interp = Interp2::new(Index::default(), Index::default(), &mut out, Some(blend));
