@@ -14,7 +14,9 @@ use super::ivs::PinnedOnly;
 use super::metrics::{bake_vorg, MvarBake, VorgBake};
 use super::metrics_var::{bake_hvar_partial_with, bake_mvar_partial, bake_vvar_partial_with};
 use super::store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
-use super::{post_avar, push_base, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput};
+use super::{
+    layout_coords, post_avar, push_base, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput,
+};
 use crate::base::BaseBake;
 use crate::sfnt;
 use crate::warnings::Warnings;
@@ -166,9 +168,10 @@ pub(super) fn partial_instance(
     }
     // GDEF.IVS rewrite (optional). The projection can renumber the
     // store's rows, so the GDEF carets follow the new numbering and so
-    // do the GPOS VariationIndex tables below.
-    let (gdef_bake, store_remap) =
-        bake_gdef_store_partial(face, &post_avar_coords, pins, &warnings)?;
+    // do the GPOS VariationIndex tables below. As in the full instance,
+    // the store is resolved at the unrounded coordinates.
+    let unrounded = layout_coords(face, coords)?;
+    let (gdef_bake, store_remap) = bake_gdef_store_partial(face, &unrounded, pins, &warnings)?;
     if let GdefBake::Rebuilt(b) = &gdef_bake {
         tables.push((tag::GDEF, b.clone()));
     }

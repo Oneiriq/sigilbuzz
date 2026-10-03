@@ -124,6 +124,25 @@ fn fold_one_field_resolves_variation_index_and_zeros_offset() {
 }
 
 #[test]
+fn fold_one_field_rounds_half_deltas_up() {
+    // Halfway along the region, a delta of 5 or -5 is 2.5 or -2.5.
+    // Halves round up, as HarfBuzz's and fontTools' instancers round:
+    // 50 + 2.5 is 53 and 50 - 2.5 is 48, where rounding away from zero
+    // would give 47.
+    for (delta, expected) in [(5, 53), (-5, 48), (3, 52), (-3, 49)] {
+        let mut buf = vec![0u8; 14];
+        buf[0..2].copy_from_slice(&50i16.to_be_bytes());
+        buf[4..6].copy_from_slice(&8u16.to_be_bytes());
+        buf[12..14].copy_from_slice(&0x8000u16.to_be_bytes());
+        let ivs_bytes = build_ivs_one_region_one_item(delta);
+        let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        fold_one_field(&mut buf, subtable_slot(0, 4), Some(&store), &[0.5]);
+        let cur = i16::from_be_bytes([buf[0], buf[1]]);
+        assert_eq!(cur, expected, "delta {delta}");
+    }
+}
+
+#[test]
 fn fold_one_field_device_table_zeros_offset_only() {
     // Device-shape (deltaFormat = 3): must zero the offset but
     // leave the static field alone.

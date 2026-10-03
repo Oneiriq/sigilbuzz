@@ -41,7 +41,9 @@
 //!   and the store goes (see [`crate::base::instance_base`]).
 //!
 //! Every value rounds to the nearest unit, halves up, as HarfBuzz and
-//! fontTools round.
+//! fontTools round: outlines, metrics, `cvt `, `BASE`, `MVAR`, and the
+//! `GPOS` and `GDEF` deltas. (CFF2 charstrings and their store keep
+//! their own rounding.)
 //!
 //! # What gets dropped (or kept verbatim)
 //!
@@ -183,6 +185,10 @@ pub(crate) use region::project_region_onto_kept_axes;
 /// maps them through `avar` and only then rounds to the F2DOT14 grid,
 /// as HarfBuzz and fontTools do. Rounding before `avar` can land an
 /// axis one F2DOT14 step away and move outlines and advances by a unit.
+/// The `GPOS` values, anchors and ligature carets that vary through the
+/// `GDEF` store are resolved where HarfBuzz's instancer resolves them:
+/// at the values put on the F2DOT14 grid first, then mapped through
+/// `avar` and left unrounded.
 pub type F2Dot14 = f32;
 
 /// Per-axis pin policy for partial instancing.
@@ -325,6 +331,9 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // shaper's coord-space is post-avar, so the deltas we apply must
     // come from the same space.
     let coords = post_avar(face, &input.coords)?;
+    // The GPOS and GDEF bakes take the coordinates before rounding (see
+    // `layout_coords`).
+    let unrounded = layout_coords(face, &input.coords)?;
 
     if face.record(tag::CFF2).is_some() {
         return cff2_bake(face, input, &coords);
@@ -357,11 +366,11 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // GPOS variation bake: when the source carries GPOS variations
     // (VariationIndex offsets on value records and anchors), fold
     // every resolvable variation into the static field it adjusts at
-    // `coords` and zero the offset slot. Runs *before* the
+    // the unrounded coordinates and zero the offset slot. Runs *before* the
     // GDEF.IVS prune below. The prune severs the only path back to
     // the IVS bytes, so any remaining VariationIndex would be orphan.
     let gpos_baked = if input.drop_var_tables {
-        bake_gpos_var(face, &coords)?
+        bake_gpos_var(face, &unrounded)?
     } else {
         None
     };
@@ -380,7 +389,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // caller wants the static "ship as static" output, prune it. See
     // module header for the GPOS-bake-then-IVS-prune ordering.
     let gdef_bake = if input.drop_var_tables {
-        prune_gdef_store(face, &coords, &warnings)?
+        prune_gdef_store(face, &unrounded, &warnings)?
     } else {
         GdefBake::Unchanged
     };
@@ -451,11 +460,40 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
 /// place them. A variable font is drawn at those coordinates, so its
 /// instance is baked at them.
 fn post_avar(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
+    Ok(avar_mapped(face, coords)?
+        .into_iter()
+        .map(snap_f2dot14)
+        .collect())
+}
+
+/// The coordinates HarfBuzz's instancer resolves the `GDEF` store at,
+/// the one `GPOS` values, anchors and ligature carets vary through: the
+/// normalized `coords` put on the F2DOT14 grid, then mapped through
+/// `avar` and left unrounded. The outlines take [`post_avar`] instead.
+/// Resolving the store at these makes each delta round as HarfBuzz
+/// rounds it.
+fn layout_coords(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
+    let on_grid: Vec<f32> = coords.iter().copied().map(snap_f2dot14).collect();
+    avar_mapped(face, &on_grid)
+}
+
+/// `coords` mapped through `avar`, clamped to the normalized range (a
+/// non-finite value becomes zero).
+fn avar_mapped(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
     let mapped = match face.avar().map_err(SubsetError::from)? {
         Some(av) => av.remap_all(coords),
         None => coords.to_vec(),
     };
-    Ok(mapped.into_iter().map(snap_f2dot14).collect())
+    Ok(mapped
+        .into_iter()
+        .map(|v| {
+            if v.is_finite() {
+                v.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+        .collect())
 }
 
 /// `v` on the F2DOT14 grid, rounded to nearest (halves up) and clamped to

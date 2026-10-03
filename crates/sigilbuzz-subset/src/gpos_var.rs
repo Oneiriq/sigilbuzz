@@ -58,10 +58,11 @@
 //! # Determinism
 //!
 //! The bake patches a writable copy of the source GPOS bytes in place.
-//! Every `VariationIndex` resolution rounds through the same
-//! `add-0.5/subtract-0.5` rule as the HVAR / MVAR bakes so the three
-//! stay in byte-for-byte lockstep. Saturating addition guards against
-//! ValueRecord field overflow on extreme coords.
+//! Every `VariationIndex` resolution rounds the delta halves up (see
+//! [`round_delta`]), as HarfBuzz's and fontTools' instancers and the
+//! HVAR, MVAR and BASE bakes do; the instancer passes the coordinates
+//! HarfBuzz's instancer resolves the store at. Saturating addition
+//! guards against ValueRecord field overflow on extreme coords.
 //!
 //! # Work limit
 //!
@@ -93,17 +94,13 @@ use value_records::{walk_pair_pos, walk_single_pos};
 pub(crate) const VARIATION_INDEX_DELTA_FORMAT: u16 = 0x8000;
 
 /// Rounds the variation store's float delta to the nearest design-unit
-/// integer. Matches the rule the HVAR/MVAR/value_record pipelines use
-/// so the four stay in byte-for-byte lockstep.
+/// integer, halves up, as HarfBuzz's instancer (`roundf`, which it
+/// defines as `floor (x + 0.5)`) and fontTools' (`otRound`) round the
+/// deltas they fold into GPOS values, anchors and GDEF carets.
 #[must_use]
 #[inline]
 fn round_delta(delta: f32) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
-    if delta >= 0.0 {
-        (delta + 0.5) as i32
-    } else {
-        (delta - 0.5) as i32
-    }
+    crate::util::round_half_up(delta)
 }
 
 fn read_u16(buf: &[u8], pos: usize) -> Option<u16> {

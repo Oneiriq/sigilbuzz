@@ -13,6 +13,7 @@ use sigilbuzz::Face;
 use super::glyf::{clamp_i16, GlyphMetrics};
 use crate::hmtx::emit_long_metrics;
 use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
+use crate::util::round_half_up;
 use crate::warnings::Warnings;
 use crate::SubsetError;
 
@@ -129,7 +130,8 @@ pub(super) fn bake_hmtx(
         // hmtx advances are unsigned; clamp at 0 if a delta would
         // underflow. In practice this only happens with malformed
         // HVAR data.
-        let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
+        // The delta rounds halves up before it is added, as in HarfBuzz.
+        let new_adv = i32::from(base_adv).saturating_add(round_half_up(adv_delta));
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
         lsbs.push(base_lsb);
     }
@@ -245,9 +247,9 @@ pub(super) fn bake_vmtx(
             Some(v) if !coords.is_empty() => v.top_side_bearing_delta(gid, coords).unwrap_or(0.0),
             _ => 0.0,
         };
-        let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
+        let new_adv = i32::from(base_adv).saturating_add(round_half_up(adv_delta));
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
-        let new_tsb = (f32::from(base_tsb) + tsb_delta).round() as i32;
+        let new_tsb = i32::from(base_tsb).saturating_add(round_half_up(tsb_delta));
         tsbs.push(clamp_i16(new_tsb));
     }
 
@@ -470,7 +472,7 @@ pub(super) fn apply_mvar_records(
         if !seen.insert(rec_tag) {
             continue;
         }
-        let delta = store.delta(outer, inner, coords).round() as i32;
+        let delta = round_half_up(store.delta(outer, inner, coords));
         if delta == 0 {
             continue;
         }
