@@ -6,13 +6,14 @@
 //!
 //! - Header: `major`, `minor`, `hdrSize`, `offSize`.
 //! - Name INDEX: skipped.
-//! - Top DICT INDEX: first entry only, for `CharStrings`, `Private`,
-//!   `FDArray`, and `FDSelect` offsets.
+//! - Top DICT INDEX: first entry only, for `CharStrings`, `charset`,
+//!   `Private`, `FDArray`, and `FDSelect` offsets.
 //! - String INDEX: skipped.
 //! - Global Subr INDEX.
 //! - CharStrings INDEX.
 //! - Private DICT + Local Subr INDEX (single-font case).
 //! - FDArray / FDSelect (CID-keyed fonts).
+//! - Charset, only to find the base and accent glyphs of a `seac`.
 //!
 //! Parsing is lazy. [`Cff::parse`] reads the header, the Top DICT, and
 //! the headers of the INDEX structures, which costs the same for ten
@@ -27,9 +28,14 @@
 //! path-drawing operators, stem hints (parsed and skipped), and
 //! subroutine dispatch with a spec-mandated depth cap of 10.
 //!
-//! Deprecated Type 1 operators (`closepath`, `seac`, `callothersubr`,
-//! `pop`) are rejected.
+//! The seac form of `endchar`, `[width] adx ady bchar achar endchar`,
+//! draws the base character and then the accent at `(adx, ady)`, as
+//! HarfBuzz and FreeType do. The two are named by Standard Encoding
+//! code and found through the charset, in name-keyed fonts only.
+//! Other deprecated Type 1 operators (`callothersubr`, `pop`, and the
+//! like) are rejected.
 
+mod charset;
 mod charstring;
 mod dict;
 mod index;
@@ -45,7 +51,7 @@ pub(crate) use index::{read_index2, Index};
 #[cfg(test)]
 pub(crate) use index::encode_index;
 
-use charstring::Interp;
+use charstring::{Interp, Seac};
 use dict::{read_local_subrs, TopDict};
 use index::{read_index, slice_at};
 
@@ -61,6 +67,9 @@ pub struct Cff<'a> {
     char_strings: Index<'a>,
     /// Where each glyph's local subroutines come from.
     fonts: FontDicts<'a>,
+    /// The Top DICT charset value: 0 to 2 for a predefined charset,
+    /// otherwise its offset. Only a seac reads it.
+    charset: u32,
 }
 
 /// The Private DICT layout of a `CFF ` table.
@@ -174,6 +183,7 @@ impl<'a> Cff<'a> {
             global_subrs,
             char_strings,
             fonts,
+            charset: top.charset.unwrap_or(0),
         })
     }
 
@@ -187,20 +197,66 @@ impl<'a> Cff<'a> {
     /// `Ok(false)` when the id has no charstring (out of range),
     /// `Ok(true)` otherwise. An empty charstring counts as drawn:
     /// callers filter on `Outline::is_empty`.
+    ///
+    /// A glyph whose `endchar` takes the seac form draws whatever its
+    /// own charstring drew, then the base glyph, then the accent glyph
+    /// moved to the accent origin.
     pub fn outline<S: OutlineSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
         let gid = usize::from(glyph_id);
         if gid >= self.char_strings.len() {
             return Ok(false);
         }
-        let cs = self.char_strings.get(gid)?;
         let local_subrs = self.local_subrs(gid)?;
+        if let Some(seac) = self.run_charstring(gid, local_subrs, sink, None)? {
+            self.draw_seac(seac, local_subrs, sink)?;
+        }
+        Ok(true)
+    }
+
+    /// Runs glyph `gid`'s charstring into `sink` and returns the seac
+    /// its `endchar` asked for. `component` is the origin of a seac base
+    /// or accent; a seac inside one fails.
+    fn run_charstring<S: OutlineSink>(
+        &self,
+        gid: usize,
+        local_subrs: Index<'a>,
+        sink: &mut S,
+        component: Option<(f32, f32)>,
+    ) -> Result<Option<Seac>> {
+        let cs = self.char_strings.get(gid)?;
         let mut interp = Interp::new(self.global_subrs, local_subrs, sink, false);
+        if let Some((x, y)) = component {
+            interp.start_seac_component(x, y);
+        }
         interp.run(cs, 0)?;
         // A well-formed CFF1 charstring has already closed its last
         // contour at endchar; this only covers charstrings that end
         // without one.
         interp.finish();
-        Ok(true)
+        Ok(interp.take_seac())
+    }
+
+    /// Draws a seac's base glyph at the origin and its accent glyph at
+    /// `(adx, ady)`, finding both through the charset. Both use the
+    /// Local Subrs of the glyph that asked for them. CID-keyed fonts
+    /// name glyphs by CID, not SID, so seac is unsupported there.
+    fn draw_seac<S: OutlineSink>(
+        &self,
+        seac: Seac,
+        local_subrs: Index<'a>,
+        sink: &mut S,
+    ) -> Result<()> {
+        if let FontDicts::Cid { .. } = self.fonts {
+            return Err(Error::Unsupported {
+                context: "CFF seac in a CID-keyed font",
+            });
+        }
+        let n_glyphs = self.char_strings.len();
+        let base = charset::glyph_for_sid(self.data, self.charset, seac.base, n_glyphs)?;
+        let accent = charset::glyph_for_sid(self.data, self.charset, seac.accent, n_glyphs)?;
+        self.run_charstring(base, local_subrs, sink, Some((0.0, 0.0)))?;
+        self.run_charstring(accent, local_subrs, sink, Some((seac.adx, seac.ady)))?;
+        Ok(())
     }
 
     /// The Local Subrs INDEX for glyph `gid`. A CID-keyed glyph whose

@@ -314,20 +314,6 @@ fn charstring_hflex1_endpoint_returns_to_start_y() {
 }
 
 #[test]
-fn charstring_endchar_rejects_seac_four_args() {
-    // 1 2 3 4 endchar -> 4-arg deprecated seac.
-    let mut cs = Vec::new();
-    for _ in 0..4 {
-        cs.push(140); // small integer
-    }
-    cs.push(op_code::ENDCHAR);
-    let cff = build_cff_with_charstring(&cs);
-    let parsed = Cff::parse(&cff).unwrap();
-    let mut o = Outline::new();
-    assert!(parsed.outline(0, &mut o).is_err());
-}
-
-#[test]
 fn charstring_exponential_subr_calls_hit_op_limit() {
     // Ten global subrs. Subr k calls subr k + 1 twenty times and
     // subr 9 only returns. The depth stays within the cap of 10,
@@ -715,4 +701,282 @@ fn malformed_charstring_entry_fails_only_its_glyph() {
     let mut o = Outline::new();
     assert!(parsed.outline(2, &mut o).unwrap());
     assert_eq!(o.ops(), [PathOp::MoveTo { x: 0.0, y: 0.0 }, PathOp::Close]);
+}
+
+// ----------------------------------------------------------------------------
+// seac: an endchar that names a base and an accent character.
+// ----------------------------------------------------------------------------
+
+/// The charset of a name-keyed test font.
+enum TestCharset {
+    /// A predefined charset: 0 ISOAdobe, 1 Expert, 2 ExpertSubset.
+    Predefined(u8),
+    /// A charset table, format byte first, written after the
+    /// CharStrings INDEX.
+    Table(Vec<u8>),
+}
+
+/// Length of the Top DICT in [`build_named_cff`] tables.
+const NAMED_TOP_DICT_LEN: usize = 12;
+
+/// Offset of the CharStrings INDEX in [`build_named_cff`] tables.
+const NAMED_CS_OFF: usize = 4 + 6 + (2 + 1 + 2 + NAMED_TOP_DICT_LEN) + 2 + 2;
+
+/// Builds a name-keyed CFF1 table with one charstring per glyph, a Top
+/// DICT naming the CharStrings INDEX and the charset, and no Private
+/// DICT.
+fn build_named_cff(charstrings: &[&[u8]], charset: &TestCharset) -> Vec<u8> {
+    let char_strings = encode_index(charstrings, 2);
+    let charset_value = match charset {
+        TestCharset::Predefined(id) => usize::from(*id),
+        TestCharset::Table(_) => NAMED_CS_OFF + char_strings.len(),
+    };
+    let mut out = alloc::vec![1, 0, 4, 4];
+    out.extend_from_slice(&[0, 1, 1, 1, 2, b'a']); // Name INDEX
+    out.extend_from_slice(&[0, 1, 1, 1, 1 + NAMED_TOP_DICT_LEN as u8]); // Top DICT INDEX
+    dict_i32(&mut out, NAMED_CS_OFF);
+    out.push(17); // CharStrings
+    dict_i32(&mut out, charset_value);
+    out.push(15); // charset
+    out.extend_from_slice(&[0, 0, 0, 0]); // String and Global Subr INDEX
+    assert_eq!(out.len(), NAMED_CS_OFF);
+    out.extend(char_strings);
+    if let TestCharset::Table(bytes) = charset {
+        out.extend_from_slice(bytes);
+    }
+    out
+}
+
+/// `0 0 rmoveto 100 0 rlineto -50 100 rlineto endchar`: the base, "A".
+const BASE_A: [u8; 10] = [
+    139,
+    139,
+    op_code::RMOVETO,
+    239,
+    139,
+    op_code::RLINETO,
+    89,
+    239,
+    op_code::RLINETO,
+    op_code::ENDCHAR,
+];
+
+/// `0 0 rmoveto 20 0 rlineto 0 20 rlineto endchar`: the accent, "acute".
+const ACUTE: [u8; 10] = [
+    139,
+    139,
+    op_code::RMOVETO,
+    159,
+    139,
+    op_code::RLINETO,
+    139,
+    159,
+    op_code::RLINETO,
+    op_code::ENDCHAR,
+];
+
+/// `30 120 65 194 endchar` after `prefix`: "A" (code 65) with "acute"
+/// (code 194) at (30, 120).
+fn seac_charstring(prefix: &[u8]) -> Vec<u8> {
+    let mut cs = prefix.to_vec();
+    cs.extend_from_slice(&[169, 247, 12, 204, 247, 86, op_code::ENDCHAR]);
+    cs
+}
+
+/// "A" at the origin, then "acute" moved to (30, 120).
+fn a_acute_ops() -> Vec<PathOp> {
+    alloc::vec![
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 100.0, y: 0.0 },
+        PathOp::LineTo { x: 50.0, y: 100.0 },
+        PathOp::Close,
+        PathOp::MoveTo { x: 30.0, y: 120.0 },
+        PathOp::LineTo { x: 50.0, y: 120.0 },
+        PathOp::LineTo { x: 50.0, y: 140.0 },
+        PathOp::Close,
+    ]
+}
+
+/// A format 0 charset for glyphs .notdef, "A" (SID 34), "acute" (SID
+/// 125), and a composite (SID 391).
+const SEAC_CHARSET: [u8; 7] = [0, 0, 34, 0, 125, 1, 135];
+
+/// Builds a font of .notdef, "A", "acute", and `composite` as glyph 3.
+fn seac_font(composite: &[u8]) -> Vec<u8> {
+    build_named_cff(
+        &[&[op_code::ENDCHAR], &BASE_A, &ACUTE, composite],
+        &TestCharset::Table(SEAC_CHARSET.to_vec()),
+    )
+}
+
+fn outline_ops(cff: &[u8], gid: u16) -> Result<Vec<PathOp>> {
+    let parsed = Cff::parse(cff)?;
+    let mut o = Outline::new();
+    parsed.outline(gid, &mut o)?;
+    Ok(o.ops().to_vec())
+}
+
+#[test]
+fn seac_with_a_width_draws_base_and_accent() {
+    // `500 30 120 65 194 endchar`: the width, then the seac operands.
+    // Only exactly four operands used to count as a seac, so this form
+    // drew nothing.
+    let cs = seac_charstring(&[248, 136]);
+    assert_eq!(outline_ops(&seac_font(&cs), 3).unwrap(), a_acute_ops());
+}
+
+#[test]
+fn seac_without_a_width_draws_base_and_accent() {
+    // `30 120 65 194 endchar`. This form used to be rejected.
+    let cs = seac_charstring(&[]);
+    assert_eq!(outline_ops(&seac_font(&cs), 3).unwrap(), a_acute_ops());
+}
+
+#[test]
+fn seac_after_hints_reads_the_top_four_operands() {
+    // `500 0 10 hstem 7 30 120 65 194 endchar`: hstem took the width,
+    // and the seac operands are the top four of five, as HarfBuzz and
+    // FreeType read them.
+    let cs = seac_charstring(&[248, 136, 139, 149, op_code::HSTEM, 146]);
+    assert_eq!(outline_ops(&seac_font(&cs), 3).unwrap(), a_acute_ops());
+}
+
+#[test]
+fn seac_glyph_keeps_its_own_contours_first() {
+    // `0 0 rmoveto 10 0 rlineto 30 120 65 194 endchar`.
+    let cs = seac_charstring(&[139, 139, op_code::RMOVETO, 149, 139, op_code::RLINETO]);
+    let mut expected = alloc::vec![
+        PathOp::MoveTo { x: 0.0, y: 0.0 },
+        PathOp::LineTo { x: 10.0, y: 0.0 },
+        PathOp::Close,
+    ];
+    expected.extend(a_acute_ops());
+    assert_eq!(outline_ops(&seac_font(&cs), 3).unwrap(), expected);
+}
+
+#[test]
+fn seac_finds_glyphs_through_every_charset_format() {
+    // Glyphs .notdef, "A" (SID 34), "B" (SID 35), "acute" (SID 125), and
+    // the composite (SID 391) as glyph 4.
+    let composite = seac_charstring(&[]);
+    let glyphs: [&[u8]; 5] = [
+        &[op_code::ENDCHAR],
+        &BASE_A,
+        &[op_code::ENDCHAR],
+        &ACUTE,
+        &composite,
+    ];
+    let charsets: [&[u8]; 3] = [
+        // Format 0: one SID per glyph.
+        &[0, 0, 34, 0, 35, 0, 125, 1, 135],
+        // Format 1: ranges with a u8 count, "A" and "B" in one.
+        &[1, 0, 34, 1, 0, 125, 0, 1, 135, 0],
+        // Format 2: the same ranges with a u16 count.
+        &[2, 0, 34, 0, 1, 0, 125, 0, 0, 1, 135, 0, 0],
+    ];
+    for charset in charsets {
+        let cff = build_named_cff(&glyphs, &TestCharset::Table(charset.to_vec()));
+        assert_eq!(
+            outline_ops(&cff, 4).unwrap(),
+            a_acute_ops(),
+            "charset {charset:?}"
+        );
+    }
+}
+
+#[test]
+fn seac_in_an_iso_adobe_font_takes_glyph_ids_from_sids() {
+    // The ISOAdobe charset gives glyph i SID i, so "A" is glyph 34 and
+    // "acute" glyph 125.
+    let composite = seac_charstring(&[]);
+    let mut glyphs: Vec<&[u8]> = alloc::vec![&[op_code::ENDCHAR]; 126];
+    glyphs[1] = &composite;
+    glyphs[34] = &BASE_A;
+    glyphs[125] = &ACUTE;
+    let cff = build_named_cff(&glyphs, &TestCharset::Predefined(0));
+    assert_eq!(outline_ops(&cff, 1).unwrap(), a_acute_ops());
+    // With 100 glyphs there is no glyph for "acute".
+    let cff = build_named_cff(&glyphs[..100], &TestCharset::Predefined(0));
+    let err = outline_ops(&cff, 1).unwrap_err();
+    assert!(matches!(err, Error::Malformed { .. }), "{err:?}");
+}
+
+#[test]
+fn seac_code_outside_the_standard_encoding_is_malformed() {
+    // `1 1 1 1 endchar`: code 1 has no character in the Standard
+    // Encoding.
+    let cs = [140, 140, 140, 140, op_code::ENDCHAR];
+    let err = outline_ops(&build_cff_with_charstring(&cs), 0).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Malformed {
+                context: "CFF seac code not in the Standard Encoding",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn seac_glyph_missing_from_the_charset_reports_the_charset_offset() {
+    // "B" (code 66, SID 35) as the accent: the charset has no SID 35.
+    let cs = [169, 247, 12, 204, 205, op_code::ENDCHAR];
+    let cff = seac_font(&cs);
+    let err = outline_ops(&cff, 3).unwrap_err();
+    let charset_off = cff.len() - SEAC_CHARSET.len();
+    assert!(
+        matches!(err, Error::Malformed { offset, .. } if offset == charset_off),
+        "{err:?}"
+    );
+    // An unknown charset format reports the same offset.
+    let cs = seac_charstring(&[]);
+    let cff = build_named_cff(
+        &[&[op_code::ENDCHAR], &cs],
+        &TestCharset::Table(alloc::vec![3]),
+    );
+    let err = outline_ops(&cff, 1).unwrap_err();
+    let charset_off = cff.len() - 1;
+    assert!(
+        matches!(err, Error::Malformed { offset, .. } if offset == charset_off),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn seac_inside_a_seac_component_is_malformed() {
+    // The base "A" is itself a seac, which would recurse.
+    let composite = seac_charstring(&[]);
+    let cff = build_named_cff(
+        &[&[op_code::ENDCHAR], &composite, &ACUTE, &composite],
+        &TestCharset::Table(SEAC_CHARSET.to_vec()),
+    );
+    let err = outline_ops(&cff, 3).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Malformed {
+                context: "CFF seac base or accent uses seac",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn seac_is_unsupported_in_cid_fonts_and_expert_charsets() {
+    let composite = seac_charstring(&[]);
+    let cff = build_cid_cff(&[&composite], &[TestFd::NoPrivate], &[0]);
+    let err = outline_ops(&cff, 0).unwrap_err();
+    assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
+    for expert in [1, 2] {
+        let cff = build_named_cff(
+            &[&[op_code::ENDCHAR], &composite],
+            &TestCharset::Predefined(expert),
+        );
+        let err = outline_ops(&cff, 1).unwrap_err();
+        assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
+    }
 }

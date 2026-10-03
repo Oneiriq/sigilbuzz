@@ -15,6 +15,9 @@ use crate::tables::parse::Reader;
 pub(crate) struct TopDict {
     /// CharStrings INDEX offset. Operator 17.
     pub(super) char_strings: Option<u32>,
+    /// Charset: 0 to 2 for a predefined one, otherwise an offset.
+    /// Operator 15. Default 0, ISOAdobe.
+    pub(super) charset: Option<u32>,
     /// Private DICT (size, offset). Operator 18.
     pub(super) private: Option<(u32, u32)>,
     /// FDArray offset. Operator 12 36.
@@ -51,6 +54,7 @@ impl TopDict {
                     u16::from(b0)
                 };
                 match op {
+                    15 => out.charset = operands.last().and_then(DictOperand::as_u32),
                     17 => out.char_strings = operands.last().and_then(DictOperand::as_u32),
                     18 => {
                         if operands.len() >= 2 {
