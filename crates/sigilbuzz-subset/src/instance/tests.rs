@@ -3,6 +3,7 @@
 
 use super::*;
 
+mod glyph_bake;
 mod gpos_bake;
 
 const RUBIK: &[u8] = include_bytes!("../../../../tests/fixtures/rubik_vf.ttf");

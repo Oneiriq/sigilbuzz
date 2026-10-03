@@ -7,23 +7,36 @@
 //! legacy print pipelines, test feeds that expect static fonts) can use as
 //! though the source had been designed at the chosen instance.
 //!
+//! # Coordinates
+//!
+//! The normalized coordinates go through `avar` and land on the
+//! F2DOT14 grid, as HarfBuzz and fontTools place them: the instance is
+//! baked where a renderer draws the variable font.
+//!
 //! # What lands on the static side
 //!
-//! - `glyf` simple-glyph outlines have their contour points shifted by
-//!   the gvar deltas at the requested coords. The simple-glyph header,
-//!   contour count, endPtsOfContours, and on-curve flag stream are
-//!   rebuilt from the absolute, baked points; the per-point coordinate
-//!   stream is re-encoded with the spec's flag-driven SHORT / SAME
-//!   compression.
-//! - `glyf` composite components are passed through with their gids
-//!   remapped through the identity (instancing keeps every glyph) and
-//!   their per-component translations preserved verbatim. Composite
-//!   variation (`WE_HAVE_VARIATION` / point-anchor deltas) is not
-//!   resynthesized on this pass: gvar's composite-glyph contribution
-//!   is conservatively dropped.
-//! - `hmtx` is rebuilt with each gid's advance + lsb adjusted by the
-//!   HVAR deltas at the requested coords (rounded to the nearest
-//!   integer per the OpenType spec for design-unit metrics).
+//! The `glyf` bake follows HarfBuzz's instancer (see the `glyf`
+//! submodule):
+//!
+//! - A simple glyph's points move by their gvar deltas at the
+//!   coordinates, the points a tuple skips inferred from those it lists
+//!   (IUP). The coordinate streams are re-encoded with the spec's
+//!   flag-driven SHORT / SAME compression; hinting instructions are left
+//!   out.
+//! - A composite glyph's components placed by offset move by their
+//!   deltas, and their arguments widen to words when the moved offset
+//!   no longer fits a byte. Components placed by matching points keep
+//!   their records.
+//! - The bounding box in each glyph header is recomputed.
+//! - `hmtx` (and `vmtx` when the source has one) takes each glyph's
+//!   advance and side bearing from its four phantom points moved by
+//!   their deltas, and `head`'s bounding box and the extremes in `hhea`
+//!   (and `vhea`) follow from the baked glyphs. A font without `gvar`
+//!   keeps its outlines and folds the `HVAR` (and `VVAR`) deltas into
+//!   the advances instead.
+//!
+//! Every value rounds to the nearest unit, halves up, as HarfBuzz and
+//! fontTools round.
 //!
 //! # What gets dropped (or kept verbatim)
 //!
@@ -119,7 +132,7 @@
 //! Output is byte-deterministic for a given input face + coord vector.
 //! No `HashMap` iteration touches the output; gids walk in order, the
 //! SFNT directory is sorted by tag at emission, and every floating-
-//! point round happens through `f32::round()` so the same inputs always
+//! point value rounds through a fixed rule, so the same inputs always
 //! hit the same integer.
 
 use alloc::vec::Vec;
@@ -142,8 +155,11 @@ use crate::util;
 use crate::warnings::Warnings;
 use crate::{SubsetError, SubsetWarning};
 use gdef_store::{prune_gdef_store, GdefBake};
-use glyf::bake_glyf_loca;
-use metrics::{bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, VorgBake};
+use glyf::{bake_glyf_loca, GlyphMetrics};
+use metrics::{
+    bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, hmtx_from_metrics, patch_head_bounds,
+    patch_line_extremes, MvarBake, VmtxBake, VorgBake,
+};
 use partial::{layout_variations, partial_instance, pinned_axes};
 
 pub(crate) use ivs::bake_ivs_partial;
@@ -295,72 +311,26 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // Apply avar's piecewise-linear remap if the source ships one. The
     // shaper's coord-space is post-avar, so the deltas we apply must
     // come from the same space.
-    let coords: Vec<f32> = match face.avar().map_err(SubsetError::from)? {
-        Some(av) => av.remap_all(&input.coords),
-        None => input.coords.clone(),
-    };
+    let coords = post_avar(face, &input.coords)?;
 
     if face.record(tag::CFF2).is_some() {
         return cff2_bake(face, input, &coords);
     }
 
-    let maxp = face.maxp()?;
-    let num_glyphs = maxp.num_glyphs;
-
     let warnings = Warnings::default();
-
-    // glyf + loca bake.
-    let glyf_loca = bake_glyf_loca(face, &coords, num_glyphs)?;
-
-    // hmtx + hhea bake. HVAR deltas fold in here; gids without HVAR
-    // entries carry their default-instance metrics through unchanged.
-    let hmtx_out = bake_hmtx(face, &coords, num_glyphs)?;
-
-    // vmtx bake (when the source carries vmtx). VVAR deltas fold in
-    // here; vmtx-without-VVAR rides through unchanged. The VVAR
-    // vertical origin deltas fold into VORG.
-    let vmtx_bake_result = bake_vmtx(face, &coords, num_glyphs, &warnings);
-    let vorg_bake = bake_vorg(face, &coords, num_glyphs, &warnings);
 
     // MVAR-aware bake of OS/2, hhea, post, vhea (when MVAR is present).
     let mvar_bake = bake_mvar_metrics(face, &coords)?;
 
-    // head: pass through, only patching indexToLocFormat to match the
-    // bake's chosen loca format.
-    let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
-    let mut head_out = head_bytes.to_vec();
-    util::write_index_to_loc_format(&mut head_out, glyf_loca.long_loca);
+    // glyf, loca, and the metrics their phantom points give: hmtx,
+    // vmtx, and the head, hhea and vhea fields that follow from them.
+    // maxp passes through verbatim (instancing keeps every gid).
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+    let glyf_bake = push_glyf_tables(face, &coords, &mvar_bake, &warnings, &mut tables)?;
+    let vmtx_bake_result = glyf_bake.vmtx;
 
-    // hhea: start from MVAR-baked bytes (when MVAR carries vlgp etc.,
-    // those ride through MVAR; for hhea-relevant tags the bake patches
-    // OS/2 not hhea: hhea gets the metrics-count patch unconditionally
-    // via util::write_hhea_metrics_count below).
-    let mut hhea_out = match mvar_bake.hhea.clone() {
-        Some(bytes) => bytes,
-        None => face
-            .table_bytes(tag::HHEA)
-            .map_err(SubsetError::from)?
-            .to_vec(),
-    };
-    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
-
-    // maxp: pass through verbatim (glyph count is unchanged: instancing
-    // keeps every gid).
-    let maxp_out = face
-        .table_bytes(tag::MAXP)
-        .map_err(SubsetError::from)?
-        .to_vec();
-
-    // Assemble the directory.
-    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![
-        (tag::HEAD, head_out),
-        (tag::HHEA, hhea_out),
-        (tag::MAXP, maxp_out),
-        (tag::HMTX, hmtx_out.bytes),
-        (tag::LOCA, glyf_loca.loca),
-        (tag::GLYF, glyf_loca.glyf),
-    ];
-    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, &mut tables)?;
+    // The VVAR vertical origin deltas fold into VORG.
+    let vorg_bake = bake_vorg(face, &coords, glyf_bake.num_glyphs, &warnings);
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
@@ -447,16 +417,110 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     })
 }
 
+/// The post-avar coordinates of the normalized `coords`: mapped through
+/// `avar`, then put on the F2DOT14 grid, as HarfBuzz and fontTools
+/// place them. A variable font is drawn at those coordinates, so its
+/// instance is baked at them.
+fn post_avar(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
+    let mapped = match face.avar().map_err(SubsetError::from)? {
+        Some(av) => av.remap_all(coords),
+        None => coords.to_vec(),
+    };
+    Ok(mapped.into_iter().map(snap_f2dot14).collect())
+}
+
+/// `v` on the F2DOT14 grid, rounded to nearest (halves up) and clamped to
+/// the normalized range. A non-finite value becomes zero.
+fn snap_f2dot14(v: f32) -> f32 {
+    if !v.is_finite() {
+        return 0.0;
+    }
+    f32::from(glyf::clamp_i16(util::round_half_up(
+        v.clamp(-1.0, 1.0) * 16384.0,
+    ))) / 16384.0
+}
+
+/// What [`push_glyf_tables`] baked besides the tables it pushed.
+struct GlyfTablesBake {
+    /// The vertical metrics bake, naming the tables it left out.
+    vmtx: VmtxBake,
+    /// The font's glyph count.
+    num_glyphs: u16,
+}
+
+/// Bakes the glyphs of a `glyf` font at the post-avar `coords` and
+/// pushes `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf`, and the
+/// vertical metrics onto `tables`.
+///
+/// With `gvar`, the advances and side bearings come from the baked
+/// glyphs' phantom points and bounds, and so do the `head` bounding box
+/// and the `hhea` and `vhea` extremes. Without it, the outlines stay,
+/// `HVAR` and `VVAR` deltas fold into the advances, and `head` keeps
+/// its box. `hhea` and `vhea` start from `mvar_bake`'s copies when
+/// `MVAR` varies them.
+fn push_glyf_tables(
+    face: &Face<'_>,
+    coords: &[f32],
+    mvar_bake: &MvarBake,
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) -> Result<GlyfTablesBake, SubsetError> {
+    let num_glyphs = face.maxp()?.num_glyphs;
+    let glyf_loca = bake_glyf_loca(face, coords, num_glyphs, warnings)?;
+    let baked = glyf_loca.metrics.as_deref();
+    let hmtx_out = match baked {
+        Some(m) => hmtx_from_metrics(m),
+        None => bake_hmtx(face, coords, num_glyphs)?,
+    };
+    let vmtx = bake_vmtx(face, coords, num_glyphs, baked, warnings);
+
+    // head: the loca format the bake chose, and the new bounding box.
+    let mut head_out = face
+        .table_bytes(tag::HEAD)
+        .map_err(SubsetError::from)?
+        .to_vec();
+    util::write_index_to_loc_format(&mut head_out, glyf_loca.long_loca);
+    // hhea: the long metrics count the new hmtx needs, and its extremes.
+    let mut hhea_out = match mvar_bake.hhea.clone() {
+        Some(bytes) => bytes,
+        None => face
+            .table_bytes(tag::HHEA)
+            .map_err(SubsetError::from)?
+            .to_vec(),
+    };
+    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
+    if let Some(m) = baked {
+        patch_head_bounds(&mut head_out, m);
+        patch_line_extremes(&mut hhea_out, m, false);
+    }
+    let maxp_out = face
+        .table_bytes(tag::MAXP)
+        .map_err(SubsetError::from)?
+        .to_vec();
+    tables.extend([
+        (tag::HEAD, head_out),
+        (tag::HHEA, hhea_out),
+        (tag::MAXP, maxp_out),
+        (tag::HMTX, hmtx_out.bytes),
+        (tag::LOCA, glyf_loca.loca),
+        (tag::GLYF, glyf_loca.glyf),
+    ]);
+    push_vertical_metrics(face, &vmtx, mvar_bake, baked, tables)?;
+    Ok(GlyfTablesBake { vmtx, num_glyphs })
+}
+
 /// Appends the rebuilt `vmtx` with `vhea` (MVAR-baked when `MVAR`
 /// varies it) patched to its `numberOfLongVerMetrics`, which may
 /// extend the long range to cover VVAR-induced trailing-advance
-/// differences. Without a rebuilt `vmtx`, appends an MVAR-baked `vhea`
-/// unless the bake left `vhea` out; an unbaked one rides through with
-/// the other tables.
+/// differences, and, when `baked` holds the baked glyphs' metrics, to
+/// their extremes. Without a rebuilt `vmtx`, appends an MVAR-baked
+/// `vhea` unless the bake left `vhea` out; an unbaked one rides through
+/// with the other tables.
 fn push_vertical_metrics(
     face: &Face<'_>,
-    vmtx_bake: &metrics::VmtxBake,
-    mvar_bake: &metrics::MvarBake,
+    vmtx_bake: &VmtxBake,
+    mvar_bake: &MvarBake,
+    baked: Option<&[GlyphMetrics]>,
     tables: &mut Vec<([u8; 4], Vec<u8>)>,
 ) -> Result<(), SubsetError> {
     if let Some(vmtx_bytes) = vmtx_bake.vmtx_bytes.clone() {
@@ -469,6 +533,9 @@ fn push_vertical_metrics(
                 .to_vec(),
         };
         util::write_vhea_metrics_count(&mut vhea_out, vmtx_bake.number_of_long_ver_metrics)?;
+        if let Some(m) = baked {
+            patch_line_extremes(&mut vhea_out, m, true);
+        }
         tables.push((tag::VHEA, vhea_out));
     } else if !vmtx_bake.left_out.contains(&tag::VHEA) {
         if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
@@ -494,7 +561,7 @@ fn cff2_bake(
     let new_cff2 = crate::cff2::bake_at_coords(cff2_bytes, coords)?;
 
     let hmtx_out = bake_hmtx(face, coords, num_glyphs)?;
-    let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, &warnings);
+    let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, None, &warnings);
     let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
     let mvar_bake = bake_mvar_metrics(face, coords)?;
 
@@ -524,7 +591,7 @@ fn cff2_bake(
         (tag::HMTX, hmtx_out.bytes),
         (tag::CFF2, new_cff2),
     ];
-    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, &mut tables)?;
+    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, None, &mut tables)?;
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }

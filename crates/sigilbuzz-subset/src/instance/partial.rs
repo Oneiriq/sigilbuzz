@@ -11,7 +11,7 @@ use super::axes::{bake_avar_partial, bake_fvar_partial};
 use super::gdef_store::GdefBake;
 use super::metrics_var::{bake_hvar_partial, bake_mvar_partial, bake_vvar_partial};
 use super::store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
-use super::{AxisPin, InstanceInput, InstancedOutput};
+use super::{post_avar, AxisPin, InstanceInput, InstancedOutput};
 use crate::sfnt;
 use crate::warnings::Warnings;
 use crate::SubsetError;
@@ -59,10 +59,7 @@ pub(super) fn partial_instance(
     // Apply avar's piecewise-linear remap if the source ships one. The
     // Pin-axis support-scalar evaluation must use post-avar coords
     // (the IVS regions are defined in the post-avar space).
-    let post_avar_coords: Vec<f32> = match face.avar().map_err(SubsetError::from)? {
-        Some(av) => av.remap_all(coords),
-        None => coords.clone(),
-    };
+    let post_avar_coords = post_avar(face, coords)?;
 
     let warnings = Warnings::default();
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();

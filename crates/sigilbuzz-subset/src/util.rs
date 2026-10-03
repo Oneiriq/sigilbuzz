@@ -157,6 +157,23 @@ pub fn synthesize_post_format_3(face: &Face<'_>) -> Result<Vec<u8>, SubsetError>
     Ok(out)
 }
 
+/// Rounds to the nearest integer, halves up (toward positive infinity):
+/// `floor(v + 0.5)`, the rounding HarfBuzz's instancer (its own
+/// `roundf`) and fontTools (`otRound`) both use. Saturates at the
+/// `i32` range; NaN becomes zero.
+pub(crate) fn round_half_up(v: f32) -> i32 {
+    let x = v + 0.5;
+    // `as` truncates toward zero and saturates; step down once for a
+    // negative value with a fraction to get the floor.
+    #[allow(clippy::cast_possible_truncation)]
+    let t = x as i32;
+    if (t as f32) > x {
+        t.saturating_sub(1)
+    } else {
+        t
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

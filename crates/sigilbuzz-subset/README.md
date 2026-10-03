@@ -40,7 +40,9 @@ such as `COLR`, `CPAL`, `MVAR` and `DSIG`, stay, since no glyph ID changes, but 
 `DSIG` signature no longer matches the file. Nothing is read, so no warnings come back.
 
 `instance` handles variable fonts. It bakes a set of axis coordinates into a static
-font, or pins some axes and leaves the rest variable.
+font, or pins some axes and leaves the rest variable. It moves `glyf` outlines (inferred
+points and composite offsets included) and the advances and side bearings their phantom
+points give, the way HarfBuzz's instancer does.
 
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
 a Device table, an anchor), or a malformed vertical metrics table (`vhea`, `vmtx`,

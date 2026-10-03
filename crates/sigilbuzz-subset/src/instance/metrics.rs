@@ -1,6 +1,7 @@
-//! The metric bakes of a full instance: hmtx through HVAR, vmtx and
-//! VORG through VVAR, and the OS/2, hhea, vhea and post fields MVAR
-//! varies.
+//! The metric bakes of an instance: hmtx and vmtx from the baked
+//! glyphs' phantom points (or, without `gvar`, through HVAR and VVAR),
+//! VORG through VVAR, the head bounding box and the hhea and vhea
+//! extremes, and the OS/2, hhea, vhea and post fields MVAR varies.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
@@ -9,7 +10,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
-use super::glyf::clamp_i16;
+use super::glyf::{clamp_i16, GlyphMetrics};
 use crate::hmtx::emit_long_metrics;
 use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
 use crate::warnings::Warnings;
@@ -22,6 +23,90 @@ use crate::SubsetError;
 pub(super) struct HmtxBake {
     pub(super) bytes: Vec<u8>,
     pub(super) number_of_h_metrics: u16,
+}
+
+/// Builds `hmtx` from the metrics of the baked glyphs.
+pub(super) fn hmtx_from_metrics(metrics: &[GlyphMetrics]) -> HmtxBake {
+    let advances: Vec<u16> = metrics.iter().map(|m| m.advance).collect();
+    let lsbs: Vec<i16> = metrics.iter().map(|m| m.lsb).collect();
+    let (bytes, number_of_h_metrics) = emit_long_metrics(&advances, &lsbs);
+    HmtxBake {
+        bytes,
+        number_of_h_metrics,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// head bounding box and hhea / vhea extremes
+// ---------------------------------------------------------------------------
+
+/// Writes the union of the baked glyphs' bounding boxes into the `head`
+/// bytes (`xMin`, `yMin`, `xMax`, `yMax` at bytes 36 to 43). Glyphs
+/// with no outline do not count; when none has one, `head` keeps its
+/// box.
+pub(super) fn patch_head_bounds(head: &mut [u8], metrics: &[GlyphMetrics]) {
+    let mut boxes = metrics.iter().filter_map(|m| m.bounds);
+    let Some(first) = boxes.next() else {
+        return;
+    };
+    let union = boxes.fold(first, |u, b| {
+        [
+            u[0].min(b[0]),
+            u[1].min(b[1]),
+            u[2].max(b[2]),
+            u[3].max(b[3]),
+        ]
+    });
+    for (i, v) in union.iter().enumerate() {
+        write_i16(head, 36 + 2 * i, *v);
+    }
+}
+
+/// Writes the extremes of the baked metrics into `hhea` (`vertical`
+/// false) or `vhea` (`vertical` true), as HarfBuzz's instancer does:
+/// the largest advance (byte 10), then, over the glyphs with an
+/// outline, the smallest leading bearing (12), the smallest trailing
+/// bearing (14), and the largest extent, the leading bearing plus the
+/// outline's size (16). Without a glyph with an outline only the
+/// largest advance changes.
+pub(super) fn patch_line_extremes(table: &mut [u8], metrics: &[GlyphMetrics], vertical: bool) {
+    let advance = |m: &GlyphMetrics| if vertical { m.v_advance } else { m.advance };
+    let max_advance = metrics.iter().map(advance).max().unwrap_or(0);
+    write_u16(table, 10, max_advance);
+    let mut extremes: Option<(i32, i32, i32)> = None;
+    for m in metrics {
+        let Some([x_min, y_min, x_max, y_max]) = m.bounds else {
+            continue;
+        };
+        let (lead, size) = if vertical {
+            (i32::from(m.tsb), i32::from(y_max) - i32::from(y_min))
+        } else {
+            (i32::from(m.lsb), i32::from(x_max) - i32::from(x_min))
+        };
+        let trail = i32::from(advance(m)) - lead - size;
+        let extent = lead + size;
+        let e = extremes.get_or_insert((lead, trail, extent));
+        *e = (e.0.min(lead), e.1.min(trail), e.2.max(extent));
+    }
+    if let Some((lead, trail, extent)) = extremes {
+        write_i16(table, 12, clamp_i16(lead));
+        write_i16(table, 14, clamp_i16(trail));
+        write_i16(table, 16, clamp_i16(extent));
+    }
+}
+
+/// Writes a big-endian `i16` at `off` when the table is long enough.
+fn write_i16(buf: &mut [u8], off: usize, v: i16) {
+    if let Some(field) = buf.get_mut(off..).and_then(<[u8]>::first_chunk_mut::<2>) {
+        *field = v.to_be_bytes();
+    }
+}
+
+/// Writes a big-endian `u16` at `off` when the table is long enough.
+fn write_u16(buf: &mut [u8], off: usize, v: u16) {
+    if let Some(field) = buf.get_mut(off..).and_then(<[u8]>::first_chunk_mut::<2>) {
+        *field = v.to_be_bytes();
+    }
 }
 
 pub(super) fn bake_hmtx(
@@ -90,7 +175,8 @@ impl VmtxBake {
 }
 
 /// Rebuilds `vmtx` with the `VVAR` advance height and top side bearing
-/// deltas at `coords` folded in.
+/// deltas at `coords` folded in, or, when `baked` holds the metrics of
+/// the baked glyphs, from their vertical phantom points instead.
 ///
 /// A malformed `vhea` or `vmtx` is left out with its partner, and a
 /// malformed `VVAR` is left out and its deltas not applied, as the
@@ -101,6 +187,7 @@ pub(super) fn bake_vmtx(
     face: &Face<'_>,
     coords: &[f32],
     num_glyphs: u16,
+    baked: Option<&[GlyphMetrics]>,
     warnings: &Warnings,
 ) -> VmtxBake {
     // Parse `vhea` on its own first, so a problem there is reported
@@ -119,6 +206,18 @@ pub(super) fn bake_vmtx(
             return VmtxBake::without_vmtx(alloc::vec![tag::VHEA, tag::VMTX]);
         }
     };
+
+    // The baked glyphs' phantom points give the metrics directly.
+    if let Some(baked) = baked {
+        let advances: Vec<u16> = baked.iter().map(|m| m.v_advance).collect();
+        let tsbs: Vec<i16> = baked.iter().map(|m| m.tsb).collect();
+        let (out, long_count) = emit_long_metrics(&advances, &tsbs);
+        return VmtxBake {
+            vmtx_bytes: Some(out),
+            number_of_long_ver_metrics: long_count,
+            left_out: Vec::new(),
+        };
+    }
 
     let mut left_out = Vec::new();
     let vvar = face.vvar().unwrap_or_else(|e| {

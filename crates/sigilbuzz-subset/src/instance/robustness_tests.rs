@@ -116,8 +116,8 @@ fn mvar_with_many_records_is_walked_in_linear_time() {
 #[test]
 fn simple_glyph_with_many_points_bakes_in_linear_time() {
     // One contour of 65535 points, every flag repeated, every
-    // coordinate "same as previous", and one delta per point. A
-    // per-point scan of the delta list is quadratic.
+    // coordinate "same as previous", and one delta per point. A bake
+    // that rescans the deltas per point is quadratic.
     let last_point: u16 = u16::MAX - 1;
     let total = usize::from(last_point) + 1;
     let mut body: Vec<u8> = Vec::new();
@@ -133,13 +133,7 @@ fn simple_glyph_with_many_points_bakes_in_linear_time() {
         body.push((run - 1) as u8);
         remaining -= run;
     }
-    let deltas: Vec<sigilbuzz::tables::PointDelta> = (0..=last_point)
-        .map(|point| sigilbuzz::tables::PointDelta {
-            point,
-            dx: 1.0,
-            dy: 0.0,
-        })
-        .collect();
+    let deltas: Vec<(f32, f32)> = alloc::vec![(1.0, 0.0); total];
     let baked = bake_simple_glyph(&body, &deltas).expect("bake");
     // Every point moved by +1 on x: the new bbox is (1, 0, 1, 0).
     assert_eq!(&baked[2..10], &[0, 1, 0, 0, 0, 1, 0, 0]);
