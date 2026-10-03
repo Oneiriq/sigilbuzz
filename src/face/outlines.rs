@@ -89,7 +89,11 @@ impl<'a> Face<'a> {
         let loca = self.loca()?;
         let glyf = self.glyf()?;
         let hmtx = self.hmtx()?;
-        let vmtx = self.vmtx()?;
+        // `vmtx` only places the vertical phantom points, which only a
+        // component anchored to one reads. A `vmtx` that does not parse
+        // counts as absent, as HarfBuzz's sanitizer drops it, so it
+        // cannot fail the extents of a horizontal run's glyphs.
+        let vmtx = self.vmtx().ok().flatten();
         let metrics = PhantomMetrics {
             hmtx: &hmtx,
             vmtx: vmtx.as_ref(),

@@ -724,7 +724,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
             // requested non-default coords. Without VVAR, a varied
             // glyf font takes the advance from the glyph's varied
             // phantom points.
-            let advances = position::FontAdvances::new(face, font.coords())?;
+            let advances = position::FontAdvances::new(face, font.coords(), Some(*vmtx))?;
             for glyph in &mut glyphs {
                 // HarfBuzz convention: vertical y_advance is negative
                 // in both TTB and BTT, so the pen moves downward; BTT
@@ -749,7 +749,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     } else {
         // Without HVAR, a varied glyf font takes the advance from the
         // glyph's varied phantom points.
-        let advances = position::FontAdvances::new(face, font.coords())?;
+        let advances = position::FontAdvances::new(face, font.coords(), None)?;
         for glyph in &mut glyphs {
             glyph.x_advance = advances.h_advance(glyph.glyph_id)?;
         }
@@ -801,7 +801,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     if has_stch {
         // The stretch asks for the advances of glyphs in the run:
         // look them up once, so a malformed glyph fails the shape.
-        let advances = position::FontAdvances::new(face, font.coords())?;
+        let advances = position::FontAdvances::new(face, font.coords(), None)?;
         let mut widths = Vec::with_capacity(glyphs.len());
         for g in &glyphs {
             widths.push((g.glyph_id, advances.h_advance(g.glyph_id)?));
