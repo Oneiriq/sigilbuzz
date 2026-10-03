@@ -14,6 +14,13 @@
 //! - Private DICT + Local Subr INDEX (single-font case).
 //! - FDArray / FDSelect (CID-keyed fonts).
 //!
+//! Parsing is lazy. [`Cff::parse`] reads the header, the Top DICT, and
+//! the headers of the INDEX structures, which costs the same for ten
+//! glyphs or sixty thousand. Charstrings, subroutines, and the Font
+//! DICT and Private DICT of a CID-keyed glyph are located when that
+//! glyph is drawn, so malformed data in one of them fails only the
+//! glyphs that use it.
+//!
 //! Charstring execution is a Type 2 interpreter covering the outline
 //! path-drawing operators, stem hints (parsed and skipped), and
 //! subroutine dispatch with a spec-mandated depth cap of 10.
@@ -25,36 +32,54 @@ mod charstring;
 mod dict;
 mod index;
 
-use alloc::vec::Vec;
-
 use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 
 pub(crate) use charstring::{BlendContext, Interp2};
-pub(crate) use dict::fill_fd_ranges;
-pub(crate) use index::{read_index, read_index2};
+pub(crate) use dict::FdSelect;
+pub(crate) use index::{read_index2, Index};
 
 use charstring::Interp;
-use dict::{parse_fd_select, read_local_subrs, TopDict};
-use index::slice_at;
+use dict::{read_local_subrs, TopDict};
+use index::{read_index, slice_at};
 
 /// A parsed `CFF ` table view.
 #[derive(Debug, Clone)]
 pub struct Cff<'a> {
-    /// Global subroutines, indexed 0..len.
-    global_subrs: Vec<&'a [u8]>,
-    /// Per-font-dict local subroutines. CID fonts pick one per glyph
-    /// via FDSelect; non-CID fonts store a single entry.
-    local_subrs: Vec<Vec<&'a [u8]>>,
+    /// The whole table. Private DICT and Local Subrs offsets are
+    /// relative to it.
+    data: &'a [u8],
+    /// Global subroutines.
+    global_subrs: Index<'a>,
     /// CharStrings INDEX: one entry per glyph.
-    char_strings: Vec<&'a [u8]>,
-    /// FDSelect mapping: Some(indices) for CID, None for simple.
-    fd_select: Option<Vec<u8>>,
+    char_strings: Index<'a>,
+    /// Where each glyph's local subroutines come from.
+    fonts: FontDicts<'a>,
+}
+
+/// The Private DICT layout of a `CFF ` table.
+#[derive(Debug, Clone, Copy)]
+enum FontDicts<'a> {
+    /// A name-keyed font: one Private DICT, whose Local Subrs serve
+    /// every glyph.
+    Single(Index<'a>),
+    /// A CID-keyed font: FDSelect picks a Font DICT in the FDArray for
+    /// each glyph, and that Font DICT names the Private DICT. Without
+    /// FDSelect every glyph uses Font DICT 0.
+    Cid {
+        fd_array: Index<'a>,
+        fd_select: Option<FdSelect<'a>>,
+    },
 }
 
 impl<'a> Cff<'a> {
     /// Parses the CFF1 table.
+    ///
+    /// This reads only the header, the Top DICT, and INDEX headers, so
+    /// its cost does not grow with the glyph count. Problems inside a
+    /// single charstring, subroutine, or CID Font DICT surface from
+    /// [`Cff::outline`] for the glyphs that use it.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u8()?;
@@ -77,17 +102,19 @@ impl<'a> Cff<'a> {
         r.seek(hdr_size)?;
 
         // Name INDEX: skip.
-        let name_index = read_index(&mut r)?;
+        let _name_index = read_index(&mut r)?;
 
         // Top DICT INDEX: use only the first entry in a single-font
         // CFF. (CFF technically supports a FontSet, but OpenType
         // restricts it to one font per `CFF ` table.)
         let top_index = read_index(&mut r)?;
-        let top_dict_bytes = top_index.first().copied().ok_or(Error::Malformed {
-            offset: 0,
-            context: "CFF Top DICT INDEX empty",
-        })?;
-        let _ = name_index;
+        if top_index.is_empty() {
+            return Err(Error::Malformed {
+                offset: 0,
+                context: "CFF Top DICT INDEX empty",
+            });
+        }
+        let top_dict_bytes = top_index.get(0)?;
 
         // String INDEX: skip.
         let _string_index = read_index(&mut r)?;
@@ -107,46 +134,41 @@ impl<'a> Cff<'a> {
         let char_strings = read_index(&mut cs_reader)?;
 
         // Private DICT(s) + local subrs.
-        let (local_subrs, fd_select) = if let Some((size, off)) = top.private {
+        let fonts = if let Some((size, off)) = top.private {
             // Single Private DICT at (off, size). Parse Local Subrs.
             let priv_bytes = slice_at(data, off as usize, size as usize)?;
-            let local = read_local_subrs(data, priv_bytes, off as usize)?;
-            (alloc::vec![local], None)
+            FontDicts::Single(read_local_subrs(data, priv_bytes, off as usize)?)
         } else if let Some(fd_array_off) = top.fd_array {
             // CID font: FDArray is an INDEX of font dicts, each
             // carrying its own Private DICT.
             let mut fda_reader = Reader::at(data, fd_array_off as usize)?;
             let fd_array = read_index(&mut fda_reader)?;
-            let mut locals = Vec::with_capacity(fd_array.len());
-            for font_dict_bytes in &fd_array {
-                let fd = TopDict::parse(font_dict_bytes)?;
-                if let Some((size, off)) = fd.private {
-                    let priv_bytes = slice_at(data, off as usize, size as usize)?;
-                    let local = read_local_subrs(data, priv_bytes, off as usize)?;
-                    locals.push(local);
-                } else {
-                    locals.push(Vec::new());
-                }
-            }
-            // FDSelect: one u8 or u16 per glyph naming which Private
-            // DICT to use. Parse format 0 and format 3.
-            let fd_select = if let Some(fd_sel_off) = top.fd_select {
-                let n_glyphs = char_strings.len();
-                Some(parse_fd_select(data, fd_sel_off as usize, n_glyphs)?)
-            } else {
-                None
+            // FDSelect names the Font DICT for each glyph. CFF1
+            // defines formats 0 and 3.
+            let fd_select = match top.fd_select {
+                Some(off) => Some(FdSelect::parse(
+                    data,
+                    off as usize,
+                    char_strings.len(),
+                    false,
+                    "CFF FDSelect format != 0/3",
+                )?),
+                None => None,
             };
-            (locals, fd_select)
+            FontDicts::Cid {
+                fd_array,
+                fd_select,
+            }
         } else {
             // No Private DICT info at all: font has no subroutines.
-            (alloc::vec![Vec::new()], None)
+            FontDicts::Single(Index::default())
         };
 
         Ok(Self {
+            data,
             global_subrs,
-            local_subrs,
             char_strings,
-            fd_select,
+            fonts,
         })
     }
 
@@ -161,26 +183,43 @@ impl<'a> Cff<'a> {
     /// `Ok(true)` otherwise. An empty charstring counts as drawn:
     /// callers filter on `Outline::is_empty`.
     pub fn outline<S: OutlineSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
-        let Some(cs) = self.char_strings.get(glyph_id as usize) else {
+        let gid = usize::from(glyph_id);
+        if gid >= self.char_strings.len() {
             return Ok(false);
-        };
-        let local_idx = if let Some(ref sel) = self.fd_select {
-            sel.get(glyph_id as usize).copied().unwrap_or(0) as usize
-        } else {
-            0
-        };
-        let local_subrs = self
-            .local_subrs
-            .get(local_idx)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let mut interp = Interp::new(&self.global_subrs, local_subrs, sink, false);
+        }
+        let cs = self.char_strings.get(gid)?;
+        let local_subrs = self.local_subrs(gid)?;
+        let mut interp = Interp::new(self.global_subrs, local_subrs, sink, false);
         interp.run(cs, 0)?;
         // A well-formed CFF1 charstring has already closed its last
         // contour at endchar; this only covers charstrings that end
         // without one.
         interp.finish();
         Ok(true)
+    }
+
+    /// The Local Subrs INDEX for glyph `gid`. A CID-keyed glyph whose
+    /// FD has no Font DICT, or whose Font DICT has no Private DICT,
+    /// gets an empty one.
+    fn local_subrs(&self, gid: usize) -> Result<Index<'a>> {
+        match self.fonts {
+            FontDicts::Single(local) => Ok(local),
+            FontDicts::Cid {
+                fd_array,
+                fd_select,
+            } => {
+                let fd = usize::from(fd_select.map_or(0, |s| s.fd_for_glyph(gid)));
+                if fd >= fd_array.len() {
+                    return Ok(Index::default());
+                }
+                let font_dict = TopDict::parse(fd_array.get(fd)?)?;
+                let Some((size, off)) = font_dict.private else {
+                    return Ok(Index::default());
+                };
+                let priv_bytes = slice_at(self.data, off as usize, size as usize)?;
+                read_local_subrs(self.data, priv_bytes, off as usize)
+            }
+        }
     }
 }
 

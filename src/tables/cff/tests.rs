@@ -3,6 +3,7 @@
 use super::*;
 use crate::tables::cff::charstring::subr_bias;
 use crate::tables::cff::dict::{read_dict_operand, DictOperand};
+use crate::tables::cff::index::encode_index;
 use crate::tables::outline::{Outline, PathOp};
 use alloc::vec::Vec;
 
@@ -345,11 +346,321 @@ fn charstring_exponential_subr_calls_hit_op_limit() {
         subrs.push(s);
     }
     subrs.push(alloc::vec![op_code::RETURN]);
-    let globals: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
-    let locals: Vec<&[u8]> = Vec::new();
+    let entries: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+    let bytes = encode_index(&entries, 2);
+    let globals = read_index(&mut Reader::new(&bytes)).unwrap();
     let cs = [32, op_code::CALLGSUBR, op_code::ENDCHAR];
     let mut out = Outline::new();
-    let mut interp = Interp::new(&globals, &locals, &mut out, false);
+    let mut interp = Interp::new(globals, Index::default(), &mut out, false);
     let err = interp.run(&cs, 0).unwrap_err();
     assert!(matches!(err, Error::Malformed { .. }));
+}
+
+// ----------------------------------------------------------------------------
+// FDSelect lookups.
+// ----------------------------------------------------------------------------
+
+use crate::tables::cff::dict::fill_fd_ranges;
+
+fn fd_select_format3(ranges: &[(usize, u8)], sentinel: usize) -> Vec<u8> {
+    let mut out = alloc::vec![3];
+    out.extend_from_slice(&(ranges.len() as u16).to_be_bytes());
+    for &(first, fd) in ranges {
+        out.extend_from_slice(&(first as u16).to_be_bytes());
+        out.push(fd);
+    }
+    out.extend_from_slice(&(sentinel as u16).to_be_bytes());
+    out
+}
+
+fn fd_select_format4(ranges: &[(usize, u8)], sentinel: usize) -> Vec<u8> {
+    let mut out = alloc::vec![4];
+    out.extend_from_slice(&(ranges.len() as u32).to_be_bytes());
+    for &(first, fd) in ranges {
+        out.extend_from_slice(&(first as u32).to_be_bytes());
+        out.extend_from_slice(&u16::from(fd).to_be_bytes());
+    }
+    out.extend_from_slice(&(sentinel as u32).to_be_bytes());
+    out
+}
+
+/// Checks the per-glyph lookup against the front-to-back fill that
+/// FDSelect used to be expanded with, in both range formats.
+fn assert_matches_fill(ranges: &[(usize, u8)], sentinel: usize, n_glyphs: usize) {
+    let expected = fill_fd_ranges(ranges, sentinel, n_glyphs);
+    let formats = [
+        (fd_select_format3(ranges, sentinel), false),
+        (fd_select_format4(ranges, sentinel), true),
+    ];
+    for (bytes, allow_format4) in formats {
+        let sel = FdSelect::parse(&bytes, 0, n_glyphs, allow_format4, "test").unwrap();
+        for (gid, &fd) in expected.iter().enumerate() {
+            assert_eq!(
+                sel.fd_for_glyph(gid),
+                fd,
+                "gid {gid}, ranges {ranges:?}, sentinel {sentinel}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fd_select_ranges_match_the_fill() {
+    // Sorted.
+    assert_matches_fill(&[(0, 1), (5, 2), (9, 3)], 12, 12);
+    // Glyphs before the first range and past the sentinel map to FD 0.
+    assert_matches_fill(&[(3, 1), (7, 2)], 10, 12);
+    // A repeated first glyph makes the earlier range empty.
+    assert_matches_fill(&[(0, 1), (4, 2), (4, 3), (8, 4)], 12, 12);
+    // The sentinel may pass the glyph count, or come before the last
+    // range's first glyph.
+    assert_matches_fill(&[(0, 1), (6, 2)], 100, 10);
+    assert_matches_fill(&[(0, 1), (6, 2)], 3, 10);
+    // Unsorted: a later range never reclaims glyphs an earlier range
+    // already passed.
+    assert_matches_fill(&[(0, 1), (8, 2), (2, 3)], 10, 10);
+    assert_matches_fill(&[(5, 1), (0, 2), (3, 3)], 10, 10);
+    // No ranges at all.
+    assert_matches_fill(&[], 10, 10);
+}
+
+#[test]
+fn fd_select_alternating_ranges_match_the_fill() {
+    // The shape of the fuzzer find in
+    // `cff_fd_select_with_unsorted_ranges_fills_in_linear_time`, small.
+    let n = 40;
+    let ranges: Vec<(usize, u8)> = (0..64)
+        .map(|i| (if i % 2 == 0 { 0 } else { n }, i as u8))
+        .collect();
+    assert_matches_fill(&ranges, n, n);
+}
+
+#[test]
+fn fd_select_pseudo_random_ranges_match_the_fill() {
+    // A fixed linear congruential generator, so the cases are the
+    // same on every run.
+    let mut state = 0x2545_f491_u32;
+    let mut next = |bound: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((state >> 8) % bound) as usize
+    };
+    for _ in 0..300 {
+        let n_ranges = next(12);
+        let ranges: Vec<(usize, u8)> = (0..n_ranges).map(|_| (next(40), next(8) as u8)).collect();
+        let sentinel = next(45);
+        assert_matches_fill(&ranges, sentinel, 32);
+    }
+}
+
+#[test]
+fn fd_select_format0_reads_one_byte_per_glyph() {
+    let bytes = [0, 2, 0, 1];
+    let sel = FdSelect::parse(&bytes, 0, 3, false, "test").unwrap();
+    assert_eq!(
+        (0..3).map(|g| sel.fd_for_glyph(g)).collect::<Vec<_>>(),
+        [2, 0, 1]
+    );
+}
+
+#[test]
+fn fd_select_truncated_tables_fail_to_open() {
+    // Format 0 with fewer bytes than glyphs.
+    let err = FdSelect::parse(&[0, 1, 1], 0, 3, false, "test").unwrap_err();
+    assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
+    // Format 3 whose ranges run past the end.
+    let mut f3 = fd_select_format3(&[(0, 1), (5, 2)], 10);
+    f3.truncate(f3.len() - 3);
+    let err = FdSelect::parse(&f3, 0, 10, false, "test").unwrap_err();
+    assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
+    // Format 4 with a range count no table could back.
+    let mut f4 = alloc::vec![4];
+    f4.extend_from_slice(&u32::MAX.to_be_bytes());
+    let err = FdSelect::parse(&f4, 0, 10, true, "test").unwrap_err();
+    assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
+}
+
+#[test]
+fn fd_select_format4_is_cff2_only() {
+    let f4 = fd_select_format4(&[(0, 1)], 4);
+    let err = FdSelect::parse(&f4, 0, 4, false, "CFF FDSelect format != 0/3").unwrap_err();
+    assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
+    assert!(FdSelect::parse(&f4, 0, 4, true, "test").is_ok());
+}
+
+// ----------------------------------------------------------------------------
+// CID-keyed fonts: per-glyph Font DICT resolution.
+// ----------------------------------------------------------------------------
+
+/// One Font DICT of a CID-keyed test font.
+enum TestFd {
+    /// An empty Font DICT: no Private DICT, so no Local Subrs.
+    NoPrivate,
+    /// A Private DICT whose Local Subrs INDEX holds these subroutines.
+    Private(Vec<Vec<u8>>),
+    /// A Private DICT that points past the end of the table.
+    PrivatePastEnd,
+}
+
+/// Encodes `v` as a 5-byte DICT integer.
+fn dict_i32(out: &mut Vec<u8>, v: usize) {
+    out.push(29);
+    out.extend_from_slice(&(v as i32).to_be_bytes());
+}
+
+/// Offset of the CharStrings INDEX in [`build_cid_cff`] tables: the
+/// header, the Name INDEX, the Top DICT INDEX (with a 20-byte DICT),
+/// and the empty String and Global Subr INDEX structures.
+const CID_CS_OFF: usize = 4 + 6 + (2 + 1 + 2 + 20) + 2 + 2;
+
+/// Builds a CID-keyed CFF1 table: one charstring per glyph, the given
+/// Font DICTs, and an FDSelect in format 0 holding `fd_select`.
+fn build_cid_cff(charstrings: &[&[u8]], fds: &[TestFd], fd_select: &[u8]) -> Vec<u8> {
+    let char_strings = encode_index(charstrings, 2);
+    let fda_off = CID_CS_OFF + char_strings.len();
+    let font_dict_len = |fd: &TestFd| match fd {
+        TestFd::NoPrivate => 0,
+        _ => 11,
+    };
+    let fda_len = 3 + (fds.len() + 1) * 2 + fds.iter().map(font_dict_len).sum::<usize>();
+    let fds_off = fda_off + fda_len;
+
+    // Private DICTs, each followed by its Local Subrs INDEX.
+    let mut privates = Vec::new();
+    let mut font_dicts: Vec<Vec<u8>> = Vec::new();
+    for fd in fds {
+        let mut dict = Vec::new();
+        match fd {
+            TestFd::NoPrivate => {}
+            TestFd::Private(subrs) => {
+                let priv_off = fds_off + 1 + fd_select.len() + privates.len();
+                let mut private = Vec::new();
+                dict_i32(&mut private, 6); // Subrs, relative to the Private DICT
+                private.push(19);
+                let entries: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+                private.extend(encode_index(&entries, 2));
+                dict_i32(&mut dict, 6); // Private DICT size
+                dict_i32(&mut dict, priv_off);
+                dict.push(18);
+                privates.extend(private);
+            }
+            TestFd::PrivatePastEnd => {
+                dict_i32(&mut dict, 100);
+                dict_i32(&mut dict, 0x00FF_0000);
+                dict.push(18);
+            }
+        }
+        font_dicts.push(dict);
+    }
+
+    let mut out = alloc::vec![1, 0, 4, 4];
+    out.extend_from_slice(&[0, 1, 1, 1, 2, b'a']); // Name INDEX
+    out.extend_from_slice(&[0, 1, 1, 1, 21]); // Top DICT INDEX
+    dict_i32(&mut out, CID_CS_OFF);
+    out.push(17); // CharStrings
+    dict_i32(&mut out, fda_off);
+    out.extend_from_slice(&[12, 36]); // FDArray
+    dict_i32(&mut out, fds_off);
+    out.extend_from_slice(&[12, 37]); // FDSelect
+    out.extend_from_slice(&[0, 0, 0, 0]); // String and Global Subr INDEX
+    assert_eq!(out.len(), CID_CS_OFF);
+    out.extend(char_strings);
+    let entries: Vec<&[u8]> = font_dicts.iter().map(Vec::as_slice).collect();
+    out.extend(encode_index(&entries, 2));
+    assert_eq!(out.len(), fds_off);
+    out.push(0);
+    out.extend_from_slice(fd_select);
+    out.extend(privates);
+    out
+}
+
+/// `0 0 rmoveto 10 0 rlineto endchar`.
+const ONE_EDGE: [u8; 7] = [
+    139,
+    139,
+    op_code::RMOVETO,
+    149,
+    139,
+    op_code::RLINETO,
+    op_code::ENDCHAR,
+];
+
+#[test]
+fn cid_glyph_calls_the_local_subrs_of_its_font_dict() {
+    // Glyph 0 uses FD 1, whose Local Subr 0 draws `10 0 rlineto`. With
+    // one subr the bias is 107, so subr 0 is called as -107 (byte 32).
+    let subr = alloc::vec![149, 139, op_code::RLINETO, op_code::RETURN];
+    let calls_subr = [
+        139,
+        139,
+        op_code::RMOVETO,
+        32,
+        op_code::CALLSUBR,
+        op_code::ENDCHAR,
+    ];
+    let fds = [TestFd::NoPrivate, TestFd::Private(alloc::vec![subr])];
+    let cff = build_cid_cff(&[&calls_subr, &calls_subr], &fds, &[1, 0]);
+    let parsed = Cff::parse(&cff).unwrap();
+    let mut o = Outline::new();
+    parsed.outline(0, &mut o).unwrap();
+    assert_eq!(
+        o.ops(),
+        [
+            PathOp::MoveTo { x: 0.0, y: 0.0 },
+            PathOp::LineTo { x: 10.0, y: 0.0 },
+            PathOp::Close,
+        ]
+    );
+    // Glyph 1 uses FD 0, which has no Local Subrs to call.
+    let err = parsed.outline(1, &mut Outline::new()).unwrap_err();
+    assert!(matches!(err, Error::Malformed { .. }), "{err:?}");
+}
+
+#[test]
+fn cid_glyph_with_a_broken_private_dict_fails_alone() {
+    // FD 1's Private DICT points past the end of the table. Parsing
+    // used to resolve every Font DICT up front and reject the whole
+    // table; now only the glyphs that use FD 1 fail.
+    let fds = [TestFd::Private(Vec::new()), TestFd::PrivatePastEnd];
+    let cff = build_cid_cff(&[&ONE_EDGE, &ONE_EDGE], &fds, &[0, 1]);
+    let parsed = Cff::parse(&cff).unwrap();
+    let mut o = Outline::new();
+    assert!(parsed.outline(0, &mut o).unwrap());
+    assert_eq!(o.len(), 3);
+    let err = parsed.outline(1, &mut Outline::new()).unwrap_err();
+    assert!(matches!(err, Error::Truncated { .. }), "{err:?}");
+}
+
+#[test]
+fn cid_glyph_with_an_fd_past_the_fdarray_gets_no_local_subrs() {
+    let fds = [TestFd::Private(Vec::new())];
+    let cff = build_cid_cff(&[&ONE_EDGE], &fds, &[7]);
+    let parsed = Cff::parse(&cff).unwrap();
+    let mut o = Outline::new();
+    assert!(parsed.outline(0, &mut o).unwrap());
+    assert_eq!(o.len(), 3);
+}
+
+#[test]
+fn malformed_charstring_entry_fails_only_its_glyph() {
+    // Rewrite the CharStrings offsets from [1, 8, 8, 11] to [1, 9, 8, 11]:
+    // glyph 1 runs backward. Glyph 0 gains a trailing byte after its
+    // endchar and glyph 2 is intact. The INDEX header is fine, so the
+    // table still parses.
+    let mut cff = build_cid_cff(
+        &[&ONE_EDGE, &[], &ONE_EDGE[..3]],
+        &[TestFd::NoPrivate],
+        &[0, 0, 0],
+    );
+    // Offsets follow the count (2 bytes) and offSize (1 byte); slot 1
+    // ends glyph 0 and starts glyph 1.
+    let slot = CID_CS_OFF + 3 + 2;
+    assert_eq!(cff[slot..slot + 2], 8u16.to_be_bytes());
+    cff[slot..slot + 2].copy_from_slice(&9u16.to_be_bytes());
+    let parsed = Cff::parse(&cff).unwrap();
+    assert!(parsed.outline(0, &mut Outline::new()).unwrap());
+    let err = parsed.outline(1, &mut Outline::new()).unwrap_err();
+    assert!(matches!(err, Error::Malformed { .. }), "{err:?}");
+    let mut o = Outline::new();
+    assert!(parsed.outline(2, &mut o).unwrap());
+    assert_eq!(o.ops(), [PathOp::MoveTo { x: 0.0, y: 0.0 }, PathOp::Close]);
 }

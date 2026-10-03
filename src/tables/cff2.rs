@@ -18,11 +18,17 @@
 //! The Top DICT follows immediately (`topDictLength` bytes). CharStrings
 //! INDEX, Global Subr INDEX, FDArray, FDSelect, and the VariationStore
 //! are referenced by absolute offset from that dict.
+//!
+//! Parsing is lazy, as for `CFF `: [`Cff2::parse`] reads the header,
+//! the Top DICT, and INDEX headers, and each outline locates its own
+//! charstring, Font DICT, Private DICT, and Local Subrs. Variable fonts
+//! are often drawn one glyph at a time at changing coordinates, so the
+//! per-call cost matters more here than anywhere else.
 
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::cff::{fill_fd_ranges, read_index2, BlendContext};
+use crate::tables::cff::{read_index2, BlendContext, FdSelect, Index};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
@@ -31,15 +37,24 @@ use crate::tables::variation_store::ItemVariationStore;
 #[derive(Debug, Clone)]
 pub struct Cff2<'a> {
     data: &'a [u8],
-    global_subrs: Vec<&'a [u8]>,
-    local_subrs: Vec<Vec<&'a [u8]>>,
-    char_strings: Vec<&'a [u8]>,
-    fd_select: Option<Vec<u8>>,
+    global_subrs: Index<'a>,
+    char_strings: Index<'a>,
+    /// Font DICTs. Each names a Private DICT, which holds the offset of
+    /// that font's Local Subrs.
+    fd_array: Index<'a>,
+    /// Which Font DICT each glyph uses. Without it every glyph uses
+    /// Font DICT 0.
+    fd_select: Option<FdSelect<'a>>,
     vstore_off: Option<u32>,
 }
 
 impl<'a> Cff2<'a> {
     /// Parses a CFF2 table.
+    ///
+    /// This reads only the header, the Top DICT, and INDEX headers, so
+    /// its cost does not grow with the glyph count. Problems inside a
+    /// single charstring, subroutine, or Font DICT surface from
+    /// [`Cff2::outline`] for the glyphs that use it.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         let major = r.read_u8()?;
@@ -91,30 +106,23 @@ impl<'a> Cff2<'a> {
         let mut fda_reader = Reader::at(data, fd_array_off)?;
         let fd_array = read_index2(&mut fda_reader)?;
 
-        let mut locals = Vec::with_capacity(fd_array.len());
-        for font_dict_bytes in &fd_array {
-            let fd = Cff2TopDict::parse(font_dict_bytes)?;
-            if let Some((size, off)) = fd.private {
-                let priv_bytes = slice_at(data, off as usize, size as usize)?;
-                let local = read_local_subrs(data, priv_bytes, off as usize)?;
-                locals.push(local);
-            } else {
-                locals.push(Vec::new());
-            }
-        }
-
-        let fd_select = if let Some(fd_sel_off) = top.fd_select {
-            let n_glyphs = char_strings.len();
-            Some(parse_fd_select(data, fd_sel_off as usize, n_glyphs)?)
-        } else {
-            None
+        // FDSelect: formats 0, 3, and 4.
+        let fd_select = match top.fd_select {
+            Some(off) => Some(FdSelect::parse(
+                data,
+                off as usize,
+                char_strings.len(),
+                true,
+                "CFF2 FDSelect format unsupported",
+            )?),
+            None => None,
         };
 
         Ok(Self {
             data,
             global_subrs,
-            local_subrs: locals,
             char_strings,
+            fd_array,
             fd_select,
             vstore_off: top.vstore,
         })
@@ -134,19 +142,12 @@ impl<'a> Cff2<'a> {
         coords: &[f32],
         sink: &mut S,
     ) -> Result<bool> {
-        let Some(cs) = self.char_strings.get(glyph_id as usize) else {
+        let gid = usize::from(glyph_id);
+        if gid >= self.char_strings.len() {
             return Ok(false);
-        };
-        let local_idx = if let Some(ref sel) = self.fd_select {
-            sel.get(glyph_id as usize).copied().unwrap_or(0) as usize
-        } else {
-            0
-        };
-        let local_subrs = self
-            .local_subrs
-            .get(local_idx)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        }
+        let cs = self.char_strings.get(gid)?;
+        let local_subrs = self.local_subrs(gid)?;
 
         // Parse the variation store. CFF2 charstrings call `blend`
         // even at the default instance (empty coords). The operator
@@ -180,12 +181,28 @@ impl<'a> Cff2<'a> {
             vsindex: 0,
         });
         let mut interp =
-            crate::tables::cff::Interp2::new(&self.global_subrs, local_subrs, sink, blend);
+            crate::tables::cff::Interp2::new(self.global_subrs, local_subrs, sink, blend);
         interp.run(cs, 0)?;
         // CFF2 has no endchar, so the last contour is still open when
         // the charstring runs out. Close it here.
         interp.finish();
         Ok(true)
+    }
+
+    /// The Local Subrs INDEX for glyph `gid`, from the Private DICT of
+    /// the Font DICT that FDSelect picks. A glyph whose FD has no Font
+    /// DICT, or whose Font DICT has no Private DICT, gets an empty one.
+    fn local_subrs(&self, gid: usize) -> Result<Index<'a>> {
+        let fd = usize::from(self.fd_select.map_or(0, |s| s.fd_for_glyph(gid)));
+        if fd >= self.fd_array.len() {
+            return Ok(Index::default());
+        }
+        let font_dict = Cff2TopDict::parse(self.fd_array.get(fd)?)?;
+        let Some((size, off)) = font_dict.private else {
+            return Ok(Index::default());
+        };
+        let priv_bytes = slice_at(self.data, off as usize, size as usize)?;
+        read_local_subrs(self.data, priv_bytes, off as usize)
     }
 }
 
@@ -309,10 +326,10 @@ fn read_local_subrs<'a>(
     data: &'a [u8],
     priv_bytes: &'a [u8],
     priv_off: usize,
-) -> Result<Vec<&'a [u8]>> {
+) -> Result<Index<'a>> {
     let priv_dict = Cff2TopDict::parse(priv_bytes)?;
     let Some(off) = priv_dict.local_subrs_off else {
-        return Ok(Vec::new());
+        return Ok(Index::default());
     };
     let subr_off = priv_off.checked_add(off as usize).ok_or(Error::Malformed {
         offset: priv_off,
@@ -320,48 +337,6 @@ fn read_local_subrs<'a>(
     })?;
     let mut r = Reader::at(data, subr_off)?;
     read_index2(&mut r)
-}
-
-fn parse_fd_select(data: &[u8], off: usize, n_glyphs: usize) -> Result<Vec<u8>> {
-    let mut r = Reader::at(data, off)?;
-    let format = r.read_u8()?;
-    match format {
-        0 => {
-            let mut out = Vec::with_capacity(n_glyphs);
-            for _ in 0..n_glyphs {
-                out.push(r.read_u8()?);
-            }
-            Ok(out)
-        }
-        3 => {
-            let n_ranges = r.read_u16()? as usize;
-            let mut ranges = Vec::with_capacity(n_ranges);
-            for _ in 0..n_ranges {
-                let first = r.read_u16()? as usize;
-                let fd = r.read_u8()?;
-                ranges.push((first, fd));
-            }
-            let sentinel = r.read_u16()? as usize;
-            Ok(fill_fd_ranges(&ranges, sentinel, n_glyphs))
-        }
-        4 => {
-            // Format 4: 32-bit ranges. Used by huge CID fonts.
-            let n_ranges = r.read_u32()? as usize;
-            // Each Range4 takes 6 bytes, so the remaining bytes bound
-            // how many ranges the table can back.
-            let mut ranges = Vec::with_capacity(n_ranges.min(r.remaining() / 6));
-            for _ in 0..n_ranges {
-                let first = r.read_u32()? as usize;
-                let fd = r.read_u16()? as u8;
-                ranges.push((first, fd));
-            }
-            let sentinel = r.read_u32()? as usize;
-            Ok(fill_fd_ranges(&ranges, sentinel, n_glyphs))
-        }
-        _ => Err(Error::Unsupported {
-            context: "CFF2 FDSelect format unsupported",
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -439,9 +414,7 @@ mod tests {
             ivs: &ivs,
             vsindex: 0,
         };
-        let globals: Vec<&[u8]> = Vec::new();
-        let locals: Vec<&[u8]> = Vec::new();
-        let mut interp = Interp2::new(&globals, &locals, &mut out, Some(blend));
+        let mut interp = Interp2::new(Index::default(), Index::default(), &mut out, Some(blend));
         interp.run(&cs, 0).unwrap();
 
         // At coord = 1.0 (region peak), scalar = 1.0, so x becomes
@@ -471,9 +444,7 @@ mod tests {
         cs.push(op_code::ENDCHAR);
 
         let mut out = Outline::new();
-        let globals: Vec<&[u8]> = Vec::new();
-        let locals: Vec<&[u8]> = Vec::new();
-        let mut interp = Interp2::new(&globals, &locals, &mut out, None);
+        let mut interp = Interp2::new(Index::default(), Index::default(), &mut out, None);
         interp.run(&cs, 0).unwrap();
 
         match out.ops()[0] {
@@ -483,6 +454,66 @@ mod tests {
             }
             _ => panic!("expected MoveTo"),
         }
+    }
+
+    /// Builds an ItemVariationStore with one axis, two regions, and two
+    /// subtables. Region 0 runs (0, 1, 1) and region 1 runs
+    /// (0, 0.5, 1); subtable `k` uses region `k` alone.
+    fn build_two_subtable_ivs() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // format
+        out.extend_from_slice(&16u32.to_be_bytes()); // regionListOffset
+        out.extend_from_slice(&2u16.to_be_bytes()); // itemVariationDataCount
+        out.extend_from_slice(&32u32.to_be_bytes()); // subtable 0
+        out.extend_from_slice(&40u32.to_be_bytes()); // subtable 1
+        out.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        out.extend_from_slice(&2u16.to_be_bytes()); // regionCount
+        for peak in [0x4000i16, 0x2000] {
+            out.extend_from_slice(&0i16.to_be_bytes()); // start 0.0
+            out.extend_from_slice(&peak.to_be_bytes());
+            out.extend_from_slice(&0x4000i16.to_be_bytes()); // end 1.0
+        }
+        assert_eq!(out.len(), 32);
+        for region in 0u16..2 {
+            out.extend_from_slice(&0u16.to_be_bytes()); // itemCount
+            out.extend_from_slice(&0u16.to_be_bytes()); // wordDeltaCount
+            out.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+            out.extend_from_slice(&region.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn cff2_blend_follows_a_vsindex_change() {
+        // 100 10 1 blend, then 1 vsindex, then 0 20 1 blend, then
+        // rmoveto. At coord 0.5 region 0 scales by 0.5 and region 1 by
+        // 1.0, so the first blend must use subtable 0's scalars and the
+        // second subtable 1's, not the ones cached for vsindex 0.
+        let ivs_bytes = build_two_subtable_ivs();
+        let ivs = ItemVariationStore::parse(&ivs_bytes).unwrap();
+        let cs = [
+            239, // 100
+            149, // 10
+            140, // n = 1
+            op_code::BLEND,
+            140, // 1
+            op_code::VSINDEX,
+            139, // 0
+            159, // 20
+            140, // n = 1
+            op_code::BLEND,
+            op_code::RMOVETO,
+        ];
+        let coords = [0.5_f32];
+        let blend = BlendContext {
+            coords: &coords,
+            ivs: &ivs,
+            vsindex: 0,
+        };
+        let mut out = Outline::new();
+        let mut interp = Interp2::new(Index::default(), Index::default(), &mut out, Some(blend));
+        interp.run(&cs, 0).unwrap();
+        assert_eq!(out.ops(), [PathOp::MoveTo { x: 105.0, y: 20.0 }]);
     }
 
     /// Builds an ItemVariationStore with one axis and one region that
@@ -631,10 +662,8 @@ mod tests {
             ivs: &ivs,
             vsindex: 0,
         };
-        let globals: Vec<&[u8]> = Vec::new();
-        let locals: Vec<&[u8]> = Vec::new();
         let mut out = Outline::new();
-        let mut interp = Interp2::new(&globals, &locals, &mut out, Some(blend));
+        let mut interp = Interp2::new(Index::default(), Index::default(), &mut out, Some(blend));
         let err = interp.run(&cs, 0).unwrap_err();
         assert!(matches!(err, Error::Malformed { .. }), "{err:?}");
     }
