@@ -9,6 +9,9 @@
 //!   composition. Each layer is rasterized as a sub-glyph, multiplied
 //!   by its CPAL palette color, and `over`-composited onto the
 //!   running RGBA pixmap.
+//!
+//! Every entry point has a `_placed` sibling that also returns the
+//! image's [`Placement`], its offset from the glyph origin.
 
 use alloc::vec::Vec;
 
@@ -18,8 +21,8 @@ use crate::affine::Affine;
 use crate::bitmaps;
 use crate::colrv1::rasterize_colrv1;
 use crate::error::RenderError;
-use crate::flatten::{flatten, flatten_limited, Segment, MAX_SEGMENTS};
-use crate::pixmap::{ColorPixmap, Pixmap};
+use crate::flatten::{flatten_fill, flatten_fill_limited, Segment, MAX_SEGMENTS};
+use crate::pixmap::{ColorPixmap, Pixmap, Placement};
 use crate::raster::{raster_bounds, rasterize as raster, RasterBounds, MAX_RASTER_DIM};
 
 /// Configuration for the rasterizer.
@@ -113,6 +116,10 @@ impl Rasterizer {
     /// `size_pt / units_per_em`. Y flips so that increasing pixel rows
     /// move down (the conventional bitmap orientation).
     ///
+    /// The pixmap does not say where it sits relative to the glyph
+    /// origin. [`Rasterizer::rasterize_glyph_placed`] returns the same
+    /// pixmap together with that offset.
+    ///
     /// # Errors
     /// Returns [`RenderError::NoOutline`] when the glyph is invisible
     /// (whitespace) or out of range; [`RenderError::BadSize`] when
@@ -127,6 +134,46 @@ impl Rasterizer {
         size_pt: f32,
         coords: &[f32],
     ) -> Result<Pixmap, RenderError> {
+        self.rasterize_glyph_placed(face, gid, size_pt, coords)
+            .map(|(pixmap, _)| pixmap)
+    }
+
+    /// Rasterizes a glyph outline like [`Rasterizer::rasterize_glyph`]
+    /// and also returns where the pixmap sits relative to the glyph
+    /// origin (see [`Placement`]).
+    ///
+    /// The pixmap covers the outline's bounding box in pixels, rounded
+    /// out to whole pixels plus a one-pixel margin, so `left` is
+    /// `floor(x_min * scale) - 1` and `top` is `floor(-y_max * scale) - 1`,
+    /// where `scale` is `size_pt / units_per_em` and the box is the
+    /// flattened outline's. A glyph whose outline flattens to nothing
+    /// returns an empty pixmap at `Placement::default()`.
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    /// use sigilbuzz_render::Rasterizer;
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0).unwrap();
+    /// let gid = face.cmap().unwrap().glyph_id('g').unwrap();
+    /// let (pix, at) = Rasterizer::new()
+    ///     .rasterize_glyph_placed(&face, gid, 40.0, &[])
+    ///     .unwrap();
+    /// // 'g' has a descender: its image starts above the baseline and
+    /// // ends below it.
+    /// assert!(at.top < 0);
+    /// assert!(at.top + pix.height as i32 > 1);
+    /// ```
+    ///
+    /// # Errors
+    /// The same as [`Rasterizer::rasterize_glyph`].
+    pub fn rasterize_glyph_placed(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        size_pt: f32,
+        coords: &[f32],
+    ) -> Result<(Pixmap, Placement), RenderError> {
         if !size_pt.is_finite() || size_pt <= 0.0 {
             return Err(RenderError::BadSize(size_pt));
         }
@@ -155,14 +202,17 @@ impl Rasterizer {
             dy: 0.0,
         };
 
-        let segs = flatten(outline.ops().iter().copied(), &xform, self.tolerance);
+        let segs = flatten_fill(outline.ops().iter().copied(), &xform, self.tolerance);
         if let Some(b) = raster_bounds(&segs) {
             if b.width > MAX_RASTER_DIM || b.height > MAX_RASTER_DIM {
                 return Err(RenderError::BadSize(size_pt));
             }
         }
+        // The device transform puts the glyph origin at pixel (0, 0),
+        // so the raster's origin is the placement. An empty raster
+        // reports (0, 0).
         let r = raster(&segs);
-        Ok(r.pixmap)
+        Ok((r.pixmap, Placement::new(r.origin_x, r.origin_y)))
     }
 
     /// Rasterizes a COLRv0 layered color glyph and composes the
@@ -181,6 +231,9 @@ impl Rasterizer {
     /// the end of the palette, and a font without `CPAL` all paint in
     /// the foreground color instead of failing.
     ///
+    /// [`Rasterizer::rasterize_colrv0_glyph_placed`] returns the same
+    /// pixmap together with its offset from the glyph origin.
+    ///
     /// # Errors
     /// - [`RenderError::NoColrV0`] when the glyph has no v0 layer record.
     /// - [`RenderError::BadSize`] when `size_pt` is non-finite or
@@ -195,6 +248,52 @@ impl Rasterizer {
         size_pt: f32,
         coords: &[f32],
     ) -> Result<ColorPixmap, RenderError> {
+        self.rasterize_colrv0_glyph_placed(face, gid, palette_index, size_pt, coords)
+            .map(|(pixmap, _)| pixmap)
+    }
+
+    /// Rasterizes a COLRv0 glyph like
+    /// [`Rasterizer::rasterize_colrv0_glyph`] and also returns where the
+    /// pixmap sits relative to the glyph origin (see [`Placement`]).
+    ///
+    /// The pixmap covers the union of the layer outlines' pixel boxes,
+    /// each rounded out to whole pixels plus a one-pixel margin, the box
+    /// [`Rasterizer::rasterize_glyph_placed`] gives a single outline. A
+    /// glyph whose layers draw nothing returns an empty pixmap at
+    /// `Placement::default()`.
+    ///
+    /// A font without color layers for the glyph returns
+    /// [`RenderError::NoColrV0`], and a renderer falls back to the
+    /// outline:
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    /// use sigilbuzz_render::{Rasterizer, RenderError};
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0).unwrap();
+    /// let gid = face.cmap().unwrap().glyph_id('A').unwrap();
+    /// let rast = Rasterizer::new();
+    /// let at = match rast.rasterize_colrv0_glyph_placed(&face, gid, 0, 24.0, &[]) {
+    ///     Ok((_color, at)) => at,
+    ///     Err(RenderError::NoColrV0(_)) => {
+    ///         rast.rasterize_glyph_placed(&face, gid, 24.0, &[]).unwrap().1
+    ///     }
+    ///     Err(e) => panic!("{e}"),
+    /// };
+    /// assert!(at.top < 0, "'A' rises above the baseline");
+    /// ```
+    ///
+    /// # Errors
+    /// The same as [`Rasterizer::rasterize_colrv0_glyph`].
+    pub fn rasterize_colrv0_glyph_placed(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        palette_index: u16,
+        size_pt: f32,
+        coords: &[f32],
+    ) -> Result<(ColorPixmap, Placement), RenderError> {
         if !size_pt.is_finite() || size_pt <= 0.0 {
             return Err(RenderError::BadSize(size_pt));
         }
@@ -247,7 +346,7 @@ impl Rasterizer {
             if outline.is_empty() {
                 continue;
             }
-            let segs = flatten_limited(
+            let segs = flatten_fill_limited(
                 outline.ops().iter().copied(),
                 &xform,
                 self.tolerance,
@@ -274,7 +373,7 @@ impl Rasterizer {
         }
 
         if edges.is_empty() {
-            return Ok(ColorPixmap::new(0, 0));
+            return Ok((ColorPixmap::new(0, 0), Placement::default()));
         }
 
         let mut min_x = i32::MAX;
@@ -288,7 +387,7 @@ impl Rasterizer {
             max_y = max_y.max(b.origin_y + b.height as i32);
         }
         if max_x <= min_x || max_y <= min_y {
-            return Ok(ColorPixmap::new(0, 0));
+            return Ok((ColorPixmap::new(0, 0), Placement::default()));
         }
         let width = (max_x - min_x) as u32;
         let height = (max_y - min_y) as u32;
@@ -311,7 +410,9 @@ impl Rasterizer {
             let dy = (r.origin_y - min_y) as u32;
             blit_layer(&mut out, &r.pixmap, dx, dy, e.color);
         }
-        Ok(out)
+        // The device transform puts the glyph origin at pixel (0, 0),
+        // so the union's corner is the placement.
+        Ok((out, Placement::new(min_x, min_y)))
     }
 
     /// Rasterizes a COLRv1 paint-tree color glyph into a premultiplied
@@ -337,6 +438,9 @@ impl Rasterizer {
     /// Foreground (`0xFFFF`) entries paint in the foreground color (see
     /// [`Rasterizer::with_foreground`]), opaque black by default.
     ///
+    /// [`Rasterizer::rasterize_colrv1_glyph_placed`] returns the same
+    /// pixmap together with its offset from the glyph origin.
+    ///
     /// # Errors
     /// - [`RenderError::ColrV1NotFound`] when the font has no v1
     ///   paint record for `gid`.
@@ -356,6 +460,58 @@ impl Rasterizer {
         size_pt: f32,
         coords: &[f32],
     ) -> Result<ColorPixmap, RenderError> {
+        self.rasterize_colrv1_glyph_placed(face, gid, palette_index, size_pt, coords)
+            .map(|(pixmap, _)| pixmap)
+    }
+
+    /// Rasterizes a COLRv1 glyph like
+    /// [`Rasterizer::rasterize_colrv1_glyph`] and also returns where the
+    /// pixmap sits relative to the glyph origin (see [`Placement`]).
+    ///
+    /// The pixmap is the glyph's clip box in pixels: its ClipList box,
+    /// or the bounds of its paint tree when it has none, scaled by
+    /// `size_pt / units_per_em`, rounded out to whole pixels, plus a
+    /// one-pixel transparent margin. For a box `(x_min, y_min, x_max,
+    /// y_max)` in design units that makes `left` equal to
+    /// `floor(x_min * scale) - 1` and `top` equal to
+    /// `floor(-y_max * scale) - 1`. An unbounded glyph, which renders
+    /// as an empty pixmap, returns `Placement::default()`.
+    ///
+    /// A font without a COLRv1 paint for the glyph returns
+    /// [`RenderError::ColrV1NotFound`], and a renderer falls back to
+    /// the next format:
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    /// use sigilbuzz_render::{Rasterizer, RenderError};
+    ///
+    /// let data = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+    /// let face = Face::parse_bytes(data, 0).unwrap();
+    /// let gid = face.cmap().unwrap().glyph_id('Q').unwrap();
+    /// let rast = Rasterizer::new();
+    /// let (width, at) = match rast.rasterize_colrv1_glyph_placed(&face, gid, 0, 24.0, &[]) {
+    ///     Ok((color, at)) => (color.width, at),
+    ///     Err(RenderError::ColrV1NotFound(_)) => {
+    ///         let (alpha, at) = rast.rasterize_glyph_placed(&face, gid, 24.0, &[]).unwrap();
+    ///         (alpha.width, at)
+    ///     }
+    ///     Err(e) => panic!("{e}"),
+    /// };
+    /// assert!(width > 0);
+    /// // 'Q' rises above the baseline.
+    /// assert!(at.top < 0);
+    /// ```
+    ///
+    /// # Errors
+    /// The same as [`Rasterizer::rasterize_colrv1_glyph`].
+    pub fn rasterize_colrv1_glyph_placed(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        palette_index: u16,
+        size_pt: f32,
+        coords: &[f32],
+    ) -> Result<(ColorPixmap, Placement), RenderError> {
         rasterize_colrv1(
             face,
             gid,
@@ -376,6 +532,9 @@ impl Rasterizer {
     /// and currently unused. The canonical bitmap embed tables don't
     /// vary per axis.
     ///
+    /// [`Rasterizer::rasterize_bitmap_glyph_placed`] returns the same
+    /// pixmap together with its offset from the glyph origin.
+    ///
     /// # Errors
     /// See [`crate::rasterize_bitmap_glyph`].
     pub fn rasterize_bitmap_glyph(
@@ -386,6 +545,41 @@ impl Rasterizer {
         coords: &[f32],
     ) -> Result<ColorPixmap, RenderError> {
         bitmaps::rasterize_bitmap_glyph(self, face, gid, size_pt, coords)
+    }
+
+    /// Rasterizes an embedded bitmap glyph like
+    /// [`Rasterizer::rasterize_bitmap_glyph`] and also returns where the
+    /// pixmap sits relative to the glyph origin (see [`Placement`]).
+    ///
+    /// The offset comes from the strike: the CBDT or EBDT horizontal
+    /// bearings, or the sbix origin offset, scaled with the bitmap when
+    /// it is resampled. See [`crate::rasterize_bitmap_glyph_placed`].
+    ///
+    /// ```
+    /// use sigilbuzz::Face;
+    /// use sigilbuzz_render::Rasterizer;
+    ///
+    /// // One 32 ppem CBDT strike holding gid 1.
+    /// let data = include_bytes!("../../../tests/fixtures/cbdt_synthetic.ttf");
+    /// let face = Face::parse_bytes(data, 0).unwrap();
+    /// let rast = Rasterizer::new();
+    /// let (pix, at) = rast.rasterize_bitmap_glyph_placed(&face, 1, 32.0, &[]).unwrap();
+    /// assert_eq!(pix, rast.rasterize_bitmap_glyph(&face, 1, 32.0, &[]).unwrap());
+    /// // Twice the size doubles the bitmap and its offsets.
+    /// let (_, at2) = rast.rasterize_bitmap_glyph_placed(&face, 1, 64.0, &[]).unwrap();
+    /// assert_eq!((at2.left, at2.top), (2 * at.left, 2 * at.top));
+    /// ```
+    ///
+    /// # Errors
+    /// See [`crate::rasterize_bitmap_glyph`].
+    pub fn rasterize_bitmap_glyph_placed(
+        &self,
+        face: &Face<'_>,
+        gid: u16,
+        size_pt: f32,
+        coords: &[f32],
+    ) -> Result<(ColorPixmap, Placement), RenderError> {
+        bitmaps::rasterize_bitmap_glyph_placed(self, face, gid, size_pt, coords)
     }
 }
 
@@ -444,6 +638,57 @@ fn blit_layer(dst: &mut ColorPixmap, mask: &Pixmap, dx: u32, dy: u32, color: [u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::flatten::flatten;
+    use sigilbuzz::tables::PathOp;
+
+    /// A CFF-style contour: two cubics and no `Close`. CFF draws the
+    /// closing edge implicitly, here the line from (20, 200) back down to
+    /// the start at (20, 0).
+    fn open_cff_contour() -> Vec<PathOp> {
+        alloc::vec![
+            PathOp::MoveTo { x: 20.0, y: 0.0 },
+            PathOp::CubicTo {
+                c1x: 120.0,
+                c1y: 0.0,
+                c2x: 180.0,
+                c2y: 50.0,
+                x: 180.0,
+                y: 100.0,
+            },
+            PathOp::CubicTo {
+                c1x: 180.0,
+                c1y: 150.0,
+                c2x: 120.0,
+                c2y: 200.0,
+                x: 20.0,
+                y: 200.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn open_cff_contour_fills_like_its_closed_form() {
+        let xform = Affine::scale(0.1, -0.1);
+        let mut closed = open_cff_contour();
+        closed.push(PathOp::Close);
+        let want = raster(&flatten_fill(closed, &xform, 0.25));
+        let got = raster(&flatten_fill(open_cff_contour(), &xform, 0.25));
+        assert_eq!(got.pixmap, want.pixmap);
+        assert_eq!((got.origin_x, got.origin_y), (want.origin_x, want.origin_y));
+        // The middle of the D is solid, and nothing leaks past its edges.
+        let at = |x: i32, y: i32| {
+            got.pixmap
+                .get((x - got.origin_x) as u32, (y - got.origin_y) as u32)
+        };
+        assert_eq!(at(9, -10), 255);
+        assert_eq!(at(0, -10), 0);
+        assert_eq!(at(19, -10), 0);
+        // The public flatten leaves the contour open, and filling those
+        // edges as they are does not give the glyph.
+        let unclosed = raster(&flatten(open_cff_contour(), &xform, 0.25));
+        assert_ne!(unclosed.pixmap, want.pixmap);
+    }
 
     #[test]
     fn rasterizer_default_and_with_tolerance() {

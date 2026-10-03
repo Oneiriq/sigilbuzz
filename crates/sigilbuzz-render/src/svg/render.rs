@@ -7,7 +7,7 @@ use sigilbuzz::tables::PathOp;
 
 use crate::affine::Affine;
 use crate::colrv1::{apply_extend, project_linear, project_radial, sample_stops, to_premul};
-use crate::flatten::{flatten_limited, Segment, MAX_SEGMENTS};
+use crate::flatten::{flatten_fill_limited, Segment, MAX_SEGMENTS};
 use crate::pixmap::{ColorPixmap, Pixmap};
 use crate::raster::{raster_bounds, rasterize_in, Window};
 
@@ -52,7 +52,7 @@ impl RenderBudget {
     /// Flattens `ops` within the remaining segment budget and charges
     /// the segments it produced.
     fn flatten(&mut self, ops: &[PathOp], xform: &Affine, tol: f32) -> Vec<Segment> {
-        let segs = flatten_limited(ops.iter().copied(), xform, tol, self.segments_left);
+        let segs = flatten_fill_limited(ops.iter().copied(), xform, tol, self.segments_left);
         self.segments_left = self.segments_left.saturating_sub(segs.len());
         segs
     }

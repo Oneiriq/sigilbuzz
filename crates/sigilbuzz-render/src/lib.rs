@@ -38,6 +38,14 @@
 //! let _ = pix.data;
 //! ```
 //!
+//! # Placing glyph images
+//!
+//! Each `rasterize_*` method has a `rasterize_*_placed` twin that
+//! returns the same image together with a [`Placement`]: the offset of
+//! the image's top-left pixel from the pen position on the baseline, in
+//! pixels with y down. Draw a run by copying every image to
+//! [`Placement::top_left`] of its rounded pen position.
+//!
 //! # PNG round-trip
 //!
 //! [`encode_png`] / [`encode_png_alpha`] turn a pixmap back into a
@@ -65,6 +73,12 @@
 //! identity (MSDF RGB edge coloring, signed-distance generators,
 //! etc.). It replaces the workaround of calling [`flatten`] one
 //! tiny `MoveTo + draw` op pair at a time per Bézier.
+//!
+//! Both return the edges the path draws and nothing more. A contour
+//! without `Close` stays open, so the workaround above still yields
+//! each edge exactly once. A fill treats an open contour as closed: a
+//! caller that fills the segments itself should close such contours
+//! first. The [`Rasterizer`] does that whenever it fills.
 //!
 //! ```
 //! use sigilbuzz_render::{flatten_grouped, FlattenedCurve, Affine, DEFAULT_TOLERANCE};
@@ -116,14 +130,17 @@ mod svg;
 mod tiff_decode;
 
 pub use affine::Affine;
-pub use bitmaps::{decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rescale_bilinear};
+pub use bitmaps::{
+    decode_ebdt_mono, decode_png, rasterize_bitmap_glyph, rasterize_bitmap_glyph_placed,
+    rescale_bilinear,
+};
 pub use error::RenderError;
 pub use flatten::{
     arc_length_cubic, arc_length_cubic_solve_t, arc_length_quad, arc_length_quad_solve_t, flatten,
     flatten_grouped, FlattenedCurve, Segment, DEFAULT_TOLERANCE,
 };
 pub use jpeg_decode::decode_jpeg;
-pub use pixmap::{ColorPixmap, Pixmap};
+pub use pixmap::{ColorPixmap, Pixmap, Placement};
 pub use png_encode::{encode_png, encode_png_alpha};
 pub use rasterizer::Rasterizer;
 pub use svg::{TextPathGlyph, TextPathInput};

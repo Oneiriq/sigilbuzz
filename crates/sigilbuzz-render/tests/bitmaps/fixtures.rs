@@ -72,14 +72,33 @@ pub(crate) fn maxp_05(num_glyphs: u16) -> Vec<u8> {
     b
 }
 
-/// Builds an `sbix` table with a single 16-ppem strike whose glyphs
+/// Builds an `sbix` table with a single strike at `ppem` whose glyphs
 /// carry the supplied tagged payloads. `glyphs[gid] = Some((tag,
-/// payload))` writes a glyph entry; `None` writes an empty (length-0)
-/// slot. `glyphs.len()` must equal `num_glyphs`.
+/// payload))` writes a glyph entry with a zero origin offset; `None`
+/// writes an empty (length-0) slot. `glyphs.len()` must equal
+/// `num_glyphs`.
 pub(crate) fn build_sbix_strike(
     num_glyphs: u16,
     ppem: u16,
     glyphs: &[Option<([u8; 4], Vec<u8>)>],
+) -> Vec<u8> {
+    let glyphs: Vec<_> = glyphs
+        .iter()
+        .map(|g| g.clone().map(|(tag, payload)| (tag, payload, (0, 0))))
+        .collect();
+    build_sbix_strike_with_offsets(num_glyphs, ppem, &glyphs)
+}
+
+/// One sbix glyph record: graphic type tag, payload, and origin offset
+/// `(x, y)`, the pixel offset of the image's bottom-left corner from the
+/// glyph origin, y up.
+pub(crate) type SbixRecord = ([u8; 4], Vec<u8>, (i16, i16));
+
+/// [`build_sbix_strike`] with an origin offset per glyph.
+pub(crate) fn build_sbix_strike_with_offsets(
+    num_glyphs: u16,
+    ppem: u16,
+    glyphs: &[Option<SbixRecord>],
 ) -> Vec<u8> {
     assert_eq!(glyphs.len(), num_glyphs as usize);
     // Strike body: header (4) + offsets[num_glyphs+1] (u32 each) + per-glyph payloads.
@@ -89,9 +108,10 @@ pub(crate) fn build_sbix_strike(
     let mut cursor: u32 = 4 + offset_arr_bytes as u32;
     for slot in glyphs {
         offsets.push(cursor);
-        if let Some((tag, payload)) = slot {
+        if let Some((tag, payload, (x, y))) = slot {
             // 4 bytes of origin offset, 4-byte tag, payload bytes.
-            payloads.extend_from_slice(&[0u8; 4]);
+            payloads.extend_from_slice(&x.to_be_bytes());
+            payloads.extend_from_slice(&y.to_be_bytes());
             payloads.extend_from_slice(tag);
             payloads.extend_from_slice(payload);
             cursor += 8 + payload.len() as u32;

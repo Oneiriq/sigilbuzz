@@ -21,6 +21,10 @@ glyphs into pixels on the CPU, for every kind of glyph a modern font can carry.
   (baseline and progressive), and TIFF images are supported.
 - Every entry point takes normalized axis coordinates, so variable fonts work
   throughout.
+- Every entry point has a `_placed` variant that also returns a `Placement`: the offset
+  of the image's top-left pixel from the pen position on the baseline, in pixels with y
+  down. Margins, COLRv1 clip boxes, bitmap bearings, and SVG viewBoxes are all folded
+  in, so a run lines up when each image is drawn at its pen position plus that offset.
 
 It also exposes the pieces it is built from: `flatten` and `flatten_grouped` turn
 curves into line segments (the grouped form is what MSDF generators need), and
@@ -37,6 +41,10 @@ let face = Face::parse_bytes(blob.as_bytes(), 0).unwrap();
 let rast = Rasterizer::new();
 let pix = rast.rasterize_glyph(&face, 42, 48.0, &[]).unwrap();
 // pix.data is a Vec<u8> of pix.width * pix.height alpha values.
+
+// Where to draw it: the top-left pixel for a pen at (100, 64), y down.
+let (pix, at) = rast.rasterize_glyph_placed(&face, 42, 48.0, &[]).unwrap();
+let (x, y) = at.top_left(100, 64);
 ```
 
 ## Dependencies

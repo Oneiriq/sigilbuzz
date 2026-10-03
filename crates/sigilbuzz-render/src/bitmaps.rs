@@ -57,12 +57,13 @@
 
 use alloc::vec::Vec;
 
-use sigilbuzz::tables::sbix::{TAG_DUPE, TAG_JP2, TAG_JPG, TAG_PNG, TAG_TIFF};
+use sigilbuzz::tables::sbix::{SbixGlyph, TAG_DUPE, TAG_JP2, TAG_JPG, TAG_PNG, TAG_TIFF};
+use sigilbuzz::tables::{EbdtMetrics, GlyphBitmapMetrics};
 use sigilbuzz::{Face, GlyphBitmapEntry};
 
 use crate::error::RenderError;
 use crate::jpeg_decode::decode_jpeg;
-use crate::pixmap::ColorPixmap;
+use crate::pixmap::{ColorPixmap, Placement};
 use crate::rasterizer::Rasterizer;
 use crate::tiff_decode::decode_tiff;
 
@@ -139,23 +140,100 @@ const EBDT_COMPOSITE_MAX_COMPONENTS: u32 = 1024;
 ///   `EBDT_COMPOSITE_MAX_DEPTH`, or `EBDT_COMPOSITE_MAX_COMPONENTS`.
 /// - `Err(RenderError::BadPng(...))`: PNG payload failed to decode.
 ///
+/// [`rasterize_bitmap_glyph_placed`] returns the same pixmap together
+/// with its offset from the glyph origin.
+///
 /// # Errors
 /// Surfaces all of the above plus [`RenderError::BadSize`] for a
 /// non-finite or non-positive `size_pt`, and [`RenderError::Parse`]
 /// for any underlying sigilbuzz parser failure pulling tables.
 pub fn rasterize_bitmap_glyph(
+    rasterizer: &Rasterizer,
+    face: &Face<'_>,
+    gid: u16,
+    size_pt: f32,
+    coords: &[f32],
+) -> Result<ColorPixmap, RenderError> {
+    rasterize_bitmap_glyph_placed(rasterizer, face, gid, size_pt, coords).map(|(pixmap, _)| pixmap)
+}
+
+/// Rasterizes an embedded bitmap glyph like [`rasterize_bitmap_glyph`]
+/// and also returns where the pixmap sits relative to the glyph origin
+/// (see [`Placement`]).
+///
+/// The offset comes from the strike that supplied the bitmap:
+///
+/// - CBDT and EBDT: the horizontal metrics, so `left` is the bearing
+///   X and `top` is minus the bearing Y.
+/// - sbix: the origin offset, which places the image's bottom-left
+///   corner, so `left` is the X offset and `top` is minus the Y offset
+///   minus the image height. A `'dupe'` glyph takes the offset of the
+///   glyph it aliases, as in HarfBuzz.
+///
+/// When the bitmap is resampled to `size_pt`, the offset scales with it
+/// by `size_pt / strike_ppem` and rounds to the nearest pixel.
+///
+/// ```
+/// use sigilbuzz::Face;
+/// use sigilbuzz_render::{rasterize_bitmap_glyph_placed, Rasterizer};
+///
+/// // One 32 ppem sbix strike; gid 1 sits on the glyph origin.
+/// let data = include_bytes!("../../../tests/fixtures/sbix_synthetic.ttf");
+/// let face = Face::parse_bytes(data, 0).unwrap();
+/// let (pix, at) = rasterize_bitmap_glyph_placed(&Rasterizer::new(), &face, 1, 32.0, &[]).unwrap();
+/// // Its bottom edge rests on the baseline.
+/// assert_eq!(at.left, 0);
+/// assert_eq!(at.top + pix.height as i32, 0);
+/// ```
+///
+/// # Errors
+/// The same as [`rasterize_bitmap_glyph`].
+pub fn rasterize_bitmap_glyph_placed(
     _rasterizer: &Rasterizer,
     face: &Face<'_>,
     gid: u16,
     size_pt: f32,
     _coords: &[f32],
-) -> Result<ColorPixmap, RenderError> {
+) -> Result<(ColorPixmap, Placement), RenderError> {
     let mut composite = CompositeState {
         chain: Vec::new(),
         depth: 0,
         components_left: EBDT_COMPOSITE_MAX_COMPONENTS,
     };
     rasterize_bitmap_inner(face, gid, size_pt, 0, &mut composite)
+}
+
+/// Top-left corner of a CBDT image relative to the glyph origin, in
+/// strike pixels, y down. The bearings measure x to the right and y up
+/// to the image's top edge.
+fn cbdt_origin(metrics: GlyphBitmapMetrics) -> (f32, f32) {
+    let (x, y) = match metrics {
+        GlyphBitmapMetrics::Small(m) => (m.bearing_x, m.bearing_y),
+        GlyphBitmapMetrics::Big(m) => (m.hori_bearing_x, m.hori_bearing_y),
+    };
+    (f32::from(x), -f32::from(y))
+}
+
+/// [`cbdt_origin`] for an EBDT image.
+fn ebdt_origin(metrics: EbdtMetrics) -> (f32, f32) {
+    let (x, y) = match metrics {
+        EbdtMetrics::Small(m) => (m.bearing_x, m.bearing_y),
+        EbdtMetrics::Big(m) => (m.hori_bearing_x, m.hori_bearing_y),
+    };
+    (f32::from(x), -f32::from(y))
+}
+
+/// A decoded sbix image with its strike ppem and its top-left corner
+/// relative to the glyph origin, in strike pixels, y down. The sbix
+/// origin offset places the image's bottom-left corner, y up.
+fn sbix_image(
+    decoded: ColorPixmap,
+    ppem: u16,
+    glyph: &SbixGlyph<'_>,
+) -> (ColorPixmap, f32, (f32, f32)) {
+    let left = f32::from(glyph.origin_offset_x);
+    let top = -(f32::from(glyph.origin_offset_y) + decoded.height as f32);
+    (decoded, f32::from(ppem), (left, top))
 }
 
 /// EBDT composite recursion bookkeeping, threaded through
@@ -181,7 +259,7 @@ fn rasterize_bitmap_inner(
     size_pt: f32,
     dupe_depth: u8,
     composite: &mut CompositeState,
-) -> Result<ColorPixmap, RenderError> {
+) -> Result<(ColorPixmap, Placement), RenderError> {
     if !size_pt.is_finite() || size_pt <= 0.0 {
         return Err(RenderError::BadSize(size_pt));
     }
@@ -195,13 +273,19 @@ fn rasterize_bitmap_inner(
         .map_err(|_| RenderError::Parse("glyph_bitmap"))?
         .ok_or(RenderError::NoBitmap(gid))?;
 
-    let (decoded, strike_ppem) = match entry {
+    // `origin` is the image's top-left corner relative to the glyph
+    // origin, in strike pixels, y down.
+    let (decoded, strike_ppem, origin) = match entry {
         GlyphBitmapEntry::Cbdt { ppem_y, bitmap, .. } => match bitmap.image_format {
-            17..=19 => (decode_png(bitmap.data)?, f32::from(ppem_y)),
+            17..=19 => (
+                decode_png(bitmap.data)?,
+                f32::from(ppem_y),
+                cbdt_origin(bitmap.metrics),
+            ),
             _ => return Err(RenderError::UnsupportedBitmap),
         },
         GlyphBitmapEntry::Sbix { ppem, glyph, .. } => match glyph.graphic_type {
-            TAG_PNG => (decode_png(glyph.data)?, f32::from(ppem)),
+            TAG_PNG => sbix_image(decode_png(glyph.data)?, ppem, &glyph),
             TAG_DUPE => {
                 if dupe_depth >= SBIX_DUPE_MAX_DEPTH {
                     return Err(RenderError::UnsupportedBitmap);
@@ -225,13 +309,13 @@ fn rasterize_bitmap_inner(
             // (the slice that real-world font sbix payloads land in).
             // Arithmetic coding, 16-bit precision, restart markers,
             // and AC refinement scans surface as `BadJpeg`.
-            TAG_JPG => (decode_jpeg(glyph.data)?, f32::from(ppem)),
+            TAG_JPG => sbix_image(decode_jpeg(glyph.data)?, ppem, &glyph),
             // TIFF: hand-rolled baseline decoder. Supports 8-bit RGB
             // / RGBA, single IFD, strip-organized, uncompressed or
             // PackBits (compression 1 / 32773). LZW / CCITT / JPEG-in-
             // TIFF / tiled / planar / multi-IFD surface `BadTiff` or
             // `UnsupportedBitmap`.
-            TAG_TIFF => (decode_tiff(glyph.data)?, f32::from(ppem)),
+            TAG_TIFF => sbix_image(decode_tiff(glyph.data)?, ppem, &glyph),
             // JPEG-2000: still each its own ~700-line decoder and
             // even rarer than JPEG in real fonts. Surface cleanly so
             // callers can fall back to outlines.
@@ -241,17 +325,19 @@ fn rasterize_bitmap_inner(
             _ => return Err(RenderError::UnsupportedBitmap),
         },
         GlyphBitmapEntry::Ebdt { ppem_y, bitmap, .. } => {
-            if bitmap.is_composite() {
-                let pix = decode_ebdt_composite(face, gid, &bitmap, ppem_y, composite)?;
-                (pix, f32::from(ppem_y))
+            let pix = if bitmap.is_composite() {
+                decode_ebdt_composite(face, gid, &bitmap, ppem_y, composite)?
             } else {
-                (decode_ebdt_mono(&bitmap)?, f32::from(ppem_y))
-            }
+                decode_ebdt_mono(&bitmap)?
+            };
+            (pix, f32::from(ppem_y), ebdt_origin(bitmap.metrics))
         }
     };
 
     if !needs_rescale(&decoded, strike_ppem, size_pt) {
-        return Ok(decoded);
+        // Strike metrics are whole pixels, so the casts are exact.
+        let at = Placement::new(origin.0 as i32, origin.1 as i32);
+        return Ok((decoded, at));
     }
     let scale = size_pt / strike_ppem;
     // Cap rescale target dimensions before the destination pixmap
@@ -271,7 +357,12 @@ fn rasterize_bitmap_inner(
     }
     let dst_w = (dst_w_f as u32).max(1);
     let dst_h = (dst_h_f as u32).max(1);
-    Ok(rescale_bilinear(&decoded, dst_w, dst_h))
+    // The offset scales with the image and rounds to whole pixels.
+    let at = Placement::new(
+        (origin.0 * scale).round() as i32,
+        (origin.1 * scale).round() as i32,
+    );
+    Ok((rescale_bilinear(&decoded, dst_w, dst_h), at))
 }
 
 /// Maximum pixel dimension for a rescaled bitmap embed. Matches the

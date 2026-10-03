@@ -8,7 +8,7 @@ use sigilbuzz::tables::PathOp;
 use sigilbuzz::Face;
 
 use crate::affine::Affine;
-use crate::flatten::flatten_open;
+use crate::flatten::flatten;
 
 use super::clip_mask::{resolve_clip_shape, resolve_mask_shape};
 use super::document::{doc_full, push_fill, visit_cost, Defs, ElemCtx};
@@ -239,7 +239,7 @@ pub(super) struct PolyPoint {
 /// The path is walked as drawn: a subpath without `Close` stays open,
 /// so an open reference path gets no return leg added to its length.
 pub(super) fn build_arc_length_polyline(ops: &[PathOp]) -> Vec<PolyPoint> {
-    let segs = flatten_open(
+    let segs = flatten(
         ops.iter().copied(),
         &Affine::identity(),
         DEFAULT_TOLERANCE_LOCAL,

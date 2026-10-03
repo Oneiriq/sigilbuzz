@@ -112,6 +112,90 @@ impl ColorPixmap {
     }
 }
 
+/// Where a rasterized glyph image sits relative to the glyph origin.
+///
+/// The `*_placed` methods of [`crate::Rasterizer`] return one next to
+/// every image they draw. Offsets are whole pixels in a y-down device
+/// space whose origin is the glyph origin, the pen position on the
+/// baseline:
+///
+/// - `left` runs from the glyph origin to the image's left edge,
+///   positive to the right.
+/// - `top` runs from the baseline to the image's top edge, positive
+///   downward. Ink above the baseline gives a negative `top`.
+///
+/// Pixel `(0, 0)` of the image covers the device pixel whose top-left
+/// corner is `(pen_x + left, baseline_y + top)`. To draw a run, round
+/// every pen position to whole pixels and copy each glyph's image to
+/// [`Placement::top_left`] of its pen position. The margins and clip
+/// boxes the rasterizer adds are already part of the offset, so an
+/// outline lands where its design coordinates say.
+///
+/// `top` has the opposite sign of FreeType's `bitmap_top`, which
+/// measures the same distance upward.
+///
+/// ```
+/// use sigilbuzz::Face;
+/// use sigilbuzz_render::Rasterizer;
+///
+/// let data = include_bytes!("../../../tests/fixtures/opensans_regular.ttf");
+/// let face = Face::parse_bytes(data, 0).unwrap();
+/// let gid = face.cmap().unwrap().glyph_id('H').unwrap();
+/// let (pix, at) = Rasterizer::new()
+///     .rasterize_glyph_placed(&face, gid, 32.0, &[])
+///     .unwrap();
+///
+/// // Draw the glyph with its pen position at x = 10 on a baseline at
+/// // y = 40: copy `pix` with its top-left pixel at (x, y).
+/// let (x, y) = at.top_left(10, 40);
+/// // 'H' stands on the baseline, so its image starts above it and
+/// // reaches down to it.
+/// assert!(y < 40 && y + pix.height as i32 >= 40);
+/// assert!(x >= 10 - 1, "the left side bearing is not negative");
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Placement {
+    /// Pixels from the glyph origin to the image's left edge, positive
+    /// to the right.
+    pub left: i32,
+    /// Pixels from the baseline to the image's top edge, positive
+    /// downward.
+    pub top: i32,
+}
+
+impl Placement {
+    /// A placement with the given offsets.
+    ///
+    /// ```
+    /// use sigilbuzz_render::Placement;
+    ///
+    /// let at = Placement::new(2, -10);
+    /// assert_eq!((at.left, at.top), (2, -10));
+    /// ```
+    #[must_use]
+    pub const fn new(left: i32, top: i32) -> Self {
+        Self { left, top }
+    }
+
+    /// Device position of the image's top-left pixel for a glyph whose
+    /// origin, rounded to whole pixels, is at `(pen_x, baseline_y)` in
+    /// a y-down device space. Saturates instead of overflowing.
+    ///
+    /// ```
+    /// use sigilbuzz_render::Placement;
+    ///
+    /// let at = Placement::new(-1, -24);
+    /// assert_eq!(at.top_left(100, 50), (99, 26));
+    /// ```
+    #[must_use]
+    pub const fn top_left(self, pen_x: i32, baseline_y: i32) -> (i32, i32) {
+        (
+            pen_x.saturating_add(self.left),
+            baseline_y.saturating_add(self.top),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -154,7 +154,9 @@ pub(super) fn decode_ebdt_composite(
                     ));
                 }
             }
-            let comp_pix =
+            // Components sit at the record's offsets from the composite's
+            // top-left corner, so their own placement does not apply.
+            let (comp_pix, _) =
                 rasterize_bitmap_inner(face, comp.glyph_id, parent_ppem_size, 0, composite)?;
             blit_source_over(
                 &mut canvas,

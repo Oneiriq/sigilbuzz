@@ -5,10 +5,11 @@
 //!
 //! 1. For every output row, rasterize `OVERSAMPLE` sub-rows at
 //!    integer-aligned y positions inside the pixel.
-//! 2. For each sub-row, walk the edge list and find every
-//!    intersection of the edge with the sub-row's center line. Each
-//!    intersection carries a `+1` or `-1` winding contribution from
-//!    the sign of the edge's `dy`.
+//! 2. For each sub-row, walk the edges whose y-range reaches the row
+//!    (an active list kept in input order as the scan moves down) and
+//!    find every intersection of the edge with the sub-row's center
+//!    line. Each intersection carries a `+1` or `-1` winding
+//!    contribution from the sign of the edge's `dy`.
 //! 3. Sort the intersections by x. Walk left to right keeping a
 //!    running winding count; while it's non-zero, the row is "inside".
 //! 4. A pixel's coverage in this sub-row equals how much of `[x, x+1]`
@@ -211,48 +212,60 @@ pub(crate) fn rasterize_in(segments: &[Segment], window: Option<Window>) -> Rend
         };
     }
 
-    // Translate every segment into local pixel-space (0..width, 0..height).
-    let local: Vec<Segment> = segments
-        .iter()
-        .map(|s| Segment {
-            x0: s.x0 - ox as f32,
-            y0: s.y0 - oy as f32,
-            x1: s.x1 - ox as f32,
-            y1: s.y1 - oy as f32,
-        })
-        .collect();
+    // Translate every segment into local pixel-space (0..width,
+    // 0..height) and keep the ones that can cross a sub-row, in input
+    // order, with the rows they can reach.
+    let edges = edges_in_rows(segments, ox, oy, row_lo, row_hi);
+
+    // Edge indices by first row. The sort is stable, so edges that start
+    // on the same row stay in input order.
+    let mut by_first_row: Vec<u32> = (0..edges.len() as u32).collect();
+    by_first_row.sort_by_key(|&i| edges.get(i as usize).map_or(0, |e| e.first_row));
+    let mut next_edge = 0;
+    // Edges whose rows include the current one, in input order, so the
+    // crossings of every sub-row reach the sort in the order a scan of
+    // the whole list would push them.
+    let mut active: Vec<u32> = Vec::new();
 
     // Reusable scratch buffers, one per scanline pass.
-    let mut crossings: Vec<(f32, i32)> = Vec::with_capacity(local.len());
+    let mut crossings: Vec<(f32, i32)> = Vec::with_capacity(edges.len());
     // Per-row coverage accumulator for the stored columns: f32
     // `0..=OVERSAMPLE` summed sub-row contribution per pixel. We
     // convert to u8 at the end.
     let mut row_cov: Vec<f32> = vec![0.0; out_w as usize];
 
-    for py in row_lo..row_hi {
+    let out_rows = pixmap.data.chunks_exact_mut(out_w as usize);
+    for (py, out_row) in (row_lo..row_hi).zip(out_rows) {
+        active.retain(|&i| edges.get(i as usize).is_some_and(|e| e.end_row > py));
+        let before = active.len();
+        while let Some(&i) = by_first_row.get(next_edge) {
+            if edges.get(i as usize).map_or(true, |e| e.first_row > py) {
+                break;
+            }
+            active.push(i);
+            next_edge += 1;
+        }
+        if active.len() != before {
+            active.sort_unstable();
+        }
+        if active.is_empty() {
+            continue;
+        }
+
         row_cov.fill(0.0);
         for sub in 0..OVERSAMPLE {
             let y = py as f32 + (sub as f32 + 0.5) / OVERSAMPLE as f32;
             crossings.clear();
-            for s in &local {
-                let dy = s.y1 - s.y0;
-                if dy.abs() < EPS {
-                    continue;
-                }
+            for e in active.iter().filter_map(|&i| edges.get(i as usize)) {
                 // Half-open interval test in y avoids double-counting
                 // shared vertices: an edge belongs to its lower y but
-                // not its upper y. Sign of dy gives winding direction.
-                let (lo, hi, sign) = if dy > 0.0 {
-                    (s.y0, s.y1, 1_i32)
-                } else {
-                    (s.y1, s.y0, -1_i32)
-                };
-                if y < lo || y >= hi {
+                // not its upper y.
+                if y < e.lo || y >= e.hi {
                     continue;
                 }
-                let t = (y - s.y0) / dy;
-                let x = s.x0 + t * (s.x1 - s.x0);
-                crossings.push((x, sign));
+                let t = (y - e.y0) / e.dy;
+                let x = e.x0 + t * e.dx;
+                crossings.push((x, e.sign));
             }
             if crossings.is_empty() {
                 continue;
@@ -278,12 +291,9 @@ pub(crate) fn rasterize_in(segments: &[Segment], window: Option<Window>) -> Rend
         }
         // Convert accumulator to alpha (255 / OVERSAMPLE per sub-row).
         let scale = 255.0 / OVERSAMPLE as f32;
-        for (px, &c) in row_cov.iter().enumerate() {
+        for (dst, &c) in out_row.iter_mut().zip(&row_cov) {
             if c > 0.0 {
-                let a = (c * scale).round().clamp(0.0, 255.0) as u8;
-                if a > 0 {
-                    pixmap.set(px as u32, py - row_lo, a);
-                }
+                *dst = round_unit(c * scale).clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -292,6 +302,91 @@ pub(crate) fn rasterize_in(segments: &[Segment], window: Option<Window>) -> Rend
         pixmap,
         origin_x,
         origin_y,
+    }
+}
+
+/// One segment in local pixel space, ready for the sub-row scan.
+struct Edge {
+    /// Start point.
+    x0: f32,
+    y0: f32,
+    /// `x1 - x0`.
+    dx: f32,
+    /// `y1 - y0`.
+    dy: f32,
+    /// The edge covers sub-rows `y` with `lo <= y < hi`.
+    lo: f32,
+    hi: f32,
+    /// Winding contribution: the sign of `dy`.
+    sign: i32,
+    /// Rows `first_row..end_row` hold every sub-row the edge can cross.
+    first_row: u32,
+    end_row: u32,
+}
+
+/// Moves `segments` into the local pixel space whose origin is
+/// `(ox, oy)` and returns, in input order, every one that can cross a
+/// sub-row of rows `row_lo..row_hi`.
+///
+/// The arithmetic matches a per-sub-row scan of the whole segment list
+/// operation for operation: a horizontal segment (`|dy| < EPS`) never
+/// crosses, and the row range only narrows where the scan's own
+/// half-open test can pass. A segment whose `lo` or `hi` is not finite
+/// keeps every row, so the scan's test decides as before.
+fn edges_in_rows(segments: &[Segment], ox: i32, oy: i32, row_lo: u32, row_hi: u32) -> Vec<Edge> {
+    let (fx, fy) = (ox as f32, oy as f32);
+    let clamp_row = |v: f32| (v as i64).clamp(i64::from(row_lo), i64::from(row_hi)) as u32;
+    let mut edges = Vec::with_capacity(segments.len());
+    for s in segments {
+        let (x0, y0, x1, y1) = (s.x0 - fx, s.y0 - fy, s.x1 - fx, s.y1 - fy);
+        let dy = y1 - y0;
+        if dy.abs() < EPS {
+            continue;
+        }
+        let (lo, hi, sign) = if dy > 0.0 {
+            (y0, y1, 1_i32)
+        } else {
+            (y1, y0, -1_i32)
+        };
+        // A sub-row `y` of row `py` lies in `[py, py + 1)`, so
+        // `lo <= y < hi` needs `floor(lo) <= py < ceil(hi)`.
+        let (first_row, end_row) = if lo.is_finite() && hi.is_finite() {
+            (clamp_row(lo.floor()), clamp_row(hi.ceil()))
+        } else {
+            (row_lo, row_hi)
+        };
+        if first_row >= end_row {
+            continue;
+        }
+        edges.push(Edge {
+            x0,
+            y0,
+            dx: x1 - x0,
+            dy,
+            lo,
+            hi,
+            sign,
+            first_row,
+            end_row,
+        });
+    }
+    edges
+}
+
+/// `v.round()` for `v` in `[0, 2^23)`, without the library call that
+/// `f32::round` compiles to on x86-64 and wasm32, which have no
+/// instruction for rounding halves away from zero. In that range the
+/// truncation and the subtraction are exact, so the result is exactly
+/// `v.round()`. Above it both results are at least `2^23`, and NaN maps
+/// to 0, so after a clamp to `[0, 255]` and a cast to `u8` the two
+/// agree for every non-negative or NaN input.
+#[inline]
+pub(crate) fn round_unit(v: f32) -> f32 {
+    let t = v as i32 as f32;
+    if v - t >= 0.5 {
+        t + 1.0
+    } else {
+        t
     }
 }
 
@@ -311,16 +406,57 @@ fn accumulate(row: &mut [f32], x0: f32, x1: f32, width: u32, col_lo: u32) {
     if hi <= lo {
         return;
     }
-    let i_lo = lo.floor() as i32;
-    let i_hi = (hi.ceil() as i32 - 1).max(i_lo);
+    // `0 <= lo < hi <= width` here, so truncation is `floor` and the
+    // adjusted truncation is `ceil`, exactly and without the library
+    // calls `f32::floor` and `f32::ceil` compile to on x86-64.
+    let i_lo = lo as i32;
+    let hi_int = hi as i32;
+    let hi_ceil = if (hi_int as f32) < hi {
+        hi_int + 1
+    } else {
+        hi_int
+    };
+    let i_hi = (hi_ceil - 1).max(i_lo);
     if i_hi < 0 || i_lo as u32 >= width {
         return;
     }
     let i_lo_u = (i_lo.max(0) as u32).max(col_lo);
     let i_hi_u = (i_hi as u32).min(width - 1);
-    for px in i_lo_u..=i_hi_u {
+    // Stored columns touched: `first..=last`.
+    let Some(stored_last) = (row.len() as u32).checked_sub(1) else {
+        return;
+    };
+    let (first, last) = (i_lo_u, i_hi_u.min(col_lo.saturating_add(stored_last)));
+    if first > last {
+        return;
+    }
+    // Here `0 <= lo < hi <= width`, so `0 <= i_lo <= i_hi`. A column
+    // strictly between `i_lo` and `i_hi` lies inside `[lo, hi]`, and
+    // the general update below adds exactly `(px + 1) - px = 1.0` to
+    // it (every column index is far below 2^24, so both ends are
+    // exact). Adding 1.0 directly gives the same bits.
+    let (edge_lo, edge_hi) = (i_lo.max(0) as u32, i_hi.max(0) as u32);
+    let inner = first.max(edge_lo + 1)..=last.min(edge_hi.saturating_sub(1));
+    if !inner.is_empty() {
+        let cells = (inner.start() - col_lo) as usize..=(inner.end() - col_lo) as usize;
+        if let Some(cells) = row.get_mut(cells) {
+            for c in cells {
+                *c += 1.0;
+            }
+        }
+    }
+    // The end columns: fractional coverage.
+    let ends = if edge_hi == edge_lo {
+        [Some(edge_lo), None]
+    } else {
+        [Some(edge_lo), Some(edge_hi)]
+    };
+    for px in ends.into_iter().flatten() {
+        if px < first || px > last {
+            continue;
+        }
         let Some(cov) = row.get_mut((px - col_lo) as usize) else {
-            break;
+            continue;
         };
         let cell_lo = px as f32;
         let cell_hi = cell_lo + 1.0;
@@ -630,5 +766,220 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The scanline as first written: every sub-row scans the whole
+    /// segment list, and every covered column takes the general
+    /// fractional update. [`rasterize_in`] must match it bit for bit.
+    fn reference_rasterize_in(segments: &[Segment], window: Option<Window>) -> Render {
+        let Some(RasterBounds {
+            origin_x: ox,
+            origin_y: oy,
+            width,
+            height,
+        }) = raster_bounds(segments)
+        else {
+            return empty_render();
+        };
+        let (col_lo, col_hi, row_lo, row_hi) = match window {
+            None => (0, width, 0, height),
+            Some(w) => {
+                let clamp_x =
+                    |v: i32| (i64::from(v) - i64::from(ox)).clamp(0, i64::from(width)) as u32;
+                let clamp_y =
+                    |v: i32| (i64::from(v) - i64::from(oy)).clamp(0, i64::from(height)) as u32;
+                let (c0, c1) = (clamp_x(w.x0), clamp_x(w.x1));
+                let (r0, r1) = (clamp_y(w.y0), clamp_y(w.y1));
+                (c0, c1.max(c0), r0, r1.max(r0))
+            }
+        };
+        let (out_w, out_h) = (col_hi - col_lo, row_hi - row_lo);
+        if out_w > MAX_RASTER_DIM || out_h > MAX_RASTER_DIM {
+            return empty_render();
+        }
+        let mut pixmap = Pixmap::new(out_w, out_h);
+        let local: Vec<Segment> = segments
+            .iter()
+            .map(|s| Segment {
+                x0: s.x0 - ox as f32,
+                y0: s.y0 - oy as f32,
+                x1: s.x1 - ox as f32,
+                y1: s.y1 - oy as f32,
+            })
+            .collect();
+        let mut row_cov: Vec<f32> = vec![0.0; out_w as usize];
+        for py in row_lo..row_hi {
+            row_cov.fill(0.0);
+            for sub in 0..OVERSAMPLE {
+                let y = py as f32 + (sub as f32 + 0.5) / OVERSAMPLE as f32;
+                let mut crossings: Vec<(f32, i32)> = Vec::new();
+                for s in &local {
+                    let dy = s.y1 - s.y0;
+                    if dy.abs() < EPS {
+                        continue;
+                    }
+                    let (lo, hi, sign) = if dy > 0.0 {
+                        (s.y0, s.y1, 1_i32)
+                    } else {
+                        (s.y1, s.y0, -1_i32)
+                    };
+                    if y < lo || y >= hi {
+                        continue;
+                    }
+                    let t = (y - s.y0) / dy;
+                    crossings.push((s.x0 + t * (s.x1 - s.x0), sign));
+                }
+                crossings
+                    .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+                let (mut winding, mut last_x, mut inside) = (0_i32, 0.0_f32, false);
+                for &(x, sign) in &crossings {
+                    if inside {
+                        let (x0, x1) = (last_x.max(0.0), x.min(width as f32));
+                        if x1 > x0 {
+                            reference_accumulate(&mut row_cov, x0, x1, width, col_lo);
+                        }
+                    }
+                    winding += sign;
+                    inside = winding != 0;
+                    last_x = x;
+                }
+            }
+            for (px, &c) in row_cov.iter().enumerate() {
+                if c > 0.0 {
+                    let a = (c * (255.0 / OVERSAMPLE as f32)).round().clamp(0.0, 255.0) as u8;
+                    if a > 0 {
+                        pixmap.set(px as u32, py - row_lo, a);
+                    }
+                }
+            }
+        }
+        Render {
+            pixmap,
+            origin_x: ox.saturating_add(col_lo as i32),
+            origin_y: oy.saturating_add(row_lo as i32),
+        }
+    }
+
+    fn reference_accumulate(row: &mut [f32], x0: f32, x1: f32, width: u32, col_lo: u32) {
+        if x1 <= x0 {
+            return;
+        }
+        let (lo, hi) = (x0.max(0.0), x1.min(width as f32));
+        if hi <= lo {
+            return;
+        }
+        let i_lo = lo.floor() as i32;
+        let i_hi = (hi.ceil() as i32 - 1).max(i_lo);
+        if i_hi < 0 || i_lo as u32 >= width {
+            return;
+        }
+        let i_lo_u = (i_lo.max(0) as u32).max(col_lo);
+        let i_hi_u = (i_hi as u32).min(width - 1);
+        for px in i_lo_u..=i_hi_u {
+            let Some(cov) = row.get_mut((px - col_lo) as usize) else {
+                break;
+            };
+            let (cell_lo, cell_hi) = (px as f32, px as f32 + 1.0);
+            let (a, b) = (lo.max(cell_lo), hi.min(cell_hi));
+            if b > a {
+                *cov += b - a;
+            }
+        }
+    }
+
+    #[test]
+    fn scanline_matches_the_reference_bit_for_bit() {
+        let mut state = 0x2545_F491_u32;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        for case in 0..250 {
+            // Random closed polygons with fractional, repeated, and
+            // horizontal edges, a few hundred units across.
+            let mut pts: Vec<(f32, f32)> = Vec::new();
+            for _ in 0..(3 + next() % 12) {
+                let x = (next() % 30_000) as f32 / 97.0 - 40.0;
+                let y = match next() % 4 {
+                    // Repeat the previous y: a horizontal edge.
+                    0 => pts.last().map_or(1.5, |p| p.1),
+                    _ => (next() % 30_000) as f32 / 89.0 - 60.0,
+                };
+                pts.push((x, y));
+            }
+            let mut segs: Vec<Segment> = (0..pts.len())
+                .map(|i| {
+                    let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                    Segment {
+                        x0: a.0,
+                        y0: a.1,
+                        x1: b.0,
+                        y1: b.1,
+                    }
+                })
+                .collect();
+            // Some cases add a segment with a NaN or infinite end. The
+            // bounds ignore a NaN, so the scan sees it and must treat
+            // it the same way.
+            if case % 5 == 0 {
+                let v = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY][(next() % 3) as usize];
+                let mut s = segs[0];
+                match next() % 4 {
+                    0 => s.x0 = v,
+                    1 => s.y0 = v,
+                    2 => s.x1 = v,
+                    _ => s.y1 = v,
+                }
+                let at = (next() as usize) % segs.len();
+                segs.insert(at, s);
+            }
+            let windows = [
+                None,
+                Some(Window {
+                    x0: -5,
+                    y0: -70,
+                    x1: 400,
+                    y1: 400,
+                }),
+                Some(Window {
+                    x0: (next() % 200) as i32 - 50,
+                    y0: (next() % 200) as i32 - 80,
+                    x1: (next() % 300) as i32,
+                    y1: (next() % 300) as i32,
+                }),
+            ];
+            for window in windows {
+                let got = rasterize_in(&segs, window);
+                let want = reference_rasterize_in(&segs, window);
+                assert_eq!(got.pixmap, want.pixmap, "case {case}, window {window:?}");
+                assert_eq!(
+                    (got.origin_x, got.origin_y),
+                    (want.origin_x, want.origin_y),
+                    "case {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn round_unit_matches_round_on_its_range() {
+        let mut v = 0.0_f32;
+        while v < 300.0 {
+            assert_eq!(round_unit(v).to_bits(), v.round().to_bits(), "{v}");
+            // Exact halves and their neighbors.
+            let h = v.floor() + 0.5;
+            for w in [
+                h,
+                f32::from_bits(h.to_bits() - 1),
+                f32::from_bits(h.to_bits() + 1),
+            ] {
+                assert_eq!(round_unit(w), w.round(), "{w}");
+            }
+            v += 0.013;
+        }
+        assert_eq!(round_unit(f32::NAN).clamp(0.0, 255.0) as u8, 0);
+        assert_eq!(round_unit(1.0e9).clamp(0.0, 255.0) as u8, 255);
     }
 }
