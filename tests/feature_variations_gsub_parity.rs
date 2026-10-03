@@ -859,3 +859,115 @@ fn the_rvrn_value_picks_the_alternate_and_rvrn_positions_too() {
     assert_eq!(rows(&[rvrn(255)]), [(68, 0, 1239, 0, 0)]);
     assert_eq!(rows(&[rvrn(0)]), [(68, 0, 1139, 0, 0)]);
 }
+
+/// A ScriptList with `DFLT` and `latn`, whose default language systems
+/// both list feature 0 and make feature 1 their required feature.
+fn script_list_with_required_feature_1() -> Vec<u8> {
+    let mut out = vec![0, 2];
+    out.extend_from_slice(b"DFLT\0\x0E");
+    out.extend_from_slice(b"latn\0\x0E");
+    out.extend_from_slice(&[0, 4, 0, 0]);
+    // No lookupOrder, required feature 1, feature 0.
+    out.extend_from_slice(&[0, 0, 0, 1, 0, 1, 0, 0]);
+    out
+}
+
+/// A FeatureList of `(tag, lookups)` features, in order.
+fn feature_list(features: &[(&[u8; 4], &[u16])]) -> Vec<u8> {
+    let mut out = (features.len() as u16).to_be_bytes().to_vec();
+    let mut offset = 2 + 6 * features.len();
+    for (tag, lookups) in features {
+        out.extend_from_slice(*tag);
+        out.extend_from_slice(&(offset as u16).to_be_bytes());
+        offset += 4 + 2 * lookups.len();
+    }
+    for (_, lookups) in features {
+        out.extend_from_slice(&[0, 0]); // featureParamsOffset
+        out.extend_from_slice(&(lookups.len() as u16).to_be_bytes());
+        for l in *lookups {
+            out.extend_from_slice(&l.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// A LookupList of AlternateSubst lookups, one per `(glyph,
+/// alternates)` entry, each with one format 1 subtable.
+fn alternate_lookup_list(lookups: &[(u16, &[u16])]) -> Vec<u8> {
+    let mut out = (lookups.len() as u16).to_be_bytes().to_vec();
+    let bodies: Vec<Vec<u8>> = lookups
+        .iter()
+        .map(|&(glyph, alternates)| {
+            // Lookup header: type 3, no flags, one subtable at 8.
+            let mut body = vec![0, 3, 0, 0, 0, 1, 0, 8];
+            // Subtable: format 1, Coverage after the one AlternateSet,
+            // which sits at 8.
+            let coverage = 8 + 2 + 2 * alternates.len();
+            body.extend_from_slice(&[0, 1]);
+            body.extend_from_slice(&(coverage as u16).to_be_bytes());
+            body.extend_from_slice(&[0, 1, 0, 8]);
+            body.extend_from_slice(&(alternates.len() as u16).to_be_bytes());
+            for a in alternates {
+                body.extend_from_slice(&a.to_be_bytes());
+            }
+            body.extend_from_slice(&[0, 1, 0, 1]);
+            body.extend_from_slice(&glyph.to_be_bytes());
+            body
+        })
+        .collect();
+    let mut offset = 2 + 2 * lookups.len();
+    for body in &bodies {
+        out.extend_from_slice(&(offset as u16).to_be_bytes());
+        offset += body.len();
+    }
+    for body in &bodies {
+        out.extend_from_slice(body);
+    }
+    out
+}
+
+/// Open Sans with a GSUB of three AlternateSubst lookups: 0 from `a`
+/// (glyph 68) to `b`, `c`, `d` (69 to 71), 1 from `e` (72) to `f`, `g`
+/// (73, 74), and 2 from `h` (75) to `i`, `j` (76, 77). Feature 0,
+/// `rvrn`, has lookups 0 and 1, and feature 1, the required feature,
+/// tagged `required_tag`, has lookups 0 and 2.
+fn open_sans_with_required_and_rvrn(required_tag: &[u8; 4]) -> Vec<u8> {
+    let gsub = layout_table(
+        &script_list_with_required_feature_1(),
+        &feature_list(&[(b"rvrn", &[0, 1]), (required_tag, &[0, 2])]),
+        &alternate_lookup_list(&[(68, &[69, 70, 71]), (72, &[73, 74]), (75, &[76, 77])]),
+        None,
+    );
+    with_tables(OPEN_SANS, &[(*b"GSUB", gsub)])
+}
+
+#[test]
+fn a_lookup_rvrn_shares_with_the_required_feature_takes_no_alternate_past_the_first() {
+    // HarfBuzz 14.5.0 runs the required feature with the global mask
+    // and merges it with `rvrn` in stage 0. With `rvrn` above 1, which
+    // takes mask bits of its own, lookup 0, which both have, reads an
+    // alternate index from the OR of the two masks and substitutes
+    // nothing. Lookup 1, `rvrn`'s alone, takes the caller's alternate,
+    // and lookup 2, the required feature's alone, the first. The
+    // required feature's tag is either one no pass applies, or `rvrn`
+    // itself, whose stage is stage 0.
+    let rvrn = |value| Feature {
+        tag: *b"rvrn",
+        value,
+    };
+    for tag in [b"zreq", b"rvrn"] {
+        let font = open_sans_with_required_and_rvrn(tag);
+        let ids = |features: &[Feature]| -> Vec<u32> {
+            font_rows(&font, None, None, "aeh", features)
+                .iter()
+                .map(|r| r.0)
+                .collect()
+        };
+        let tag = core::str::from_utf8(tag).unwrap();
+        assert_eq!(ids(&[]), [69, 73, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(1)]), [69, 73, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(2)]), [68, 74, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(3)]), [68, 72, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(0)]), [69, 72, 76], "{tag}");
+    }
+}

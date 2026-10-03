@@ -16,13 +16,15 @@
 //! enabled, so the required feature still runs, in stage 0.
 //!
 //! sigilbuzz merges a required feature into its tag's lookups in
-//! [`crate::ot::layout_select`], which covers the first case, and a
-//! required `rvrn` with it. Before a segment's first GSUB lookup,
-//! [`apply_stage_zero`] runs `rvrn` unless the caller turned it off,
-//! and the required feature when no pass of the segment's pipeline
-//! will apply its tag, as one stage: each lookup once, in lookup-index
-//! order. A value the caller gives `rvrn` picks the alternate of an
-//! AlternateSubst lookup, as it would for any other feature.
+//! [`crate::ot::layout_select`], which covers the first case. Before a
+//! segment's first GSUB lookup, [`apply_stage_zero`] runs `rvrn` unless
+//! the caller turned it off, and the required feature when no pass of
+//! the segment's pipeline will apply its tag or its tag is `rvrn`, as
+//! one stage: each lookup once, in lookup-index order. A value the
+//! caller gives `rvrn` picks the alternate of an AlternateSubst lookup,
+//! as it would for any other feature, except in a lookup `rvrn` shares
+//! with the required feature. There a value above 1 picks no alternate
+//! at all, as in HarfBuzz (see [`stage_zero_alternate`]).
 //!
 //! HarfBuzz enables `rvrn` in GPOS too, where it joins the one GPOS
 //! stage with the other features (see [`super::gpos`]).
@@ -145,9 +147,9 @@ impl SegmentPlan<'_> {
 
 /// Runs GSUB stage 0 of the segment: `rvrn` unless the caller turned
 /// it off, and the required feature of the language system the segment
-/// selects when its tag is one `plan` never applies. Call before the
-/// segment's first GSUB lookup. The lookups spend `budget`, the one
-/// the whole [`super::shape`] call shares.
+/// selects when its tag is `rvrn` or one `plan` never applies. Call
+/// before the segment's first GSUB lookup. The lookups spend `budget`,
+/// the one the whole [`super::shape`] call shares.
 pub(super) fn apply_stage_zero(
     gsub: &Gsub<'_>,
     glyphs: &mut Vec<Glyph>,
@@ -160,49 +162,73 @@ pub(super) fn apply_stage_zero(
         return;
     }
     let features = gsub.features();
+    // A required `rvrn` runs here too, in the stage of its tag.
     let required = crate::ot::layout_select::required_feature(
         gsub.script_list(),
         &features,
         gsub.language_tags(),
         script_priority,
     )
-    .filter(|&(tag, _)| !plan.applies(tag))
+    .filter(|&(tag, _)| tag == RVRN || !plan.applies(tag))
     .map(|(_, lookups)| lookups)
     .unwrap_or_default();
     let rvrn = if feature_disabled(plan.features, RVRN) {
         Vec::new()
     } else {
-        crate::ot::layout_select::feature_lookup_indices(
+        crate::ot::layout_select::listed_feature_lookups(
             gsub.script_list(),
             &features,
             gsub.language_tags(),
             RVRN,
             script_priority,
         )
-        .unwrap_or_default()
     };
     if required.is_empty() && rvrn.is_empty() {
         return;
     }
-    // The caller's `rvrn` value picks the glyph an AlternateSubst lookup
-    // of `rvrn` substitutes, 1 for the first alternate, as for any
-    // feature. The required feature always picks the first.
     let rvrn_alternate = rvrn_alternate(plan.features);
     let mut stage: Vec<StageLookup> = required
-        .into_iter()
-        .filter(|index| !rvrn.contains(index))
-        .map(|index| (index, 0))
-        .chain(rvrn.iter().map(|&index| (index, rvrn_alternate)))
-        .map(|(index, alternate)| StageLookup {
+        .iter()
+        .chain(rvrn.iter().filter(|index| !required.contains(index)))
+        .map(|&index| StageLookup {
             index,
             flags: FeatureFlags::AUTO,
-            alternate,
+            alternate: stage_zero_alternate(
+                required.contains(&index),
+                rvrn.contains(&index),
+                rvrn_alternate,
+            ),
             masked: false,
         })
         .collect();
     stage.sort_unstable_by_key(|l| l.index);
     apply_gsub_stage(gsub, &stage, glyphs, gdef, None, budget);
 }
+
+/// The alternate an AlternateSubst lookup of stage 0 picks, given
+/// whether the required feature and `rvrn` have it: `rvrn_alternate`
+/// (see [`rvrn_alternate`]) for a lookup of `rvrn` alone, the first
+/// alternate for one of the required feature alone, and none for one
+/// they share while the caller picks an alternate past the first.
+///
+/// HarfBuzz runs the required feature with the global mask bit, and
+/// `rvrn` with it too unless the caller gives `rvrn` a value above 1,
+/// which takes mask bits of its own. A lookup the two share runs once
+/// with both masks OR-ed together, and AlternateSubst reads its
+/// alternate index from that mask from `rvrn`'s lowest bit up, the
+/// global bit included. The index then overruns the alternate set, so
+/// the lookup substitutes nothing.
+fn stage_zero_alternate(in_required: bool, in_rvrn: bool, rvrn_alternate: u16) -> u16 {
+    match (in_required, in_rvrn) {
+        (true, true) if rvrn_alternate > 0 => NO_ALTERNATE,
+        (true, _) => 0,
+        (false, _) => rvrn_alternate,
+    }
+}
+
+/// An alternate index past every AlternateSet, which holds at most
+/// 65,535 glyphs, so the lookup substitutes nothing.
+const NO_ALTERNATE: u16 = u16::MAX;
 
 /// The alternate an AlternateSubst lookup of `rvrn` picks: the last
 /// value the caller gave `rvrn`, less 1, and the first alternate when
@@ -286,6 +312,20 @@ mod tests {
         assert_eq!(rvrn_alternate(&[rvrn(3), liga, rvrn(2)]), 1);
         assert_eq!(rvrn_alternate(&[liga]), 0);
         assert_eq!(rvrn_alternate(&[rvrn(u32::MAX)]), u16::MAX);
+    }
+
+    #[test]
+    fn a_lookup_shared_with_the_required_feature_takes_no_later_alternate() {
+        // `rvrn` alone: the caller's alternate.
+        assert_eq!(stage_zero_alternate(false, true, 0), 0);
+        assert_eq!(stage_zero_alternate(false, true, 2), 2);
+        // The required feature alone: the first alternate.
+        assert_eq!(stage_zero_alternate(true, false, 0), 0);
+        assert_eq!(stage_zero_alternate(true, false, 2), 0);
+        // Both: the first alternate, or none past it.
+        assert_eq!(stage_zero_alternate(true, true, 0), 0);
+        assert_eq!(stage_zero_alternate(true, true, 1), NO_ALTERNATE);
+        assert_eq!(stage_zero_alternate(true, true, u16::MAX), NO_ALTERNATE);
     }
 
     #[test]
