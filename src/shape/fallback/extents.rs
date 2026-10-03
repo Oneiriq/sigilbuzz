@@ -32,10 +32,11 @@ pub(in crate::shape) struct ExtentsTables<'a> {
     glyf: OnceCell<Result<(Loca<'a>, Glyf<'a>)>>,
     /// `gvar`, for the extents of a varied `glyf` glyph.
     gvar: OnceCell<Result<Option<Gvar<'a>>>>,
-    /// `vmtx`, which places the vertical phantom points a varied `glyf`
-    /// glyph's components can be anchored to. One that does not parse
-    /// counts as absent, as HarfBuzz's sanitizer drops it.
-    vmtx: OnceCell<Option<Vmtx<'a>>>,
+    /// The vertical metrics that place the vertical phantom points a
+    /// varied `glyf` glyph's components can be anchored to (see
+    /// [`Face::phantom_vmtx`]). A `vmtx` that does not parse counts as
+    /// absent, as HarfBuzz's sanitizer drops it.
+    vmtx: OnceCell<Result<Vmtx<'a>>>,
     /// `VARC`, whose composites take precedence over `CFF2` and `CFF `.
     varc: OnceCell<Result<Option<Varc<'a>>>>,
     /// The CFF table a glyph's outline comes from, `None` when the font
@@ -148,10 +149,14 @@ impl<'a> ExtentsTables<'a> {
                 .as_ref()
                 .map_err(Clone::clone)?;
             if let Some(gvar) = gvar {
-                let vmtx = self.vmtx.get_or_init(|| face.vmtx().ok().flatten());
+                let vmtx = self
+                    .vmtx
+                    .get_or_init(|| face.phantom_vmtx(face.vmtx().ok().flatten()))
+                    .as_ref()
+                    .map_err(Clone::clone)?;
                 let metrics = PhantomMetrics {
                     hmtx,
-                    vmtx: vmtx.as_ref(),
+                    vmtx: Some(vmtx),
                 };
                 let tables = (glyf, loca, gvar);
                 b = varied_glyph_bounds(tables, gid, coords, &metrics, b.num_contours)?;

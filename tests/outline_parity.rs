@@ -382,6 +382,45 @@ fn phantom_anchor_fixture_outlines_match_harfbuzz() {
         }
     }
 }
+
+#[test]
+fn anchors_to_vertical_phantom_points_without_vmtx_match_harfbuzz() {
+    // The phantom-anchor fixture has no `vmtx`. HarfBuzz then gives
+    // every glyph a top side bearing of zero and a vertical advance of
+    // an em, so the anchored mark's top phantom point (running list
+    // index 9: the square's 4 points, the mark's 3, then its pp1 and
+    // pp2) is (0, yMax) = (0, 50) and its bottom one (index 10) is
+    // (0, 50 - 1000). Rewriting `combo`'s anchor from 5 to 9 and 10
+    // moves the mark's point 0, (500, 0), there. HarfBuzz 14.5.0 draws
+    // the rewritten fonts with these marks.
+    let fixture: &[u8] = include_bytes!("fixtures/phantom_anchor.ttf");
+    let face = Face::parse_bytes(fixture, 0).expect("fixture face");
+    let glyf = face.record(*b"glyf").expect("glyf").offset as usize;
+    let combo = glyf + face.loca().expect("loca").range(3).expect("combo").0 as usize;
+    // The header, the square's flags, glyph id and byte offsets, then
+    // the mark's flags and glyph id: `arg1` and `arg2` follow.
+    let anchor = combo + 10 + 6 + 4;
+    assert_eq!(fixture[anchor..anchor + 2], [5, 0], "fixture layout");
+    for (arg1, (dx, dy)) in [(9u8, (-500.0f32, 50.0f32)), (10, (-500.0, -950.0))] {
+        let mut bytes = fixture.to_vec();
+        bytes[anchor] = arg1;
+        let face = Face::parse_bytes(&bytes, 0).expect("patched face");
+        let outline = face.glyph_outline(3).expect("outline").expect("drew");
+        let mark: Vec<(f32, f32)> = outline.ops()[6..]
+            .iter()
+            .filter_map(|op| match *op {
+                PathOp::MoveTo { x, y } | PathOp::LineTo { x, y } => Some((x, y)),
+                _ => None,
+            })
+            .collect();
+        let want: Vec<(f32, f32)> = [(500.0, 0.0), (550.0, 0.0), (500.0, 50.0), (500.0, 0.0)]
+            .iter()
+            .map(|&(x, y)| (x + dx, y + dy))
+            .collect();
+        assert_eq!(mark, want, "arg1 = {arg1}");
+    }
+}
+
 #[test]
 fn amiri_two_anchor_glyphs_now_match() {
     // The two Amiri glyphs that previously missed parity (gids 379

@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::hb_roundf;
-use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Gvar, Loca, Outline, PathOp};
+use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Gvar, Loca, Outline, PathOp, Vmtx};
 
 impl<'a> Face<'a> {
     /// Parses the `loca` table. Pulls the offset format from `head`
@@ -97,12 +97,26 @@ impl<'a> Face<'a> {
         // counts as absent, as HarfBuzz's sanitizer drops it, so it
         // cannot fail the extents of a horizontal run's glyphs.
         let vmtx = self.vmtx().ok().flatten();
+        let vmtx = self.phantom_vmtx(vmtx)?;
         let metrics = PhantomMetrics {
             hmtx: &hmtx,
-            vmtx: vmtx.as_ref(),
+            vmtx: Some(&vmtx),
         };
         let tables = (&glyf, &loca, &gvar);
         varied_glyph_bounds(tables, glyph_id, coords, &metrics, base.num_contours).map(Some)
+    }
+
+    /// The vertical metrics the phantom points of the glyphs of a walk
+    /// read: `vmtx`, the font's table, or when the font has none
+    /// HarfBuzz's metrics for that case (see [`Vmtx::missing`]), a top
+    /// side bearing of zero and an advance of an em. A component
+    /// anchored to a vertical phantom point then lands where HarfBuzz
+    /// puts it.
+    pub(crate) fn phantom_vmtx(&self, vmtx: Option<Vmtx<'a>>) -> Result<Vmtx<'a>> {
+        match vmtx {
+            Some(vmtx) => Ok(vmtx),
+            None => Ok(Vmtx::missing(self.head()?.units_per_em)),
+        }
     }
 
     /// Parses the `CFF ` (Compact Font Format 1) table.
@@ -235,12 +249,14 @@ impl<'a> Face<'a> {
         // Phantom metrics let composite anchor-mode resolve indices
         // past the contour-point count (lsb / advance-width / tsb /
         // advance-height). hmtx is required by every TrueType font;
-        // vmtx is optional and only horizontal-only fonts skip it.
+        // vmtx is optional, and a font without it gets HarfBuzz's
+        // vertical metrics for one.
         let hmtx = self.hmtx()?;
         let vmtx = self.vmtx()?;
+        let vmtx = self.phantom_vmtx(vmtx)?;
         let metrics = PhantomMetrics {
             hmtx: &hmtx,
-            vmtx: vmtx.as_ref(),
+            vmtx: Some(&vmtx),
         };
 
         // gvar moves simple glyphs' points and composite glyphs'

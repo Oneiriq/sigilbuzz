@@ -97,15 +97,20 @@ pub struct GlyphBounds {
 /// component's points in the running point list of the walk (see the
 /// module docs), and `gvar` moves the phantom points.
 ///
-/// `vmtx` is optional: horizontal-only fonts have no `vmtx` and the
-/// vertical phantoms collapse to `(0, 0)`. Real-world anchor-mode
-/// glyphs in horizontal fonts only ever index pp1 / pp2, so the
-/// fallback is safe.
+/// `vmtx` is optional. With `None` the vertical phantoms are both
+/// `(0, 0)`. HarfBuzz instead gives a font without `vmtx` a top side
+/// bearing of zero and an advance of an em, so pp3 is `(0, yMax)` and
+/// pp4 is `(0, yMax - unitsPerEm)`; [`crate::Face`]'s outline and
+/// bounds methods pass those metrics for such a font, so a component
+/// anchored to a vertical phantom point lands where HarfBuzz puts it.
+/// Real-world anchor-mode glyphs in horizontal fonts only ever index
+/// pp1 / pp2.
 #[derive(Debug, Clone, Copy)]
 pub struct PhantomMetrics<'a> {
     /// Horizontal metrics. Required: every TrueType font has hmtx.
     pub hmtx: &'a Hmtx<'a>,
-    /// Vertical metrics. `None` for horizontal-only fonts.
+    /// Vertical metrics. `None` puts the vertical phantom points at the
+    /// origin.
     pub vmtx: Option<&'a Vmtx<'a>>,
 }
 
@@ -198,7 +203,9 @@ impl FlattenBudget {
 
 /// A glyph's four phantom points, in its own frame, from its header's
 /// `xMin` and `yMax` and its metrics (see [`PhantomMetrics`]); without
-/// `vmtx` the vertical ones are `(0, 0)`.
+/// `vmtx` the vertical ones are `(0, 0)`. The face passes HarfBuzz's
+/// metrics for a font without `vmtx` instead of `None` (see
+/// [`Vmtx::missing`]).
 fn phantom_points_from(
     glyph_id: u16,
     metrics: &PhantomMetrics<'_>,
@@ -332,10 +339,8 @@ impl<'a> Glyf<'a> {
     /// own (untransformed) design-unit frame.
     ///
     /// pp1 / pp2 always read from `hmtx`. pp3 / pp4 read from `vmtx`
-    /// when available; horizontal-only fonts get `(0, 0)` for both,
-    /// which matches every in-the-wild glyph we've checked: anchor
-    /// indices for vertical phantoms only show up in CJK fonts that
-    /// also ship `vmtx`. Glyphs without a `glyf` body take their box
+    /// when `metrics` has it, and are `(0, 0)` otherwise (see
+    /// [`PhantomMetrics`]). Glyphs without a `glyf` body take their box
     /// as `(0, 0)`.
     fn phantom_points(
         &self,
@@ -364,9 +369,9 @@ impl<'a> Glyf<'a> {
     /// mode resolves against, so indices stay consistent across both
     /// callers.
     ///
-    /// `vmtx` is optional: horizontal-only fonts have no `vmtx` and the
-    /// vertical phantoms collapse to `(0, 0)`, same fallback as
-    /// composite anchor-mode resolution.
+    /// `vmtx` is optional: without it the vertical phantoms are `(0, 0)`
+    /// (see [`PhantomMetrics`]), for the glyph and for the components
+    /// anchored to them.
     ///
     /// Returns `Ok(None)` when the glyph id is out of range or has no
     /// outline body. Coordinates are rounded to the nearest `i16`

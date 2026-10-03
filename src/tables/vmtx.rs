@@ -116,10 +116,28 @@ impl<'a> Vmtx<'a> {
             ]))
         } else {
             let off = (glyph - self.number_of_long_ver_metrics) as usize * 2;
-            Some(i16::from_be_bytes([
-                self.trailing_tsbs[off],
-                self.trailing_tsbs[off + 1],
-            ]))
+            // `parse` checks that every glyph has its bearing here. Only
+            // the metrics of a font without `vmtx` ([`Vmtx::missing`])
+            // have none, and their bearings are zero.
+            match self.trailing_tsbs.get(off..off + 2) {
+                Some(&[hi, lo]) => Some(i16::from_be_bytes([hi, lo])),
+                _ => Some(0),
+            }
+        }
+    }
+
+    /// The vertical metrics HarfBuzz reads for a font without `vmtx`:
+    /// every glyph advances `units_per_em` (its vertical default
+    /// advance) and has a top side bearing of zero. The phantom points
+    /// of such a font's glyphs come from these, so its top phantom
+    /// point is at the glyph's `yMax` and its bottom one an em lower.
+    pub(crate) const fn missing(units_per_em: u16) -> Self {
+        Self {
+            long_metrics: &[],
+            trailing_tsbs: &[],
+            number_of_long_ver_metrics: 0,
+            num_glyphs: u16::MAX,
+            last_advance: units_per_em,
         }
     }
 }
@@ -158,6 +176,15 @@ mod tests {
         assert_eq!(vmtx.advance(4), Some(1100));
         assert_eq!(vmtx.tsb(2), Some(10));
         assert_eq!(vmtx.tsb(4), Some(30));
+    }
+
+    #[test]
+    fn missing_metrics_advance_an_em_with_no_bearing() {
+        let vmtx = Vmtx::missing(2048);
+        for glyph in [0, 1, 500, u16::MAX - 1] {
+            assert_eq!(vmtx.advance(glyph), Some(2048), "{glyph}");
+            assert_eq!(vmtx.tsb(glyph), Some(0), "{glyph}");
+        }
     }
 
     #[test]
