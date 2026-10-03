@@ -2,7 +2,9 @@
 //! PNG / rescale smoke tests.
 
 use sigilbuzz::{Blob, Face};
-use sigilbuzz_render::{decode_png, rescale_bilinear, ColorPixmap, Rasterizer, RenderError};
+use sigilbuzz_render::{
+    decode_png, rescale_bilinear, ColorPixmap, Placement, Rasterizer, RenderError,
+};
 
 use crate::fixtures::hex_to_bytes;
 
@@ -135,4 +137,39 @@ fn decode_png_round_trips_with_known_payload() {
     assert_eq!(pix.width, 1);
     assert_eq!(pix.height, 1);
     assert_eq!(pix.get(0, 0), [0, 0, 0, 0]);
+}
+
+#[test]
+fn cbdt_synthetic_placement_follows_the_bearings() {
+    // gid 1's small metrics: bearing (0, 10) at the 32 ppem strike.
+    let blob = Blob::new(CBDT_FONT);
+    let face = Face::parse(&blob, 0).unwrap();
+    let rast = Rasterizer::new();
+    let at = |size: f32| {
+        let (pix, at) = rast
+            .rasterize_bitmap_glyph_placed(&face, 1, size, &[])
+            .unwrap();
+        assert_eq!(
+            pix,
+            rast.rasterize_bitmap_glyph(&face, 1, size, &[]).unwrap()
+        );
+        at
+    };
+    assert_eq!(at(32.0), Placement::new(0, -10));
+    // Scaled with the bitmap: exact at twice the strike, rounded to the
+    // nearest pixel (away from zero on a tie) at 1.25 times.
+    assert_eq!(at(64.0), Placement::new(0, -20));
+    assert_eq!(at(40.0), Placement::new(0, -13));
+}
+
+#[test]
+fn sbix_synthetic_placement_rests_on_the_baseline() {
+    // Zero origin offset: the 1x1 image's bottom edge is the baseline.
+    let blob = Blob::new(SBIX_FONT);
+    let face = Face::parse(&blob, 0).unwrap();
+    let (pix, at) = Rasterizer::new()
+        .rasterize_bitmap_glyph_placed(&face, 1, 32.0, &[])
+        .unwrap();
+    assert_eq!((pix.width, pix.height), (1, 1));
+    assert_eq!(at, Placement::new(0, -1));
 }

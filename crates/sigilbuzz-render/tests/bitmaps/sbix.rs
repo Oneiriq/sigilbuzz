@@ -2,9 +2,11 @@
 //! synthetic fonts.
 
 use sigilbuzz::Face;
-use sigilbuzz_render::{decode_jpeg, Rasterizer, RenderError};
+use sigilbuzz_render::{decode_jpeg, Placement, Rasterizer, RenderError};
 
-use crate::fixtures::{build_sbix_strike, build_sfnt, hex_to_bytes, maxp_05};
+use crate::fixtures::{
+    build_sbix_strike, build_sbix_strike_with_offsets, build_sfnt, hex_to_bytes, maxp_05,
+};
 
 #[test]
 fn sbix_dupe_tag_recurses_to_target_gid() {
@@ -301,4 +303,42 @@ fn sbix_tiff_unknown_compression_returns_unsupported() {
         ),
         "got {err:?}"
     );
+}
+
+#[test]
+fn sbix_placement_follows_the_origin_offset_and_dupe_target() {
+    // gid 1 dupes gid 2 and carries an offset of its own that does not
+    // apply; gid 2 is a 2x3 PNG whose bottom-left corner sits 3 pixels
+    // right of the origin and 2 below the baseline.
+    let png = sigilbuzz_render::encode_png(&sigilbuzz_render::ColorPixmap::new(2, 3));
+    let glyphs = vec![
+        None,
+        Some((*b"dupe", vec![0x00, 0x02], (9, 9))),
+        Some((*b"png ", png, (3, -2))),
+    ];
+    let sbix = build_sbix_strike_with_offsets(3, 16, &glyphs);
+    let font = build_sfnt(vec![(*b"maxp", maxp_05(3)), (*b"sbix", sbix)]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    for gid in [1, 2] {
+        let (pix, at) = rast
+            .rasterize_bitmap_glyph_placed(&face, gid, 16.0, &[])
+            .unwrap();
+        assert_eq!((pix.width, pix.height), (2, 3));
+        // The top edge is 3 - 2 = 1 pixel above the baseline.
+        assert_eq!(at, Placement::new(3, -1), "gid {gid}");
+        assert_eq!(
+            pix,
+            rast.rasterize_bitmap_glyph(&face, gid, 16.0, &[]).unwrap()
+        );
+    }
+    // Resampled to twice the strike, the image and its offset double.
+    let (pix, at) = rast
+        .rasterize_bitmap_glyph_placed(&face, 2, 32.0, &[])
+        .unwrap();
+    assert_eq!((pix.width, pix.height), (4, 6));
+    assert_eq!(at, Placement::new(6, -2));
+    // The free function places the same way.
+    let free = sigilbuzz_render::rasterize_bitmap_glyph_placed(&rast, &face, 2, 32.0, &[]).unwrap();
+    assert_eq!(free, (pix, at));
 }

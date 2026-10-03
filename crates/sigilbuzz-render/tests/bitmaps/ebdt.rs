@@ -463,3 +463,32 @@ fn ebdt_composite_oob_component_glyph_id_surfaces_decode_failed() {
         other => panic!("expected BitmapDecodeFailed, got {other:?}"),
     }
 }
+
+#[test]
+fn ebdt_placement_follows_the_strike_bearings() {
+    // An 8x2 mask whose left edge is 2 pixels left of the origin and
+    // whose top edge is 7 pixels above the baseline.
+    let mut entry = vec![2, 8, (-2_i8) as u8, 7, 8];
+    entry.extend_from_slice(&[0xFF, 0xFF]);
+    let mut eblc = build_eblc_one_glyph(16, entry.len() as u32);
+    // image_data_offset past the EBDT version header, as above.
+    eblc[68..72].copy_from_slice(&4u32.to_be_bytes());
+    let font = build_sfnt(vec![
+        (*b"maxp", maxp_05(2)),
+        (*b"EBLC", eblc),
+        (*b"EBDT", build_ebdt(&entry)),
+    ]);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let rast = Rasterizer::new();
+    let (pix, at) = rast
+        .rasterize_bitmap_glyph_placed(&face, 1, 16.0, &[])
+        .unwrap();
+    assert_eq!((pix.width, pix.height), (8, 2));
+    assert_eq!(at, sigilbuzz_render::Placement::new(-2, -7));
+    // Resampled to twice the strike, the offset doubles with the image.
+    let (pix, at) = rast
+        .rasterize_bitmap_glyph_placed(&face, 1, 32.0, &[])
+        .unwrap();
+    assert_eq!((pix.width, pix.height), (16, 4));
+    assert_eq!(at, sigilbuzz_render::Placement::new(-4, -14));
+}

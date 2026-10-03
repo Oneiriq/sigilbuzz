@@ -18,5 +18,6 @@ mod filters;
 mod fonts;
 mod masks;
 mod paint;
+mod placement;
 mod shapes;
 mod textpath;
