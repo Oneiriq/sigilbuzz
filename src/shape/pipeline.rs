@@ -707,7 +707,6 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
                     vertical: is_vertical,
                     script_priority: seg.script_priority,
                     table: joiner_table,
-                    calt: !(is_vertical && buffer_shaper == Shaper::Hangul),
                     shaper,
                 };
                 run_default_gsub(gsub, &mut seg_glyphs, gdef.as_ref(), &stages, &mut budget);
