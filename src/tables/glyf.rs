@@ -498,6 +498,10 @@ impl<'a> Glyf<'a> {
     /// coords, as HarfBuzz does. With no `gvar`, or coords that are
     /// all zero, the points are the defaults.
     ///
+    /// A `USE_MY_METRICS` component that leads back to a composite
+    /// being walked is skipped where HarfBuzz's cycle detector skips
+    /// it, and the glyph there keeps its own points.
+    ///
     /// Without `HVAR`, HarfBuzz takes a varied glyph's advance from
     /// these points: the x distance from the first to the second,
     /// rounded and at least zero.
@@ -505,7 +509,8 @@ impl<'a> Glyf<'a> {
     /// # Errors
     ///
     /// Returns an error when the glyph's `glyf`, `gvar`, or metrics
-    /// data is malformed, or composite glyphs nest too deep.
+    /// data is malformed, composite glyphs nest too deep, or the walk
+    /// runs over its work budget.
     ///
     /// # Examples
     ///
@@ -588,6 +593,31 @@ impl<'a> Glyf<'a> {
         depth: u8,
         budget: &mut FlattenBudget,
     ) -> Result<[(f32, f32); 4]> {
+        self.phantom_walk(cx, metrics, glyph_id, depth, budget, &mut Vec::new())
+    }
+
+    /// [`Glyf::varied_phantoms`] inside the composites of `path`, which
+    /// holds, for each composite on the way down, the component it is
+    /// visiting.
+    ///
+    /// A component that would close a cycle is skipped, as HarfBuzz's
+    /// decycler (`hb-decycler.hh`) skips it: the composite at `path`
+    /// index `i` compares each component with the one the composite at
+    /// index `i / 2` is visiting, a tortoise that moves at half the
+    /// speed of the walk. A cycle is caught within twice its length,
+    /// and the glyph where it closes keeps its own phantom points.
+    // The walk threads its tables, limits, and path through every
+    // level of the recursion.
+    #[allow(clippy::too_many_arguments)]
+    fn phantom_walk(
+        &self,
+        cx: &FlattenCtx<'_>,
+        metrics: &PhantomMetrics<'_>,
+        glyph_id: u16,
+        depth: u8,
+        budget: &mut FlattenBudget,
+        path: &mut Vec<u16>,
+    ) -> Result<[(f32, f32); 4]> {
         if depth > MAX_COMPOSITE_DEPTH {
             return Err(Error::Malformed {
                 offset: 0,
@@ -623,12 +653,22 @@ impl<'a> Glyf<'a> {
             p.0 += d.0;
             p.1 += d.1;
         }
+        if components.is_empty() {
+            return Ok(pp);
+        }
+        let node = path.len();
+        path.push(glyph_id);
         for c in components
             .iter()
             .filter(|c| c.flags & COMP_USE_MY_METRICS != 0)
         {
-            pp = self.varied_phantoms(cx, metrics, c.glyph_id, depth + 1, budget)?;
+            path[node] = c.glyph_id;
+            if node > 0 && path[node / 2] == c.glyph_id {
+                continue;
+            }
+            pp = self.phantom_walk(cx, metrics, c.glyph_id, depth + 1, budget, path)?;
         }
+        path.truncate(node);
         Ok(pp)
     }
 
