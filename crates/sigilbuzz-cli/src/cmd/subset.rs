@@ -68,8 +68,8 @@ pub struct Args {
     /// keeping them where the closure permits.
     #[arg(long)]
     pub drop_layout: bool,
-    /// Drop variable-font tables (`fvar`/`avar`/`gvar`/`HVAR`/`VVAR`).
-    /// Defaults to keeping them.
+    /// Drop variable-font tables (`fvar`/`avar`/`gvar`/`HVAR`/`VVAR`/
+    /// `VARC`/`MVAR`). Defaults to keeping them.
     #[arg(long)]
     pub drop_variations: bool,
 }
