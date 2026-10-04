@@ -18,6 +18,7 @@ fn open_sans_glyph_points_phantoms_match_hmtx_formula() {
     let blob = Blob::new(OPEN_SANS);
     let face = Face::parse(&blob, 0).unwrap();
     let hmtx = face.hmtx().unwrap();
+    let upem = i16::try_from(face.head().unwrap().units_per_em).unwrap();
 
     // Sample a handful of glyph ids (covering an empty glyph, a
     // small Latin letter, and a few mid-range glyphs) and assert
@@ -48,10 +49,11 @@ fn open_sans_glyph_points_phantoms_match_hmtx_formula() {
                     "pp2.x for gid {gid}: got {pp2:?}, expected x={expected_pp2_x}"
                 );
                 assert_eq!(pp2.1, 0, "pp2.y must be 0");
-                // Open Sans is horizontal-only: no vmtx, so pp3 / pp4
-                // collapse to (0, 0).
-                assert_eq!(pp3, (0, 0), "pp3 collapses without vmtx");
-                assert_eq!(pp4, (0, 0), "pp4 collapses without vmtx");
+                // Open Sans is horizontal-only. Without vmtx, HarfBuzz
+                // puts the top phantom point at the top of the box and
+                // the bottom one an em below it.
+                assert_eq!(pp3, (0, b.y_max), "pp3 at yMax without vmtx");
+                assert_eq!(pp4, (0, b.y_max - upem), "pp4 an em below pp3");
             }
             (None, None) => {
                 // Whitespace glyph: both APIs agree on "no outline".
