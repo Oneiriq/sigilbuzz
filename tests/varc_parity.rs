@@ -9,22 +9,30 @@
 //! RESET_UNSPECIFIED_AXES at the top and one level down, and an axis
 //! index past HarfBuzz's 4096-axis limit.
 //!
-//! `tests/fixtures/varc_parity.expected` holds HarfBuzz 14.5.0's outline
-//! of each glyph at eight locations. `tests/tools/build_varc_morx_parity_fixtures.py`
-//! builds the font and `tests/tools/varc_morx_parity_expected.py` writes
-//! the expected file.
+//! `tests/fixtures/varc_face.ttf` has the same axes and 41 glyphs the
+//! VARC coverage names, for what the face's walk over nested composites
+//! does: reset components two and three composites down and in the
+//! middle of a chain, components that name their own glyph, cycles of
+//! two and three glyphs, a covered glyph without a record, delta sets
+//! that end early or cut a run short, conditions inside nested
+//! composites, one glyph reached many times at the same coords, and a
+//! region without axes, which applies at the default instance too.
+//!
+//! Each `.expected` file holds HarfBuzz 14.5.0's outline of each glyph
+//! at eight locations, which every glyph must match through
+//! `Face::glyph_outline_at_coords`, `GlyphOutlines::outline` and
+//! `GlyphOutlines::draw`. `tests/tools/build_varc_morx_parity_fixtures.py`
+//! and `tests/tools/build_varc_face_fixtures.py` build the fonts, and
+//! `tests/tools/varc_morx_parity_expected.py` and
+//! `tests/tools/varc_face_expected.py` write the expected files.
 
-use sigilbuzz::tables::PathOp;
+use sigilbuzz::tables::{Outline, OutlineSink, PathOp};
 use sigilbuzz::{Blob, Face};
 
 const FONT: &[u8] = include_bytes!("fixtures/varc_parity.ttf");
 const EXPECTED: &str = include_str!("fixtures/varc_parity.expected");
-
-/// The glyph whose RESET_UNSPECIFIED_AXES component sits one composite
-/// down. `Face::glyph_outline_at_coords` hands nested composites the
-/// component's coords as the font's, so it is checked through
-/// `Varc::composite_with_font_coords` instead.
-const NESTED_RESET: &str = "v_outer";
+const FACE_FONT: &[u8] = include_bytes!("fixtures/varc_face.ttf");
+const FACE_EXPECTED: &str = include_str!("fixtures/varc_face.expected");
 
 type Ops = Vec<(char, Vec<f32>)>;
 
@@ -143,6 +151,35 @@ fn flatten(face: &Face<'_>, gid: u16, coords: &[f32], font: &[f32], t: [f32; 6],
     }
 }
 
+/// An [`OutlineSink`] that records what `GlyphOutlines::draw` sends it.
+#[derive(Default)]
+struct Recorder(Outline);
+
+impl OutlineSink for Recorder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.push(PathOp::MoveTo { x, y });
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.push(PathOp::LineTo { x, y });
+    }
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        self.0.push(PathOp::QuadTo { cx, cy, x, y });
+    }
+    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
+        self.0.push(PathOp::CubicTo {
+            c1x,
+            c1y,
+            c2x,
+            c2y,
+            x,
+            y,
+        });
+    }
+    fn close(&mut self) {
+        self.0.push(PathOp::Close);
+    }
+}
+
 #[track_caller]
 fn assert_close(got: &Ops, want: &Ops, what: &str) {
     let kinds = |ops: &Ops| ops.iter().map(|(op, _)| *op).collect::<String>();
@@ -154,12 +191,16 @@ fn assert_close(got: &Ops, want: &Ops, what: &str) {
     }
 }
 
-#[test]
-fn varc_outlines_match_harfbuzz() {
-    let blob = Blob::new(FONT);
+/// Checks every outline of `expected` against what `font` draws through
+/// `Face::glyph_outline_at_coords`, `GlyphOutlines::outline` and
+/// `GlyphOutlines::draw`, and `flatten`'s walk over
+/// `Varc::composite_with_font_coords` when `walk` is set. Returns the
+/// number of outlines checked.
+fn check_against_harfbuzz(font: &[u8], expected: &str, walk: bool) -> usize {
+    let blob = Blob::new(font);
     let face = Face::parse(&blob, 0).unwrap();
     let mut checked = 0;
-    for line in EXPECTED.lines().filter(|l| l.starts_with("outline ")) {
+    for line in expected.lines().filter(|l| l.starts_with("outline ")) {
         let mut fields = line.splitn(5, ' ').skip(1);
         let location = fields.next().unwrap();
         let gid: u16 = fields.next().unwrap().parse().unwrap();
@@ -167,17 +208,51 @@ fn varc_outlines_match_harfbuzz() {
         let want = parse_ops(fields.next().unwrap_or(""));
         let coords = coords_at(&face, location);
         let what = format!("{name} at {location}");
-        let got = if name == NESTED_RESET {
+
+        let outline = face.glyph_outline_at_coords(gid, &coords).unwrap();
+        assert_close(
+            &outline.map_or_else(Vec::new, |o| ops_of(o.ops())),
+            &want,
+            &format!("{what}, Face"),
+        );
+        let outlines = face.glyph_outlines(&coords);
+        let outline = outlines.outline(gid).unwrap();
+        assert_close(
+            &outline.map_or_else(Vec::new, |o| ops_of(o.ops())),
+            &want,
+            &format!("{what}, GlyphOutlines::outline"),
+        );
+        let mut sink = Recorder::default();
+        assert!(outlines.draw(gid, &mut sink).unwrap(), "{what}");
+        assert_close(
+            &ops_of(sink.0.ops()),
+            &want,
+            &format!("{what}, GlyphOutlines::draw"),
+        );
+        if walk {
             let mut ops = Vec::new();
             let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
             flatten(&face, gid, &coords, &coords, identity, &mut ops);
-            ops
-        } else {
-            let outline = face.glyph_outline_at_coords(gid, &coords).unwrap();
-            outline.map_or_else(Vec::new, |o| ops_of(o.ops()))
-        };
-        assert_close(&got, &want, &what);
+            assert_close(&ops, &want, &format!("{what}, composite_with_font_coords"));
+        }
         checked += 1;
     }
-    assert_eq!(checked, 14 * 8);
+    checked
+}
+
+#[test]
+fn varc_outlines_match_harfbuzz() {
+    assert_eq!(check_against_harfbuzz(FONT, EXPECTED, true), 14 * 8);
+}
+
+#[test]
+fn varc_walks_through_nested_composites_match_harfbuzz() {
+    // Nested resets, self-references, cycles, a missing record, short
+    // delta sets, conditions inside nested composites, regions without
+    // axes. `flatten` recurses on a glyph that names itself, so only
+    // the face's walk draws this font.
+    assert_eq!(
+        check_against_harfbuzz(FACE_FONT, FACE_EXPECTED, false),
+        41 * 8
+    );
 }

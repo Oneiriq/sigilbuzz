@@ -50,6 +50,7 @@
 //! `sigilbuzz-subset` crate.
 
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -127,30 +128,32 @@ const NO_VARIATION: u32 = 0xFFFF_FFFF;
 /// ignored.
 const MAX_COMPONENT_AXES: usize = 4096;
 
-/// Condition table visits one `composite_with_font_coords` call makes at
-/// most. Each table's result is kept for the call, so a table whose
+/// Condition table visits one walk makes at most (see [`VarcMemo`]).
+/// Each table's result is kept for the walk and coords, so a table whose
 /// children share a subtree is evaluated once, not once per path; past
 /// the budget every condition fails.
 const MAX_CONDITION_TABLES: u32 = 1 << 16;
 
-/// Delta work one `composite_with_font_coords` call does at most: one
-/// unit per region index whose scalar it works out (once per
-/// MultiItemVariationData subtable and call) and one per delta value it
-/// walks (region indexes times values, per variation it applies). A
-/// component of a real font walks a few hundred values; past the budget
-/// no more deltas apply and conditions that need them fail.
-const MAX_COMPOSITE_WORK: u64 = 1 << 20;
+/// Work one walk does at most (see [`VarcMemo`]), in units of:
+///
+/// - one per component record read, plus one per axis value in it;
+/// - one per offset of each And or Or condition table evaluated;
+/// - one per value of each coord vector it builds: a component's coords,
+///   and the copy of a glyph's coords its results are kept under;
+/// - one per region index and per region axis whose scalar it works out
+///   (once per coord vector and MultiItemVariationData subtable);
+/// - one per delta value it walks (region indexes times values, per
+///   variation it applies).
+///
+/// A glyph of a real font costs a few thousand units. Past the budget
+/// the delta that ran out adds nothing, a condition that needed it does
+/// not hold, and no more components are read: the composite being read
+/// ends there, and so does every composite after it.
+pub(crate) const MAX_WALK_WORK: u64 = 1 << 20;
 
 /// HarfBuzz's `HB_MAX_NESTING_LEVEL`: its sanitizer drops a condition
 /// nested deeper, which then does not hold.
 const MAX_CONDITION_DEPTH: usize = 64;
-
-/// Upper bound on the coordinate values one composite carries across
-/// all its components. Each component copies a coord vector, widened
-/// to the highest axis index it lists, so a few record bytes can ask
-/// for up to 65536 values. The cap keeps a long record of such
-/// components from turning into a huge allocation.
-const MAX_COMPOSITE_COORDS: usize = 1 << 20;
 
 impl<'a> Varc<'a> {
     /// Parses a `VARC` table.
@@ -241,7 +244,9 @@ impl<'a> Varc<'a> {
     }
 
     /// Resolves the component list for `gid` at the given normalized
-    /// axis coords. Returns `None` for uncovered gids.
+    /// axis coords. Returns `None` for uncovered gids. A covered gid
+    /// past the end of the glyph records has no components, as in
+    /// HarfBuzz, which draws nothing for it.
     ///
     /// `coords` are both the glyph's coords and the font's, which is
     /// right for a glyph drawn on its own. For a glyph reached through
@@ -253,9 +258,10 @@ impl<'a> Varc<'a> {
 
     /// Resolves the component list for `gid`, whose own coords are
     /// `coords`, in a font set to `font_coords`. Returns `None` for
-    /// uncovered gids. The two differ when `gid` is a component of
-    /// another VARC composite: `coords` are then that component's
-    /// coords.
+    /// uncovered gids, and no components for a covered gid past the end
+    /// of the glyph records. The two coord vectors differ when `gid` is
+    /// a component of another VARC composite: `coords` are then that
+    /// component's coords.
     ///
     /// Components are read as HarfBuzz's `decompile_record` reads them
     /// and evaluated as its `VarComponent::get_path_at` does:
@@ -272,9 +278,16 @@ impl<'a> Varc<'a> {
     ///   component lists take its values.
     ///
     /// A component whose glyph id does not fit 16 bits names no glyph
-    /// and is left out. A malformed component ends the list early. So
-    /// does a component that would push the total length of all
-    /// component coord vectors past 2^20 values.
+    /// and is left out. A malformed component ends the list early.
+    ///
+    /// One call does at most 2^20 units of work: one per component read
+    /// and per axis value in it, one per offset of an And or Or
+    /// condition, one per coord value it writes, one per region index
+    /// and region axis whose scalar it works out, and one per delta
+    /// value it walks. Past that the delta that ran out adds nothing, a
+    /// condition that needed it does not hold, and the list ends.
+    /// [`crate::Face::glyph_outline_at_coords`] shares one such budget
+    /// across every composite one glyph draws.
     #[must_use]
     pub fn composite_with_font_coords(
         &self,
@@ -282,44 +295,104 @@ impl<'a> Varc<'a> {
         coords: &[f32],
         font_coords: &[f32],
     ) -> Option<VarcComposite> {
-        let mut eval = Eval::new(coords);
-        self.composite_in(gid, font_coords, &mut eval)
+        self.composite_in(gid, coords, font_coords, &mut VarcMemo::new())
     }
 
-    /// [`Varc::composite_with_font_coords`] with the evaluation state
-    /// held by the caller, so tests can read the work it did.
+    /// The composite of `gid` at `coords` in a font set to
+    /// `font_coords`, as [`Varc::composite_with_font_coords`] resolves
+    /// it, for one walk over many composites: `memo` holds the walk's
+    /// budgets, and keeps each composite, condition result and set of
+    /// region scalars by the coords it was worked out at, so a glyph
+    /// reached again at the same coords costs nothing more. `None` when
+    /// VARC does not cover `gid`. Every call with one `memo` must pass
+    /// the same `font_coords`.
+    pub(crate) fn resolve(
+        &self,
+        gid: u16,
+        coords: &[f32],
+        font_coords: &[f32],
+        memo: &mut VarcMemo,
+    ) -> Option<Rc<VarcComposite>> {
+        if !self.covers(gid) {
+            return None;
+        }
+        let id = memo.coords_id(coords);
+        if let Some(id) = id {
+            if let Some(known) = memo.per_coords[id].composites.get(&gid) {
+                return Some(Rc::clone(known));
+            }
+        }
+        let composite = Rc::new(self.composite_at(gid, coords, font_coords, id, memo)?);
+        if let Some(id) = id {
+            memo.per_coords[id]
+                .composites
+                .insert(gid, Rc::clone(&composite));
+        }
+        Some(composite)
+    }
+
+    /// [`Varc::composite_with_font_coords`] with the walk's state held
+    /// by the caller: its budgets, and the condition results and region
+    /// scalars it keeps by coords.
     fn composite_in(
         &self,
         gid: u16,
+        coords: &[f32],
         font_coords: &[f32],
-        eval: &mut Eval<'_>,
+        memo: &mut VarcMemo,
+    ) -> Option<VarcComposite> {
+        if !self.covers(gid) {
+            return None;
+        }
+        let id = memo.coords_id(coords);
+        self.composite_at(gid, coords, font_coords, id, memo)
+    }
+
+    /// [`Self::composite_in`] with what the walk keeps for `coords` at
+    /// index `id`, or with nothing kept when the walk had no work left
+    /// to keep a copy of the coords.
+    fn composite_at(
+        &self,
+        gid: u16,
+        coords: &[f32],
+        font_coords: &[f32],
+        id: Option<usize>,
+        memo: &mut VarcMemo,
     ) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
-        let raw = *self.glyph_records.get(idx)?;
+        // HarfBuzz reads a record past the end of the INDEX as empty.
+        let raw = self.glyph_records.get(idx).copied().unwrap_or_default();
+        let mut scratch = CoordsMemo::default();
+        let caches = match id {
+            Some(id) => &mut memo.per_coords[id],
+            None => &mut scratch,
+        };
+        let mut eval = Eval {
+            coords,
+            caches,
+            budget: &mut memo.budget,
+        };
         let mut composite = VarcComposite::default();
         let mut r = Reader::new(raw);
-        let mut total_coords = 0usize;
         while !r.is_empty() {
             // A VarComponent stops when bytes run out. Reaching the
             // end mid-record means the font is malformed; we skip the
             // rest rather than error so a single bad glyph doesn't
-            // tank the rest of the document.
-            let Ok(record) = self.read_component(&mut r) else {
+            // tank the rest of the document. Running out of work ends
+            // the list too.
+            let Ok(record) = self.read_component(&mut r, eval.budget) else {
                 break;
             };
             if let Some(index) = record.condition_index {
-                if !self.condition_holds(index, eval) {
+                if !self.condition_holds(index, &mut eval) {
                     continue;
                 }
             }
-            let Some(c) = self.resolve_component(&record, font_coords, eval) else {
-                continue;
-            };
-            total_coords = total_coords.saturating_add(c.coords.len());
-            if total_coords > MAX_COMPOSITE_COORDS {
-                break;
+            match self.resolve_component(&record, font_coords, &mut eval) {
+                Resolved::Component(c) => composite.components.push(c),
+                Resolved::Nothing => {}
+                Resolved::OutOfWork => break,
             }
-            composite.components.push(c);
         }
         Some(composite)
     }
@@ -329,7 +402,22 @@ impl<'a> Varc<'a> {
     /// index, axis indices index and axis values, the two variation
     /// indices, the transform fields, then one discarded uint32var per
     /// reserved flag bit.
-    fn read_component(&self, r: &mut Reader<'_>) -> Result<ComponentRecord<'_>> {
+    ///
+    /// Charges `budget` one unit for the record and one per axis value,
+    /// before decoding them, and fails without reading on when they do
+    /// not fit.
+    fn read_component(
+        &self,
+        r: &mut Reader<'_>,
+        budget: &mut Budget,
+    ) -> Result<ComponentRecord<'_>> {
+        const OUT_OF_WORK: Error = Error::Malformed {
+            offset: 0,
+            context: "VARC walk out of work",
+        };
+        if !budget.spend(1) {
+            return Err(OUT_OF_WORK);
+        }
         let flags = read_uint32var(r)?;
         let gid = if flags & VC_GID_IS_24BIT != 0 {
             let bytes = r.read_bytes(3)?;
@@ -350,6 +438,9 @@ impl<'a> Varc<'a> {
                 .axis_indices_lists
                 .get(index)
                 .map_or(&[][..], Vec::as_slice);
+            if !budget.spend(indices.len() as u64) {
+                return Err(OUT_OF_WORK);
+            }
             let values =
                 decode_tuple_values_in_reader(r, indices.len()).ok_or(Error::Malformed {
                     offset: r.position(),
@@ -392,14 +483,15 @@ impl<'a> Varc<'a> {
 
     /// Evaluates `record` at the coords of the glyph the component
     /// belongs to (`eval.coords`), in a font set to `font_coords`.
-    /// `None` when the component draws nothing.
     fn resolve_component(
         &self,
         record: &ComponentRecord<'_>,
         font_coords: &[f32],
         eval: &mut Eval<'_>,
-    ) -> Option<VarcComponent> {
-        let gid = u16::try_from(record.gid).ok()?;
+    ) -> Resolved {
+        let Ok(gid) = u16::try_from(record.gid) else {
+            return Resolved::Nothing;
+        };
         let coords = eval.coords;
 
         // Axis values and their deltas, in F2DOT14 units.
@@ -421,6 +513,17 @@ impl<'a> Varc<'a> {
         } else {
             coords
         };
+        // Building the vector is charged first: a few record bytes can
+        // ask for 4096 values.
+        let len = record
+            .axis_indices
+            .iter()
+            .map(|&axis| axis as usize)
+            .filter(|&axis| axis < MAX_COMPONENT_AXES)
+            .fold(base.len(), |len, axis| len.max(axis + 1));
+        if !eval.budget.spend(len as u64) {
+            return Resolved::OutOfWork;
+        }
         let mut child_coords = base.to_vec();
         for (&axis, &value) in record.axis_indices.iter().zip(&axis_values) {
             let axis = axis as usize;
@@ -458,7 +561,7 @@ impl<'a> Varc<'a> {
             t.sy = t.sx;
         }
 
-        Some(VarcComponent {
+        Resolved::Component(VarcComponent {
             gid,
             transform: t.to_affine(),
             coords: child_coords,
@@ -513,11 +616,12 @@ impl<'a> Varc<'a> {
     /// its negation does. A table cut short or past the list, an
     /// unknown format, a table nested deeper than `MAX_CONDITION_DEPTH`
     /// (HarfBuzz's sanitizer drops those), and every table once the
-    /// call's visit budget runs out do not hold either.
+    /// walk's visit budget runs out do not hold either.
     ///
-    /// A table's result depends only on the coords, so the call keeps
-    /// it: a later visit, through another path into a shared subtree,
-    /// reads it back instead of walking the subtree again.
+    /// A table's result depends only on the coords, so the walk keeps
+    /// it under them: a later visit, through another path into a shared
+    /// subtree or from another glyph at the same coords, reads it back
+    /// instead of walking the subtree again.
     fn evaluate_condition(
         &self,
         list: &[u8],
@@ -525,15 +629,15 @@ impl<'a> Varc<'a> {
         depth: usize,
         eval: &mut Eval<'_>,
     ) -> bool {
-        if depth >= MAX_CONDITION_DEPTH || eval.condition_visits_left == 0 {
+        if depth >= MAX_CONDITION_DEPTH || eval.budget.condition_visits_left == 0 {
             return false;
         }
-        eval.condition_visits_left -= 1;
-        if let Some(&known) = eval.conditions.get(&at) {
+        eval.budget.condition_visits_left -= 1;
+        if let Some(&known) = eval.caches.conditions.get(&at) {
             return known;
         }
         let holds = self.condition_table(list, at, depth, eval);
-        eval.conditions.insert(at, holds);
+        eval.caches.conditions.insert(at, holds);
         holds
     }
 
@@ -570,17 +674,22 @@ impl<'a> Varc<'a> {
                 let (Some(default), Some(index)) = (be_u16(data, 2), be_u32(data, 4)) else {
                     return false;
                 };
-                let mut value = [f32::from(default as i16)];
-                // Out of delta budget the value is unknown, so it fails.
-                self.add_deltas(index, &mut value, eval) && value[0] > 0.0
+                // HarfBuzz sums the deltas on their own, then adds the
+                // sum to the default value. Out of work the value is
+                // unknown, so the condition fails.
+                let mut delta = [0.0];
+                self.add_deltas(index, &mut delta, eval)
+                    && f32::from(default as i16) + delta[0] > 0.0
             }
             Some(format @ (3 | 4)) => {
                 let Some(&count) = data.get(2) else {
                     return false;
                 };
                 // The whole offset array has to be there, as for
-                // HarfBuzz's sanitizer.
-                if data.len() < 3 + 3 * usize::from(count) {
+                // HarfBuzz's sanitizer. Reading it costs one unit per
+                // offset, so offsets that name no table, which cost no
+                // visit, are bounded too.
+                if data.len() < 3 + 3 * usize::from(count) || !eval.budget.spend(u64::from(count)) {
                     return false;
                 }
                 let mut fields = (0..usize::from(count)).map(|i| 3 + 3 * i);
@@ -600,10 +709,11 @@ impl<'a> Varc<'a> {
     /// adds them. Nothing is added at the default instance (empty
     /// coords), for `NO_VARIATION`, or without a store, as in HarfBuzz.
     ///
-    /// The region scalars of each subtable are worked out once per call
-    /// and kept. Working them out and walking the delta set are charged
-    /// to the call's work budget; once that runs out this adds nothing
-    /// and returns false.
+    /// The region scalars of each subtable are worked out once per walk
+    /// and coords, and kept. Working them out (one unit per region index
+    /// and per region axis) and walking the delta set (one per value)
+    /// are charged to the walk's work budget; once that runs out this
+    /// adds nothing and returns false.
     fn add_deltas(&self, index: u32, values: &mut [f32], eval: &mut Eval<'_>) -> bool {
         if eval.coords.is_empty() || index == NO_VARIATION {
             return true;
@@ -616,48 +726,141 @@ impl<'a> Varc<'a> {
         };
         let regions = store.slot_region_count(slot) as u64;
         let mut cost = regions.saturating_mul(values.len() as u64);
-        if !eval.scalars.contains_key(&slot) {
+        let known = eval.caches.scalars.contains_key(&slot);
+        if !known {
             cost = cost.saturating_add(regions);
         }
-        if cost > eval.work_left {
-            eval.work_left = 0;
+        if !eval.budget.spend(cost) {
             return false;
         }
-        eval.work_left -= cost;
-        let coords = eval.coords;
-        let scalars = eval
-            .scalars
-            .entry(slot)
-            .or_insert_with(|| store.slot_scalars(slot, coords));
+        if !known {
+            let (scalars, axis_steps) = store.slot_scalars(slot, eval.coords);
+            // The axes a region constrains are only known once it is
+            // evaluated, so they are charged after. Past the budget the
+            // scalars still serve this delta, but nothing after it.
+            eval.budget.spend_after(axis_steps as u64);
+            eval.caches.scalars.insert(slot, scalars);
+        }
+        let Some(scalars) = eval.caches.scalars.get(&slot) else {
+            return false;
+        };
         store.add_slot_deltas(slot, index & 0xFFFF, scalars, values);
         true
     }
 }
 
-/// The state of one `composite_with_font_coords` call: what depends only
-/// on the glyph's coords, kept so it is worked out once, and the call's
-/// budgets.
-struct Eval<'c> {
-    /// The coords of the glyph the components belong to.
-    coords: &'c [f32],
-    /// Condition results by the table's offset in the ConditionList.
-    conditions: BTreeMap<usize, bool>,
+/// What one walk over VARC composites keeps between the composites it
+/// resolves: one walk is one [`Varc::composite_with_font_coords`] call,
+/// or every composite [`crate::Face::glyph_outline_at_coords`] resolves
+/// for one glyph.
+///
+/// It holds the walk's two budgets, and by coord vector what depends
+/// only on the coords: condition results, region scalars, and resolved
+/// composites. Each coord vector is kept once, charged one unit per
+/// value, so what it holds is bounded by the work budget.
+pub(crate) struct VarcMemo {
+    budget: Budget,
+    /// Each coord vector seen, as `f32` bits, to its index in
+    /// `per_coords`.
+    coords_ids: BTreeMap<Vec<u32>, usize>,
+    per_coords: Vec<CoordsMemo>,
+}
+
+impl VarcMemo {
+    /// A new walk, with full budgets and nothing kept.
+    pub(crate) fn new() -> Self {
+        Self {
+            budget: Budget {
+                condition_visits_left: MAX_CONDITION_TABLES,
+                work_left: MAX_WALK_WORK,
+            },
+            coords_ids: BTreeMap::new(),
+            per_coords: Vec::new(),
+        }
+    }
+
+    /// The index in `per_coords` of what is kept for `coords`, adding an
+    /// empty entry the first time, charged one unit plus one per value.
+    /// `None` once the walk is out of work.
+    fn coords_id(&mut self, coords: &[f32]) -> Option<usize> {
+        let key: Vec<u32> = coords.iter().map(|c| c.to_bits()).collect();
+        if let Some(&id) = self.coords_ids.get(&key) {
+            return Some(id);
+        }
+        if !self.budget.spend(coords.len() as u64 + 1) {
+            return None;
+        }
+        let id = self.per_coords.len();
+        self.per_coords.push(CoordsMemo::default());
+        self.coords_ids.insert(key, id);
+        Some(id)
+    }
+
+    /// Work units the walk has spent.
+    #[cfg(test)]
+    pub(crate) fn work_done(&self) -> u64 {
+        MAX_WALK_WORK - self.budget.work_left
+    }
+
+    /// Condition table visits the walk has made.
+    #[cfg(test)]
+    pub(crate) fn condition_visits(&self) -> u32 {
+        MAX_CONDITION_TABLES - self.budget.condition_visits_left
+    }
+}
+
+/// A walk's budgets (see [`MAX_CONDITION_TABLES`] and [`MAX_WALK_WORK`]).
+struct Budget {
     condition_visits_left: u32,
-    /// Region scalars by MultiItemVariationData subtable slot.
-    scalars: BTreeMap<usize, Vec<f32>>,
     work_left: u64,
 }
 
-impl<'c> Eval<'c> {
-    fn new(coords: &'c [f32]) -> Self {
-        Self {
-            coords,
-            conditions: BTreeMap::new(),
-            condition_visits_left: MAX_CONDITION_TABLES,
-            scalars: BTreeMap::new(),
-            work_left: MAX_COMPOSITE_WORK,
+impl Budget {
+    /// Takes `cost` units of work, or, when they do not fit, all that is
+    /// left, so every later charge fails too, and returns false.
+    fn spend(&mut self, cost: u64) -> bool {
+        if cost > self.work_left {
+            self.work_left = 0;
+            return false;
         }
+        self.work_left -= cost;
+        true
     }
+
+    /// Takes `cost` units for work already done, as many as are left.
+    fn spend_after(&mut self, cost: u64) {
+        self.work_left = self.work_left.saturating_sub(cost);
+    }
+}
+
+/// What a walk keeps for one coord vector.
+#[derive(Default)]
+struct CoordsMemo {
+    /// Condition results by the table's offset in the ConditionList.
+    conditions: BTreeMap<usize, bool>,
+    /// Region scalars by MultiItemVariationData subtable slot.
+    scalars: BTreeMap<usize, Vec<f32>>,
+    /// Resolved composites by glyph id.
+    composites: BTreeMap<u16, Rc<VarcComposite>>,
+}
+
+/// The state one composite is resolved with: the coords of the glyph
+/// whose components it reads, what the walk keeps for those coords, and
+/// the walk's budgets.
+struct Eval<'m> {
+    coords: &'m [f32],
+    caches: &'m mut CoordsMemo,
+    budget: &'m mut Budget,
+}
+
+/// What resolving one component record gives.
+enum Resolved {
+    /// A component to draw.
+    Component(VarcComponent),
+    /// A component that draws nothing.
+    Nothing,
+    /// No component: the walk ran out of work building it.
+    OutOfWork,
 }
 
 /// One component record as stored, before it is evaluated at any
@@ -983,4 +1186,4 @@ fn sincos_pi(x: f32) -> (f32, f32) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

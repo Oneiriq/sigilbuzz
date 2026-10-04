@@ -49,7 +49,7 @@ fn build_cff2_index(entries: &[&[u8]]) -> Vec<u8> {
 /// Builds a minimal VARC table with the given coverage gids and
 /// raw glyph record bytes. `var_store` and `axis_indices` are
 /// optional; passing `None` leaves their offsets at zero.
-fn build_varc(
+pub(crate) fn build_varc(
     coverage_gids: &[u16],
     glyph_records: &[&[u8]],
     var_store: Option<&[u8]>,
@@ -336,17 +336,20 @@ fn huge_rotation_delta_does_not_hang() {
 }
 
 #[test]
-fn wide_axis_components_stop_at_coord_budget() {
+fn wide_axis_components_stop_at_the_work_budget() {
     // Each 6-byte component lists axis 4095, the last one HarfBuzz
     // keeps, so its coord vector grows to 4096 values. 100 000 of them
-    // would allocate about 1.6 GB.
+    // would allocate about 1.6 GB. Each costs 4098 units (the record,
+    // its one axis value, its 4096 coords) after the one unit that
+    // keeps the empty coords, so 255 fit.
     let axis_indices: &[u8] = &[0x40, 0x0F, 0xFF]; // one i16: 4095
     let component: [u8; 6] = [VC_HAVE_AXES as u8, 0x00, 0x05, 0x00, 0x00, 0x00];
     let record = component.repeat(100_000);
     let bytes = build_varc(&[1], &[&record], None, Some(&[axis_indices]));
     let varc = Varc::parse(&bytes).unwrap();
     let comp = varc.composite(1, &[]).unwrap();
-    assert_eq!(comp.components.len(), MAX_COMPOSITE_COORDS / 4096);
+    assert_eq!(comp.components.len() as u64, (MAX_WALK_WORK - 1) / 4098);
+    assert_eq!(comp.components.len(), 255);
     assert!(comp.components.iter().all(|c| c.coords.len() == 4096));
 }
 
@@ -501,7 +504,9 @@ fn delta_sets_hold_one_tuple_per_region() {
     assert_eq!(t(&[1.0, 0.0]), (10.0, 20.0));
     assert_eq!(t(&[0.0, 1.0]), (-3.0, 5.0));
     assert_eq!(t(&[0.5, 1.0]), (2.0, 15.0));
-    // A delta set that ends before it fills both tuples adds nothing.
+    // A delta set that ends before it fills both tuples adds the values
+    // it holds, as HarfBuzz does: region 0's tuple, then the first value
+    // of region 1's.
     let short = build_store(
         &[&[(0, 0.0, 1.0, 1.0)], &[(1, 0.0, 1.0, 1.0)]],
         &[&[0x02, 10, 20, 7]],
@@ -509,7 +514,14 @@ fn delta_sets_hold_one_tuple_per_region() {
     let c = first(&record, Some(&short), None, &[1.0, 1.0]);
     assert_eq!(
         (c.components[0].transform[4], c.components[0].transform[5]),
-        (0.0, 0.0)
+        (17.0, 20.0)
+    );
+    // At axis 1 alone only region 1 counts: the reader skips region
+    // 0's tuple, and region 1's holds one value.
+    let c = first(&record, Some(&short), None, &[0.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (7.0, 0.0)
     );
     // Extra values past the last tuple are ignored.
     let long = build_store(
@@ -520,6 +532,34 @@ fn delta_sets_hold_one_tuple_per_region() {
     assert_eq!(
         (c.components[0].transform[4], c.components[0].transform[5]),
         (7.0, 25.0)
+    );
+}
+
+#[test]
+fn a_run_cut_short_ends_one_tuple_at_its_control_byte() {
+    // Region 0's tuple starts with a run of two words that the one
+    // byte after it cannot hold. HarfBuzz's reader gives up on that
+    // tuple past the control byte, and region 1's tuple starts at the
+    // next byte, read as a control byte: one i8, 5.
+    let store = build_store(
+        &[&[(0, 0.0, 1.0, 1.0)], &[(1, 0.0, 1.0, 1.0)]],
+        &[&[0x41, 0x00, 0x05]],
+    );
+    let flags = VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y;
+    let mut record = vec![flags as u8, 0x00, 0x05, 0x00];
+    record.extend_from_slice(&0i16.to_be_bytes());
+    record.extend_from_slice(&0i16.to_be_bytes());
+    let c = first(&record, Some(&store), None, &[1.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (5.0, 0.0)
+    );
+    // Skipping region 0 (scalar zero) stops at the same control byte,
+    // so region 1 reads the same way.
+    let c = first(&record, Some(&store), None, &[0.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (5.0, 0.0)
     );
 }
 
@@ -604,7 +644,7 @@ fn axis_indices_walk_malformed_streams_like_harfbuzz() {
 }
 
 /// `table` with `conditions` appended as its ConditionList.
-fn with_conditions(mut table: Vec<u8>, conditions: &[u8]) -> Vec<u8> {
+pub(crate) fn with_conditions(mut table: Vec<u8>, conditions: &[u8]) -> Vec<u8> {
     let at = table.len() as u32;
     table[12..16].copy_from_slice(&at.to_be_bytes());
     table.extend_from_slice(conditions);
@@ -643,7 +683,7 @@ fn cond_not(child: Option<&[u8]>) -> Vec<u8> {
     out
 }
 
-fn condition_list(conditions: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn condition_list(conditions: &[Vec<u8>]) -> Vec<u8> {
     let mut out = (conditions.len() as u32).to_be_bytes().to_vec();
     let mut at = 4 + 4 * conditions.len();
     for c in conditions {
@@ -755,19 +795,16 @@ fn shared_condition_trees_are_evaluated_once() {
         &condition_list(&[conditions]),
     );
     let varc = Varc::parse(&table).unwrap();
-    let mut eval = Eval::new(&[0.0]);
-    let c = varc.composite_in(1, &[0.0], &mut eval).unwrap();
+    let mut memo = VarcMemo::new();
+    let c = varc.composite_in(1, &[0.0], &[0.0], &mut memo).unwrap();
     assert_eq!(c.components.len(), 1);
-    assert_eq!(
-        MAX_CONDITION_TABLES - eval.condition_visits_left,
-        1 + 5 * 255
-    );
+    assert_eq!(memo.condition_visits(), 1 + 5 * 255);
 }
 
 /// A MultiItemVariationStore with one region (axis 0: 0, 1, 1) and one
 /// subtable that names it `mentions` times, whose one delta set holds a
 /// delta of 1 per mention.
-fn mention_store(mentions: u16) -> Vec<u8> {
+pub(crate) fn mention_store(mentions: u16) -> Vec<u8> {
     let mut store = Vec::new();
     store.extend_from_slice(&1u16.to_be_bytes()); // format
     store.extend_from_slice(&12u32.to_be_bytes()); // region list
@@ -799,11 +836,10 @@ fn mention_store(mentions: u16) -> Vec<u8> {
     store
 }
 
-/// A VARC table with one component of glyph 10 gated by a chain of
-/// `levels` And tables, each with two offsets that both name the next,
-/// ending in the Value condition `default + delta > 0` over
-/// [`mention_store`].
-fn deep_value_condition_table(levels: usize, mentions: u16, default: i16) -> Vec<u8> {
+/// A chain of `levels` And tables, each with two offsets that both name
+/// the next, ending in the Value condition `default + delta > 0`, whose
+/// delta is variation index 0.
+pub(crate) fn deep_value_condition(levels: usize, default: i16) -> Vec<u8> {
     let mut condition = vec![0, 2];
     condition.extend_from_slice(&default.to_be_bytes());
     condition.extend_from_slice(&0u32.to_be_bytes());
@@ -815,9 +851,15 @@ fn deep_value_condition_table(levels: usize, mentions: u16, default: i16) -> Vec
         and.extend_from_slice(&condition);
         condition = and;
     }
+    condition
+}
+
+/// A VARC table with one component of glyph 10 gated by
+/// [`deep_value_condition`] over [`mention_store`].
+fn deep_value_condition_table(levels: usize, mentions: u16, default: i16) -> Vec<u8> {
     with_conditions(
         build_varc(&[1], &[&gated(10, 0)], Some(&mention_store(mentions)), None),
-        &condition_list(&[condition]),
+        &condition_list(&[deep_value_condition(levels, default)]),
     )
 }
 
@@ -826,26 +868,30 @@ fn deep_shared_value_conditions_cost_linear_work() {
     // 20 And levels whose two offsets name the same child (2^20 paths)
     // over a Value condition whose delta set walks 60,000 mentions of
     // one region. Each table is evaluated once and the subtable's
-    // scalars are worked out once: 41 table visits, 60,000 scalar steps,
-    // and 60,000 delta values. Walking every path took 2^20 times that.
+    // scalars are worked out once: 41 table visits, 60,000 scalar steps
+    // and one region axis, and 60,000 delta values, besides keeping the
+    // coords (2 units), the record (1), the 40 And offsets (40) and the
+    // component's coords (1). Walking every path took 2^20 times that.
     let table = deep_value_condition_table(20, 60_000, -30_000);
     let varc = Varc::parse(&table).unwrap();
     // At axis 0 = 1 the deltas add 60,000: the condition holds.
-    let mut eval = Eval::new(&[1.0]);
-    let c = varc.composite_in(1, &[1.0], &mut eval).unwrap();
+    let mut memo = VarcMemo::new();
+    let c = varc.composite_in(1, &[1.0], &[1.0], &mut memo).unwrap();
     assert_eq!(c.components.len(), 1);
-    assert_eq!(MAX_CONDITION_TABLES - eval.condition_visits_left, 41);
-    assert_eq!(MAX_COMPOSITE_WORK - eval.work_left, 120_000);
+    assert_eq!(memo.condition_visits(), 41);
+    assert_eq!(memo.work_done(), 120_045);
     // At 0.25 they add 15,000: it does not.
     assert!(varc.composite(1, &[0.25]).unwrap().components.is_empty());
 }
 
 #[test]
-fn delta_work_past_the_budget_adds_nothing() {
+fn delta_work_past_the_budget_ends_the_composite() {
     // Twenty components whose translation varies through the delta set
-    // of 60,000 region mentions. The first costs 120,000 units (the
-    // scalars, then the walk), each later one 60,000, so 16 fit the
-    // 2^20 budget and the rest keep their stored translation.
+    // of 60,000 region mentions. The first costs 120,004 units (its
+    // record and coords, the scalars and their one axis, then the
+    // walk), each later one 60,002, after the 2 that keep the coords:
+    // 16 fit the 2^20 budget. The 17th is read, but its deltas do not
+    // fit, so it keeps its stored translation, and the list ends there.
     let flags = (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X) as u8;
     let mut record = Vec::new();
     for _ in 0..20 {
@@ -857,7 +903,32 @@ fn delta_work_past_the_budget_adds_nothing() {
     let c = varc.composite(1, &[1.0]).unwrap();
     let tx: Vec<f32> = c.components.iter().map(|c| c.transform[4]).collect();
     assert_eq!(tx[..16], [60_000.0; 16]);
-    assert_eq!(tx[16..], [0.0; 4]);
+    assert_eq!(tx[16..], [0.0]);
+}
+
+#[test]
+fn a_memo_keeps_composites_and_scalars_by_coords() {
+    // Resolving glyph 1 again at the same coords costs nothing; at
+    // other coords it costs its record, coords and deltas again.
+    let flags = (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X) as u8;
+    let mut record = vec![flags, 0x00, 0x05, 0x00];
+    record.extend_from_slice(&0i16.to_be_bytes());
+    let table = build_varc(&[1], &[&record], Some(&mention_store(1000)), None);
+    let varc = Varc::parse(&table).unwrap();
+    let mut memo = VarcMemo::new();
+    let first = varc.resolve(1, &[1.0], &[], &mut memo).unwrap();
+    // Keeping [1.0] (2), the record (1), its coords (1), the scalars
+    // (1000 and one axis) and the walk (1000).
+    assert_eq!(memo.work_done(), 2005);
+    let again = varc.resolve(1, &[1.0], &[], &mut memo).unwrap();
+    assert!(Rc::ptr_eq(&first, &again));
+    assert_eq!(memo.work_done(), 2005);
+    let half = varc.resolve(1, &[0.5], &[], &mut memo).unwrap();
+    assert_eq!(half.components[0].transform[4], 500.0);
+    assert_eq!(memo.work_done(), 2 * 2005);
+    // A glyph VARC has no record for costs nothing.
+    assert!(varc.resolve(5, &[0.25], &[], &mut memo).is_none());
+    assert_eq!(memo.work_done(), 2 * 2005);
 }
 
 #[test]

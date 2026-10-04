@@ -36,6 +36,7 @@ mod color;
 mod glyph_outlines;
 mod layout;
 mod outlines;
+mod varc_draw;
 mod variations;
 
 use alloc::vec::Vec;

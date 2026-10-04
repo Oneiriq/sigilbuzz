@@ -341,25 +341,45 @@ impl<'a> MultiVarStore<'a> {
         }
     }
 
-    /// Scalars for each entry of `region_indexes`, in order. Each
-    /// distinct region is evaluated once, so a subtable that names one
-    /// large region many times does not repeat the work.
-    fn scalars_for(&self, region_indexes: &[u16], coords: &[f32]) -> Vec<f32> {
-        let mut cache: BTreeMap<usize, f32> = BTreeMap::new();
-        region_indexes
+    /// Scalars for each entry of `region_indexes`, in order, and the
+    /// number of region axes evaluated for them. Each distinct region is
+    /// evaluated once, so a subtable that names one large region many
+    /// times does not repeat the work. The entries are put in region
+    /// order by one sort, so a subtable of many distinct regions costs
+    /// no map insert per region either.
+    fn scalars_for(&self, region_indexes: &[u16], coords: &[f32]) -> (Vec<f32>, usize) {
+        let mut scalars = vec![0.0_f32; region_indexes.len()];
+        // Region slot and position, each under 65536 (both counts are
+        // u16), packed into one word to sort; an index past the region
+        // list keeps a zero scalar.
+        let mut order: Vec<u32> = region_indexes
             .iter()
-            .map(|&ri| {
-                let Some(&slot) = self.region_slots.get(ri as usize) else {
-                    return 0.0;
-                };
-                let Some(region) = self.regions.get(slot) else {
-                    return 0.0;
-                };
-                *cache
-                    .entry(slot)
-                    .or_insert_with(|| sparse_region_scalar(region, coords))
+            .zip(0u32..)
+            .filter_map(|(&ri, at)| {
+                let slot = *self.region_slots.get(usize::from(ri))?;
+                Some(((slot as u32) << 16) | at)
             })
-            .collect()
+            .collect();
+        order.sort_unstable();
+        let mut axis_steps = 0usize;
+        let mut last: Option<(usize, f32)> = None;
+        for packed in order {
+            let (slot, at) = ((packed >> 16) as usize, (packed & 0xFFFF) as usize);
+            let scalar = match last {
+                Some((known, scalar)) if known == slot => scalar,
+                _ => {
+                    let scalar = self.regions.get(slot).map_or(0.0, |region| {
+                        let (scalar, steps) = sparse_region_scalar_steps(region, coords);
+                        axis_steps = axis_steps.saturating_add(steps);
+                        scalar
+                    });
+                    last = Some((slot, scalar));
+                    scalar
+                }
+            };
+            scalars[at] = scalar;
+        }
+        (scalars, axis_steps)
     }
 
     /// Per-region scalars for all regions referenced by subtable `outer`,
@@ -368,7 +388,7 @@ impl<'a> MultiVarStore<'a> {
     #[must_use]
     pub fn region_scalars(&self, outer: u16, coords: &[f32]) -> Option<Vec<f32>> {
         let sub = self.subtable(outer)?;
-        Some(self.scalars_for(&sub.region_indexes, coords))
+        Some(self.scalars_for(&sub.region_indexes, coords).0)
     }
 
     /// Number of regions referenced by subtable `outer`.
@@ -398,9 +418,11 @@ impl<'a> MultiVarStore<'a> {
     /// region (region 0's tuple, then region 1's, ...), as the spec,
     /// fontTools and HarfBuzz lay it out. Values past the last region's
     /// tuple are ignored, as in HarfBuzz. A stream that ends before it
-    /// fills every tuple is malformed and adds nothing; HarfBuzz adds
-    /// the values it does find, so such a set varies only some of the
-    /// fields it names there.
+    /// fills every tuple adds the values it holds, as HarfBuzz's
+    /// `MultiItemVariationStore::get_delta` does: a region's tuple stops
+    /// where the stream does, and a run whose values do not fit the
+    /// bytes left ends that region's tuple after its control byte, so
+    /// the next region's tuple starts at the byte after it.
     ///
     /// Returns `None` when `outer` or `inner` is out of range, or when
     /// the delta set is too short to hold `value_count` values even for
@@ -429,12 +451,19 @@ impl<'a> MultiVarStore<'a> {
     /// `MultiItemVariationStore::get_delta` adds them to the values it
     /// varies: each region's scalar times its tuple, added in place.
     /// Regions whose scalar is zero are skipped. Does nothing when the
-    /// indices are out of range or the set is too short for its tuples.
+    /// indices are out of range.
+    ///
+    /// A set that ends early adds what it holds, read as HarfBuzz's
+    /// `TupleValues::fetcher_t` reads it: a region's tuple stops where
+    /// the stream does, and a run whose values do not fit the bytes left
+    /// ends that region's tuple (or the skip past regions whose scalar
+    /// is zero) after its control byte, so the next region's tuple
+    /// starts at the byte after that control byte.
     pub(crate) fn add_deltas(&self, outer: u16, inner: u32, coords: &[f32], out: &mut [f32]) {
         let Some(slot) = self.subtable_slot(outer) else {
             return;
         };
-        let scalars = self.slot_scalars(slot, coords);
+        let (scalars, _) = self.slot_scalars(slot, coords);
         self.add_slot_deltas(slot, inner, &scalars, out);
     }
 
@@ -453,12 +482,14 @@ impl<'a> MultiVarStore<'a> {
     }
 
     /// The scalar of each region index of the subtable in `slot` at
-    /// `coords`, for [`Self::add_slot_deltas`]. Costs one step per
-    /// region index plus one evaluation per distinct region.
-    pub(crate) fn slot_scalars(&self, slot: usize, coords: &[f32]) -> Vec<f32> {
-        self.subtables
-            .get(slot)
-            .map_or_else(Vec::new, |s| self.scalars_for(&s.region_indexes, coords))
+    /// `coords`, for [`Self::add_slot_deltas`], and the number of region
+    /// axes evaluated for them. Costs one step per region index plus one
+    /// evaluation per distinct region.
+    pub(crate) fn slot_scalars(&self, slot: usize, coords: &[f32]) -> (Vec<f32>, usize) {
+        self.subtables.get(slot).map_or_else(
+            || (Vec::new(), 0),
+            |s| self.scalars_for(&s.region_indexes, coords),
+        )
     }
 
     /// [`Self::add_deltas`] for the subtable in `slot`, with its region
@@ -477,10 +508,6 @@ impl<'a> MultiVarStore<'a> {
         let Some(&raw) = sub.delta_sets.get(inner as usize) else {
             return;
         };
-        let needed = out.len().saturating_mul(sub.region_indexes.len());
-        if !TupleFetcher::new(raw).holds(needed) {
-            return;
-        }
         let mut values = TupleFetcher::new(raw);
         let mut skip = 0usize;
         for &scalar in scalars {
@@ -495,8 +522,10 @@ impl<'a> MultiVarStore<'a> {
 }
 
 /// Reads a `TupleValues` stream lazily, as HarfBuzz's
-/// `TupleValues::fetcher_t` does: a run that does not fit the
-/// remaining bytes ends the stream, and reads past the end add nothing.
+/// `TupleValues::fetcher_t` does: reads past the end add nothing, and a
+/// run whose values do not fit the remaining bytes stops the read that
+/// reached it after its control byte, so the next read takes the byte
+/// after that control byte as a control byte.
 struct TupleFetcher<'a> {
     data: &'a [u8],
     /// Values left in the current run.
@@ -514,8 +543,9 @@ impl<'a> TupleFetcher<'a> {
         }
     }
 
-    /// Starts the next run if the current one is used up. False once
-    /// the stream has ended.
+    /// Starts the next run if the current one is used up. False when
+    /// the stream has ended, or when the next run does not fit the bytes
+    /// after its control byte, which is then used up.
     fn ensure_run(&mut self) -> bool {
         if self.run > 0 {
             return true;
@@ -523,6 +553,7 @@ impl<'a> TupleFetcher<'a> {
         let Some((&control, rest)) = self.data.split_first() else {
             return false;
         };
+        self.data = rest;
         let run = usize::from(control & 0x3F) + 1;
         let width = match control & 0xC0 {
             0x80 => 0,
@@ -531,10 +562,8 @@ impl<'a> TupleFetcher<'a> {
             _ => 4,
         };
         if rest.len() < run * width {
-            self.data = &[];
             return false;
         }
-        self.data = rest;
         self.run = run;
         self.width = width;
         true
@@ -560,21 +589,6 @@ impl<'a> TupleFetcher<'a> {
         value
     }
 
-    /// Whether the stream holds at least `n` values, every run fitting
-    /// its bytes.
-    fn holds(mut self, n: usize) -> bool {
-        let mut seen = 0usize;
-        while seen < n {
-            if !self.ensure_run() {
-                return false;
-            }
-            seen += self.run;
-            self.data = &self.data[self.run * self.width..];
-            self.run = 0;
-        }
-        true
-    }
-
     fn skip(&mut self, mut n: usize) {
         while n > 0 && self.ensure_run() {
             let k = n.min(self.run);
@@ -597,15 +611,20 @@ impl<'a> TupleFetcher<'a> {
 /// Scalar of one sparse region at `coords`: the product of its
 /// per-axis falloffs, stopping early at zero.
 fn sparse_region_scalar(region: &SparseRegion, coords: &[f32]) -> f32 {
+    sparse_region_scalar_steps(region, coords).0
+}
+
+/// [`sparse_region_scalar`], with the number of axes it evaluated.
+fn sparse_region_scalar_steps(region: &SparseRegion, coords: &[f32]) -> (f32, usize) {
     let mut scalar = 1.0_f32;
-    for axis in &region.axes {
+    for (steps, axis) in region.axes.iter().enumerate() {
         let coord = *coords.get(axis.axis_index as usize).unwrap_or(&0.0);
         scalar *= axis_scalar(axis.start, axis.peak, axis.end, coord);
         if scalar == 0.0 {
-            return 0.0;
+            return (0.0, steps + 1);
         }
     }
-    scalar
+    (scalar, region.axes.len())
 }
 
 /// Triangular region falloff for one axis. Returns `1.0` at `peak`,
@@ -1004,6 +1023,30 @@ mod tests {
         let bytes = build_store(&[vec![(0, 0.0, 1.0, 1.0)]], &[0], &[&[0x00, 0x05]]);
         let s = MultiVarStore::parse(&bytes).unwrap();
         assert!(s.resolve_deltas(0, 0, 1 << 40, &[0.0]).is_none());
+    }
+
+    #[test]
+    fn region_scalars_keep_the_subtable_order() {
+        // Indexes out of order, repeated, and one past the region list:
+        // each scalar lands at its own position, and the one past the
+        // list is zero.
+        let bytes = build_store(
+            &[
+                vec![(0, 0.0, 1.0, 1.0)],
+                vec![(0, 0.0, 0.5, 1.0)],
+                vec![(1, 0.0, 1.0, 1.0)],
+            ],
+            &[2, 0, 2, 1, 7],
+            &[&[0x00, 0x01]],
+        );
+        let s = MultiVarStore::parse(&bytes).unwrap();
+        let coords = [0.75, 0.25];
+        let want: Vec<f32> = [2, 0, 2, 1, 7]
+            .iter()
+            .map(|&ri| s.region_scalar(ri, &coords))
+            .collect();
+        assert_eq!(want, [0.25, 0.75, 0.25, 0.5, 0.0]);
+        assert_eq!(s.region_scalars(0, &coords).unwrap(), want);
     }
 
     #[test]
