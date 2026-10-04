@@ -27,12 +27,12 @@
 //! than reading its table a few times.
 //!
 //! What the accelerators keep is bounded by the table's size the same
-//! way: keeping a subtable's digest costs one entry of the table's
-//! budget, and a lookup the budget cannot pay for keeps no digest and
-//! admits every glyph. Lookup indices that name one lookup (the same
-//! offset in the LookupList) share its accelerator, so a table that
-//! lists one lookup of many subtables under many indices keeps its
-//! digests once.
+//! way: each subtable of a lookup costs one entry of the table's budget
+//! for the digest it may keep, and a lookup the budget cannot pay for
+//! keeps no digest and admits every glyph. Lookup indices that name one
+//! lookup (the same offset in the LookupList) share its accelerator, so
+//! a table that lists one lookup of many subtables under many indices
+//! keeps its digests once.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -168,8 +168,8 @@ impl LookupAccel {
     /// at most what the lookup's budget and `table_budget`, which the
     /// table's other lookups share, leave.
     ///
-    /// Each subtable digest the accelerator keeps costs one entry of
-    /// `table_budget` too, taken before any coverage is read, so what a
+    /// Each subtable costs one entry of `table_budget` too, for the
+    /// digest it may keep, taken before any coverage is read, so what a
     /// table's accelerators keep is bounded by the table's size however
     /// many lookups apply. A lookup the budget cannot pay for keeps no
     /// digest and admits every glyph.
