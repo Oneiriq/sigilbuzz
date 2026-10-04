@@ -18,8 +18,10 @@
 //!
 //! sigilbuzz parses the table on demand and exposes the resolved
 //! component list at a given normalized coord vector via
-//! [`Varc::composite`]. The actual outline flattening is the caller's
-//! job. See [`crate::Face::glyph_outline_at_coords`], which delegates
+//! [`Varc::composite`], or [`Varc::composite_with_font_coords`] for a
+//! glyph reached through another composite, whose
+//! `RESET_UNSPECIFIED_AXES` components start from the font's coords.
+//! The actual outline flattening is the caller's job. See [`crate::Face::glyph_outline_at_coords`], which delegates
 //! to VARC when the gid is covered.
 //!
 //! # Header
@@ -29,7 +31,7 @@
 //!   u16       minorVersion = 0
 //!   Offset32  coverage
 //!   Offset32  multiVarStore
-//!   Offset32  conditionList            (sigilbuzz parses but ignores)
+//!   Offset32  conditionList            gates components
 //!   Offset32  axisIndicesList          CFF2 INDEX of TupleValues
 //!   Offset32  glyphRecords             CFF2 INDEX of VarCompositeGlyph
 //! ```
@@ -45,9 +47,7 @@
 //! # Scope
 //!
 //! This module only reads VARC. Subsetting lives in the
-//! `sigilbuzz-subset` crate. ConditionList parsing is stubbed (we
-//! advance past it but never gate on conditions); in-the-wild VARC
-//! fonts shipped to date do not exercise conditions either.
+//! `sigilbuzz-subset` crate.
 
 use alloc::vec::Vec;
 
@@ -61,6 +61,8 @@ use crate::tables::parse::{hb_roundf, Reader};
 pub struct Varc<'a> {
     coverage: Coverage<'a>,
     var_store: Option<MultiVarStore<'a>>,
+    /// The ConditionList, from its first byte to the end of the table.
+    condition_list: Option<&'a [u8]>,
     /// One axis-indices tuple per CFF2 INDEX entry; outer index of the
     /// component's `axisIndicesIndex` selects one of these.
     axis_indices_lists: Vec<Vec<u32>>,
@@ -81,7 +83,8 @@ pub struct VarcComponent {
     /// `(x', y') = (xx*x + xy*y + tx, yx*x + yy*y + ty)`.
     pub transform: [f32; 6],
     /// Effective normalized axis coords for the child outline, in
-    /// `fvar` axis order: the parent's coord vector with any HAVE_AXES
+    /// `fvar` axis order: the parent's coord vector (the font's when
+    /// the component sets `RESET_UNSPECIFIED_AXES`) with any HAVE_AXES
     /// values written over the listed axes. The vector grows to cover
     /// the highest listed axis when the parent's is shorter. Each
     /// written value is the component's axis value plus its deltas,
@@ -97,9 +100,8 @@ pub struct VarcComposite {
     pub components: Vec<VarcComponent>,
 }
 
-// Variable-component flag bits (per boring-expansion-spec). Bit 0,
-// RESET_UNSPECIFIED_AXES, is not honored: axes a component does not
-// list always keep the parent's value.
+// Variable-component flag bits (per boring-expansion-spec).
+const VC_RESET_UNSPECIFIED_AXES: u32 = 1 << 0;
 const VC_HAVE_AXES: u32 = 1 << 1;
 const VC_AXIS_VALUES_HAVE_VARIATION: u32 = 1 << 2;
 const VC_TRANSFORM_HAS_VARIATION: u32 = 1 << 3;
@@ -124,6 +126,15 @@ const NO_VARIATION: u32 = 0xFFFF_FFFF;
 /// ignored.
 const MAX_COMPONENT_AXES: usize = 4096;
 
+/// Condition tables one `composite_with_font_coords` call evaluates at
+/// most. And and Or tables can share children, so a small table can
+/// name a huge tree; past the budget every condition fails.
+const MAX_CONDITION_TABLES: u32 = 1 << 16;
+
+/// HarfBuzz's `HB_MAX_NESTING_LEVEL`: its sanitizer drops a condition
+/// nested deeper, which then does not hold.
+const MAX_CONDITION_DEPTH: usize = 64;
+
 /// Upper bound on the coordinate values one composite carries across
 /// all its components. Each component copies a coord vector, widened
 /// to the highest axis index it lists, so a few record bytes can ask
@@ -145,7 +156,7 @@ impl<'a> Varc<'a> {
         }
         let coverage_off = r.read_u32()? as usize;
         let var_store_off = r.read_u32()? as usize;
-        let _condition_list_off = r.read_u32()? as usize;
+        let condition_list_off = r.read_u32()? as usize;
         let axis_indices_off = r.read_u32()? as usize;
         let glyph_records_off = r.read_u32()? as usize;
 
@@ -181,6 +192,14 @@ impl<'a> Varc<'a> {
             out
         };
 
+        // A ConditionList that is absent or starts past the end holds
+        // no conditions, so every condition reads as false, as with
+        // HarfBuzz's Null table.
+        let condition_list = match condition_list_off {
+            0 => None,
+            off => data.get(off..),
+        };
+
         let glyph_records = if glyph_records_off == 0 {
             Vec::new()
         } else {
@@ -191,6 +210,7 @@ impl<'a> Varc<'a> {
         Ok(Self {
             coverage,
             var_store,
+            condition_list,
             axis_indices_lists,
             glyph_records,
         })
@@ -213,19 +233,51 @@ impl<'a> Varc<'a> {
     /// Resolves the component list for `gid` at the given normalized
     /// axis coords. Returns `None` for uncovered gids.
     ///
-    /// Components are read as HarfBuzz's `decompile_record` reads them
-    /// and evaluated as its `VarComponent::get_path_at` does. A component
-    /// whose glyph id does not fit 16 bits names no glyph and is left
-    /// out. A malformed component ends the list early. So does a
-    /// component that would push the total length of all component
-    /// coord vectors past 2^20 values.
+    /// `coords` are both the glyph's coords and the font's, which is
+    /// right for a glyph drawn on its own. For a glyph reached through
+    /// another VARC composite, see [`Varc::composite_with_font_coords`].
     #[must_use]
     pub fn composite(&self, gid: u16, coords: &[f32]) -> Option<VarcComposite> {
+        self.composite_with_font_coords(gid, coords, coords)
+    }
+
+    /// Resolves the component list for `gid`, whose own coords are
+    /// `coords`, in a font set to `font_coords`. Returns `None` for
+    /// uncovered gids. The two differ when `gid` is a component of
+    /// another VARC composite: `coords` are then that component's
+    /// coords.
+    ///
+    /// Components are read as HarfBuzz's `decompile_record` reads them
+    /// and evaluated as its `VarComponent::get_path_at` does:
+    ///
+    /// - A component with a condition is left out unless the condition
+    ///   (from the table's ConditionList, evaluated at `coords`) holds.
+    ///   An index past the list, or a condition that is malformed,
+    ///   nested more than 64 deep, or of an unknown format, does not
+    ///   hold. One call evaluates at most 65536 condition tables; past
+    ///   that every condition fails.
+    /// - The child's coords start from `coords`, or from `font_coords`
+    ///   when the component sets `RESET_UNSPECIFIED_AXES` (and, as in
+    ///   HarfBuzz, when `coords` hold more than 4096 axes); the axes the
+    ///   component lists take its values.
+    ///
+    /// A component whose glyph id does not fit 16 bits names no glyph
+    /// and is left out. A malformed component ends the list early. So
+    /// does a component that would push the total length of all
+    /// component coord vectors past 2^20 values.
+    #[must_use]
+    pub fn composite_with_font_coords(
+        &self,
+        gid: u16,
+        coords: &[f32],
+        font_coords: &[f32],
+    ) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
         let raw = *self.glyph_records.get(idx)?;
         let mut composite = VarcComposite::default();
         let mut r = Reader::new(raw);
         let mut total_coords = 0usize;
+        let mut condition_budget = MAX_CONDITION_TABLES;
         while !r.is_empty() {
             // A VarComponent stops when bytes run out. Reaching the
             // end mid-record means the font is malformed; we skip the
@@ -234,7 +286,12 @@ impl<'a> Varc<'a> {
             let Ok(record) = self.read_component(&mut r) else {
                 break;
             };
-            let Some(c) = self.resolve_component(&record, coords) else {
+            if let Some(index) = record.condition_index {
+                if !self.condition_holds(index, coords, &mut condition_budget) {
+                    continue;
+                }
+            }
+            let Some(c) = self.resolve_component(&record, coords, font_coords) else {
                 continue;
             };
             total_coords = total_coords.saturating_add(c.coords.len());
@@ -313,11 +370,13 @@ impl<'a> Varc<'a> {
     }
 
     /// Evaluates `record` at `coords`, the coords of the glyph the
-    /// component belongs to. `None` when the component draws nothing.
+    /// component belongs to, in a font set to `font_coords`. `None` when
+    /// the component draws nothing.
     fn resolve_component(
         &self,
         record: &ComponentRecord<'_>,
         coords: &[f32],
+        font_coords: &[f32],
     ) -> Option<VarcComponent> {
         let gid = u16::try_from(record.gid).ok()?;
 
@@ -327,13 +386,20 @@ impl<'a> Varc<'a> {
             self.add_deltas(index, coords, &mut axis_values);
         }
 
-        // The child starts from the parent's coord vector, and the
-        // listed axes take the component's values. HarfBuzz keeps
-        // coords as whole F2DOT14 values, so each value plus its deltas
-        // rounds to one, halves up. It holds at most
-        // `MAX_COMPONENT_AXES` coords and ignores an axis index past
-        // them.
-        let mut child_coords = coords.to_vec();
+        // The child starts from the parent's coord vector, or with
+        // RESET_UNSPECIFIED_AXES from the font's, and the listed axes
+        // take the component's values. HarfBuzz keeps coords as whole
+        // F2DOT14 values, so each value plus its deltas rounds to one,
+        // halves up. It holds at most `MAX_COMPONENT_AXES` coords,
+        // ignores an axis index past them, and starts from the font's
+        // coords when the parent's hold more.
+        let reset = record.flags & VC_RESET_UNSPECIFIED_AXES != 0;
+        let base = if reset || coords.len() > MAX_COMPONENT_AXES {
+            font_coords
+        } else {
+            coords
+        };
+        let mut child_coords = base.to_vec();
         for (&axis, &value) in record.axis_indices.iter().zip(&axis_values) {
             let axis = axis as usize;
             if axis >= MAX_COMPONENT_AXES {
@@ -377,6 +443,117 @@ impl<'a> Varc<'a> {
         })
     }
 
+    /// Whether condition `index` of the ConditionList holds at `coords`.
+    ///
+    /// ```text
+    ///   ConditionList: u32 count, Offset32 conditions[count]
+    ///                  (from the start of the list)
+    /// ```
+    ///
+    /// A missing list, an index past it, and a null or out-of-range
+    /// offset all name HarfBuzz's Null condition, which does not hold.
+    fn condition_holds(&self, index: u32, coords: &[f32], budget: &mut u32) -> bool {
+        let Some(list) = self.condition_list else {
+            return false;
+        };
+        let Some(count) = be_u32(list, 0) else {
+            return false;
+        };
+        if index >= count {
+            return false;
+        }
+        let slot = (index as usize)
+            .checked_mul(4)
+            .and_then(|at| at.checked_add(4));
+        let Some(offset) = slot.and_then(|at| be_u32(list, at)) else {
+            return false;
+        };
+        match list.get(offset as usize..) {
+            Some(condition) if offset != 0 => self.evaluate_condition(condition, coords, 0, budget),
+            _ => false,
+        }
+    }
+
+    /// Evaluates the condition table at the start of `data`, as
+    /// HarfBuzz's `Condition::evaluate` does:
+    ///
+    /// ```text
+    ///   1 AxisRange: u16 format, u16 axisIndex, F2DOT14 min, F2DOT14 max
+    ///   2 Value:     u16 format, i16 defaultValue, u32 varIndex
+    ///   3 And:       u16 format, u8 count, Offset24 conditions[count]
+    ///   4 Or:        u16 format, u8 count, Offset24 conditions[count]
+    ///   5 Negate:    u16 format, Offset24 condition
+    /// ```
+    ///
+    /// Offsets are from the start of the condition that holds them. A
+    /// null offset names the Null condition, which does not hold, so
+    /// its negation does. A table cut short, an unknown format, a table
+    /// nested deeper than `MAX_CONDITION_DEPTH` (HarfBuzz's sanitizer
+    /// drops those), and every table once `budget` runs out do not
+    /// hold either.
+    fn evaluate_condition(
+        &self,
+        data: &[u8],
+        coords: &[f32],
+        depth: usize,
+        budget: &mut u32,
+    ) -> bool {
+        if depth >= MAX_CONDITION_DEPTH || *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let child = |offset: usize, budget: &mut u32| -> bool {
+            let Some(at) = be_u24(data, offset) else {
+                return false;
+            };
+            match data.get(at..) {
+                Some(child) if at != 0 => self.evaluate_condition(child, coords, depth + 1, budget),
+                _ => false,
+            }
+        };
+        match be_u16(data, 0) {
+            Some(1) => {
+                let (Some(axis), Some(min), Some(max)) =
+                    (be_u16(data, 2), be_u16(data, 4), be_u16(data, 6))
+                else {
+                    return false;
+                };
+                // HarfBuzz compares whole F2DOT14 values; an axis the
+                // coords do not reach is at its default.
+                let coord = coords
+                    .get(usize::from(axis))
+                    .map_or(0.0, |&c| hb_roundf(c * 16384.0));
+                f32::from(min as i16) <= coord && coord <= f32::from(max as i16)
+            }
+            Some(2) => {
+                let (Some(default), Some(index)) = (be_u16(data, 2), be_u32(data, 4)) else {
+                    return false;
+                };
+                let mut value = [f32::from(default as i16)];
+                self.add_deltas(index, coords, &mut value);
+                value[0] > 0.0
+            }
+            Some(format @ (3 | 4)) => {
+                let Some(&count) = data.get(2) else {
+                    return false;
+                };
+                // The whole offset array has to be there, as for
+                // HarfBuzz's sanitizer.
+                if data.len() < 3 + 3 * usize::from(count) {
+                    return false;
+                }
+                let mut offsets = (0..usize::from(count)).map(|i| 3 + 3 * i);
+                if format == 3 {
+                    offsets.all(|at| child(at, budget))
+                } else {
+                    offsets.any(|at| child(at, budget))
+                }
+            }
+            Some(5) => data.len() >= 5 && !child(2, budget),
+            _ => false,
+        }
+    }
+
     /// Adds the deltas of the variation index `index` at `coords` to
     /// `values`. Nothing is added at the default instance (empty
     /// coords), for `NO_VARIATION`, or without a store, as in HarfBuzz.
@@ -396,8 +573,6 @@ struct ComponentRecord<'t> {
     flags: u32,
     /// 16- or 24-bit glyph id.
     gid: u32,
-    /// Read for HAVE_CONDITION; conditions are not evaluated yet.
-    #[allow(dead_code)]
     condition_index: Option<u32>,
     /// The axes the component sets, from the axis indices list.
     axis_indices: &'t [u32],
@@ -486,6 +661,22 @@ enum TransformField {
     SkewY,
     TCenterX,
     TCenterY,
+}
+
+/// Big-endian `u16` at byte `at` of `data`.
+fn be_u16(data: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(*data.get(at..)?.first_chunk::<2>()?))
+}
+
+/// Big-endian 24-bit offset at byte `at` of `data`.
+fn be_u24(data: &[u8], at: usize) -> Option<usize> {
+    let [a, b, c] = *data.get(at..)?.first_chunk::<3>()?;
+    Some((usize::from(a) << 16) | (usize::from(b) << 8) | usize::from(c))
+}
+
+/// Big-endian `u32` at byte `at` of `data`.
+fn be_u32(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(*data.get(at..)?.first_chunk::<4>()?))
 }
 
 /// Variable-length integer encoding used by VARC. 1-5 bytes

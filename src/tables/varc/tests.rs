@@ -602,3 +602,202 @@ fn axis_indices_walk_malformed_streams_like_harfbuzz() {
     assert_eq!(decode_axis_indices(&[0x00, 0xFF]), [u32::MAX]);
     assert!(decode_axis_indices(&[]).is_empty());
 }
+
+/// `table` with `conditions` appended as its ConditionList.
+fn with_conditions(mut table: Vec<u8>, conditions: &[u8]) -> Vec<u8> {
+    let at = table.len() as u32;
+    table[12..16].copy_from_slice(&at.to_be_bytes());
+    table.extend_from_slice(conditions);
+    table
+}
+
+fn f2dot14(v: f32) -> [u8; 2] {
+    ((v * 16384.0) as i16).to_be_bytes()
+}
+
+fn cond_axis(axis: u16, min: f32, max: f32) -> Vec<u8> {
+    let mut out = vec![0, 1];
+    out.extend_from_slice(&axis.to_be_bytes());
+    out.extend_from_slice(&f2dot14(min));
+    out.extend_from_slice(&f2dot14(max));
+    out
+}
+
+/// And (3) or Or (4) over `children`, laid out after the offsets.
+fn cond_op(format: u8, children: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = vec![0, format, children.len() as u8];
+    let mut at = 3 + 3 * children.len();
+    for c in children {
+        out.extend_from_slice(&(at as u32).to_be_bytes()[1..]);
+        at += c.len();
+    }
+    for c in children {
+        out.extend_from_slice(c);
+    }
+    out
+}
+
+fn cond_not(child: Option<&[u8]>) -> Vec<u8> {
+    let mut out = vec![0, 5, 0, 0, if child.is_some() { 5 } else { 0 }];
+    out.extend_from_slice(child.unwrap_or_default());
+    out
+}
+
+fn condition_list(conditions: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = (conditions.len() as u32).to_be_bytes().to_vec();
+    let mut at = 4 + 4 * conditions.len();
+    for c in conditions {
+        out.extend_from_slice(&(at as u32).to_be_bytes());
+        at += c.len();
+    }
+    for c in conditions {
+        out.extend_from_slice(c);
+    }
+    out
+}
+
+/// A component of glyph `gid` gated by condition `index`.
+fn gated(gid: u16, index: u8) -> Vec<u8> {
+    // HAVE_CONDITION is 0x80, which takes the two-byte uint32var form.
+    let mut out = vec![0x80, VC_HAVE_CONDITION as u8];
+    out.extend_from_slice(&gid.to_be_bytes());
+    out.push(index);
+    out
+}
+
+#[test]
+fn conditions_gate_components() {
+    let store = build_store(&[&[(0, 0.0, 1.0, 1.0)]], &[&[0x00, 2]]);
+    let mut value = vec![0, 2];
+    value.extend_from_slice(&(-1i16).to_be_bytes());
+    value.extend_from_slice(&0u32.to_be_bytes()); // -1 + 2 at axis 0 = +1
+    let conditions = condition_list(&[
+        cond_axis(0, 0.25, 1.0),
+        value,
+        cond_op(
+            3,
+            &[
+                cond_axis(1, -1.0, 0.0),
+                cond_not(Some(&cond_axis(0, 0.5, 1.0))),
+            ],
+        ),
+        cond_op(4, &[cond_axis(0, -1.0, -0.5), cond_axis(1, 0.5, 1.0)]),
+        cond_not(None),
+        vec![0, 9, 0, 0],
+        vec![0, 3, 3, 0, 0, 6],
+    ]);
+    let mut record = Vec::new();
+    for i in 0..7u8 {
+        record.extend_from_slice(&gated(10 + u16::from(i), i));
+    }
+    record.extend_from_slice(&gated(99, 99));
+    record.extend_from_slice(&[0x00, 0x00, 0x05]); // ungated glyph 5
+    let table = with_conditions(
+        build_varc(&[1], &[&record], Some(&store), None),
+        &conditions,
+    );
+    let varc = Varc::parse(&table).unwrap();
+    let shown = |coords: &[f32]| -> Vec<u16> {
+        let c = varc.composite(1, coords).unwrap();
+        c.components.iter().map(|c| c.gid).collect()
+    };
+    // 10: axis range; 11: value plus delta; 12: And with Negate; 13:
+    // Or; 14: Negate of the Null condition; 15: unknown format; 16: And
+    // cut short; 99: past the list.
+    assert_eq!(shown(&[]), [12, 14, 5]);
+    assert_eq!(shown(&[0.0, 0.0]), [12, 14, 5]);
+    assert_eq!(shown(&[0.25, 0.0]), [10, 12, 14, 5]);
+    assert_eq!(shown(&[0.75, -0.5]), [10, 11, 14, 5]);
+    assert_eq!(shown(&[0.75, 0.5]), [10, 11, 13, 14, 5]);
+    assert_eq!(shown(&[-0.5, 0.0]), [12, 13, 14, 5]);
+    // A coord off the F2DOT14 grid compares after rounding.
+    assert_eq!(shown(&[0.25 - 1.0 / 65536.0, 0.0]), [10, 12, 14, 5]);
+}
+
+#[test]
+fn conditions_nested_past_64_levels_fail() {
+    // A chain of And tables with one child each, ending in a condition
+    // that holds. HarfBuzz's sanitizer drops a chain deeper than 64.
+    let chain = |levels: usize| {
+        let mut c = cond_axis(0, -1.0, 1.0);
+        for _ in 0..levels {
+            c = cond_op(3, &[c]);
+        }
+        let table = with_conditions(
+            build_varc(&[1], &[&gated(10, 0)], None, None),
+            &condition_list(&[c]),
+        );
+        let varc = Varc::parse(&table).unwrap();
+        varc.composite(1, &[0.0]).unwrap().components.len()
+    };
+    assert_eq!(chain(60), 1);
+    assert_eq!(chain(64), 0);
+    assert_eq!(chain(70), 0);
+}
+
+#[test]
+fn shared_condition_trees_stop_at_the_budget() {
+    // Five levels of And tables whose 255 offsets all name the next
+    // level: 255^5 visits without a budget. Every leaf holds, so only
+    // the budget can stop the walk, and the component is left out.
+    let level_len = 3 + 3 * 255;
+    let mut conditions = Vec::new();
+    for _ in 0..5 {
+        conditions.extend_from_slice(&[0, 3, 255]);
+        for _ in 0..255 {
+            conditions.extend_from_slice(&(level_len as u32).to_be_bytes()[1..]);
+        }
+    }
+    conditions.extend_from_slice(&cond_axis(0, -1.0, 1.0));
+    let table = with_conditions(
+        build_varc(&[1], &[&gated(10, 0)], None, None),
+        &condition_list(&[conditions]),
+    );
+    let varc = Varc::parse(&table).unwrap();
+    assert!(varc.composite(1, &[0.0]).unwrap().components.is_empty());
+}
+
+#[test]
+fn reset_unspecified_axes_starts_from_the_font_coords() {
+    // Two components setting axis 0 to 0.5, one with
+    // RESET_UNSPECIFIED_AXES, and a third that resets without axes.
+    let lists: &[&[u8]] = &[&[0x00, 0x00]];
+    let mut record = Vec::new();
+    for flags in [VC_HAVE_AXES, VC_HAVE_AXES | VC_RESET_UNSPECIFIED_AXES] {
+        record.extend_from_slice(&[flags as u8, 0x00, 0x05, 0x00, 0x40, 0x20, 0x00]);
+    }
+    record.extend_from_slice(&[VC_RESET_UNSPECIFIED_AXES as u8, 0x00, 0x06]);
+    let table = build_varc(&[1], &[&record], None, Some(lists));
+    let varc = Varc::parse(&table).unwrap();
+    let coords = |c: &VarcComposite| -> Vec<Vec<f32>> {
+        c.components.iter().map(|c| c.coords.clone()).collect()
+    };
+    let nested = varc
+        .composite_with_font_coords(1, &[0.7, 0.3], &[0.1, 0.2])
+        .unwrap();
+    assert_eq!(
+        coords(&nested),
+        [vec![0.5, 0.3], vec![0.5, 0.2], vec![0.1, 0.2]]
+    );
+    // For a glyph drawn on its own the font's coords are its own.
+    let top = varc.composite(1, &[0.7, 0.3]).unwrap();
+    assert_eq!(
+        coords(&top),
+        [vec![0.5, 0.3], vec![0.5, 0.3], vec![0.7, 0.3]]
+    );
+}
+
+#[test]
+fn coords_past_harfbuzz_limit_start_from_the_font_coords() {
+    // HarfBuzz copies at most 4096 coords, and starts a component of a
+    // glyph with more from the font's coords.
+    let table = build_varc(&[1], &[&[0x00, 0x00, 0x05]], None, None);
+    let varc = Varc::parse(&table).unwrap();
+    let wide = vec![0.5; 4097];
+    let c = varc.composite_with_font_coords(1, &wide, &[0.25]).unwrap();
+    assert_eq!(c.components[0].coords, [0.25]);
+    let c = varc
+        .composite_with_font_coords(1, &wide[..4096], &[0.25])
+        .unwrap();
+    assert_eq!(c.components[0].coords.len(), 4096);
+}
