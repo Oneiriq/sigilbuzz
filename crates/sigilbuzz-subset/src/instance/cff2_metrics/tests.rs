@@ -17,12 +17,12 @@ fn the_box_takes_control_points_and_rounds_its_ends() {
         s.close();
     });
     // x from -2.5 (a control point) to 40.5, y from 0 to 120.5: each
-    // end rounds halves away from zero.
+    // end rounds halves up, so -2.5 goes to -2.
     assert_eq!(
         e,
         Extents {
-            x_bearing: -3,
-            width: 41 + 3,
+            x_bearing: -2,
+            width: 41 + 2,
             y_bearing: 121,
             height: -121,
         }

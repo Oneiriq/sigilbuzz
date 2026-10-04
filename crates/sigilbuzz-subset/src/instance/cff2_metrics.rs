@@ -6,7 +6,8 @@
 //! coordinates (`update_instance_metrics_map_from_cff2`): the box of
 //! every point the outline passes through or pulls toward, curve
 //! control points included, before its blends round. The box's ends
-//! round halves away from zero. A glyph with a box takes its left end
+//! round halves up, as HarfBuzz's `roundf` (`floor(x + 0.5)`) does. A
+//! glyph with a box takes its left end
 //! as its left side bearing; one without keeps the source's. The `head`
 //! box is the union of the glyphs' boxes, and the `hhea` extremes count
 //! every glyph, one without a box as zero wide.
@@ -23,6 +24,7 @@ use sigilbuzz::Face;
 use super::glyf::clamp_i16;
 use super::metrics::HmtxBake;
 use crate::hmtx::emit_long_metrics;
+use crate::util::round_half_up;
 
 /// A glyph's box as HarfBuzz's `hb_glyph_extents_t` holds it: the left
 /// end and width, the top end and (negative) height, each end rounded.
@@ -78,18 +80,19 @@ impl ControlBox {
     }
 
     fn extents(&self) -> Extents {
-        // `roundf`: halves away from zero. Float-to-int casts saturate.
+        // HarfBuzz's `roundf`: halves up. It saturates at the `i32`
+        // range.
         let (x_bearing, width) = if self.min.0 >= self.max.0 {
             (0, 0)
         } else {
-            let left = self.min.0.round() as i32;
-            (left, (self.max.0.round() as i32).saturating_sub(left))
+            let left = round_half_up(self.min.0);
+            (left, round_half_up(self.max.0).saturating_sub(left))
         };
         let (y_bearing, height) = if self.min.1 >= self.max.1 {
             (0, 0)
         } else {
-            let top = self.max.1.round() as i32;
-            (top, (self.min.1.round() as i32).saturating_sub(top))
+            let top = round_half_up(self.max.1);
+            (top, round_half_up(self.min.1).saturating_sub(top))
         };
         Extents {
             x_bearing,

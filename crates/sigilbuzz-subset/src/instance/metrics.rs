@@ -44,10 +44,10 @@ impl HmtxBake {
         if count == 0 {
             return 0;
         }
-        // `roundf` of the quotient in single precision, halves up for
-        // these positive values. At most 65,535 advances of at most
-        // 65,535 each, so the sum fits.
-        ((total as f64 / count as f64) as f32).round() as u16
+        // HarfBuzz's `roundf` of the quotient in double precision,
+        // `floor(x + 0.5)`. At most 65,535 advances of at most 65,535
+        // each, so the sum fits and so does the mean.
+        (total as f64 / count as f64 + 0.5).floor() as u16
     }
 }
 

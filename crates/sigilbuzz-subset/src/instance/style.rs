@@ -14,6 +14,7 @@
 //! none, and its fields stay.
 
 use super::glyf::clamp_i16;
+use crate::util::round_half_up;
 
 /// Each axis' tag, and its location in user units when the instance
 /// pins it.
@@ -86,11 +87,11 @@ pub(super) fn patch_os2(os2: &mut [u8], avg_char_width: Option<u16>, axes: &Axis
         write_u16(os2, 2, avg as u16);
     }
     if let Some(weight) = location(axes, *b"wght") {
-        // `roundf`, halves away from zero; the value is positive.
-        write_u16(os2, 4, weight.clamp(1.0, 1000.0).round() as u16);
+        // HarfBuzz's `roundf`: halves up.
+        write_u16(os2, 4, round_half_up(weight.clamp(1.0, 1000.0)) as u16);
     }
     if let Some(width) = location(axes, *b"wdth") {
-        write_u16(os2, 6, width_class(width).round() as u16);
+        write_u16(os2, 6, round_half_up(width_class(width)) as u16);
     }
 }
 
@@ -100,9 +101,8 @@ pub(super) fn patch_post(post: &mut [u8], axes: &AxisLocations) {
     let Some(slant) = location(axes, *b"slnt") else {
         return;
     };
-    // HarfBuzz's `set_float`: `roundf (f * 65536)`, halves away from
-    // zero.
-    let angle = (slant.clamp(-90.0, 90.0) * 65536.0).round() as i32;
+    // HarfBuzz's `set_float`: `roundf (f * 65536)`, halves up.
+    let angle = round_half_up(slant.clamp(-90.0, 90.0) * 65536.0);
     if let Some(field) = post.get_mut(4..).and_then(<[u8]>::first_chunk_mut::<4>) {
         *field = angle.to_be_bytes();
     }
@@ -165,5 +165,8 @@ mod tests {
         assert_eq!(&post[4..], (-491_520i32).to_be_bytes());
         patch_post(&mut post, &[(*b"slnt", Some(-120.0))]);
         assert_eq!(&post[4..], (-90i32 * 65536).to_be_bytes());
+        // Half a 16.16 unit below zero rounds up, to zero.
+        patch_post(&mut post, &[(*b"slnt", Some(-0.5 / 65536.0))]);
+        assert_eq!(&post[4..], 0i32.to_be_bytes());
     }
 }
