@@ -119,7 +119,7 @@ pub(crate) fn bake_cff2_partial(
         let local_subrs = parsed
             .per_fd_local_subrs
             .get(fd as usize)
-            .map(Vec::as_slice)
+            .map(|locals| locals.as_slice())
             .unwrap_or(&[]);
         let baked = rewriter.bake_charstring(cs, local_subrs)?;
         new_charstrings.push(baked);
@@ -132,13 +132,16 @@ pub(crate) fn bake_cff2_partial(
         font_dict_body: Vec<u8>,
         font_dict_private_slot: Option<(usize, usize)>,
         new_private_body: Vec<u8>,
+        /// An earlier Font DICT whose Private DICT this one shares.
+        shares: Option<usize>,
     }
     let mut fd_emits: Vec<FdEmit> = Vec::with_capacity(parsed.fd_array.len());
     for (i, fd_bytes) in parsed.fd_array.iter().enumerate() {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
         // Its blends keep the regions the projected store keeps.
-        let priv_entries = if parsed.per_fd_private[i].is_empty() {
+        let shares = parsed.private_of.get(i).copied().filter(|&j| j != i);
+        let priv_entries = if parsed.per_fd_private[i].is_empty() || shares.is_some() {
             Vec::new()
         } else {
             super::private::project_private(
@@ -152,6 +155,7 @@ pub(crate) fn bake_cff2_partial(
             font_dict_body,
             font_dict_private_slot,
             new_private_body,
+            shares,
         });
     }
 
@@ -222,9 +226,20 @@ pub(crate) fn bake_cff2_partial(
     let mut per_fd_private_abs: Vec<usize> = Vec::with_capacity(fd_count);
     let mut per_fd_private_size: Vec<usize> = Vec::with_capacity(fd_count);
     for f in &fd_emits {
-        per_fd_private_abs.push(out.len());
-        per_fd_private_size.push(f.new_private_body.len());
-        out.extend_from_slice(&f.new_private_body);
+        // A shared Private DICT is written once, where its first Font
+        // DICT put it.
+        let earlier = f.shares.and_then(|j| {
+            per_fd_private_abs
+                .get(j)
+                .copied()
+                .zip(per_fd_private_size.get(j).copied())
+        });
+        let (abs, size) = earlier.unwrap_or((out.len(), f.new_private_body.len()));
+        if earlier.is_none() {
+            out.extend_from_slice(&f.new_private_body);
+        }
+        per_fd_private_abs.push(abs);
+        per_fd_private_size.push(size);
     }
 
     // VariationStore: 2-byte length prefix + new IVS body.

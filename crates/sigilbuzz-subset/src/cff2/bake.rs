@@ -92,7 +92,7 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
         let local_subrs = parsed
             .per_fd_local_subrs
             .get(fd as usize)
-            .map(Vec::as_slice)
+            .map(|locals| locals.as_slice())
             .unwrap_or(&[]);
         let baked = baker.bake_charstring(cs, local_subrs)?;
         new_charstrings.push(baked);
@@ -105,14 +105,22 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
         font_dict_body: Vec<u8>,
         font_dict_private_slot: Option<(usize, usize)>,
         new_private_body: Vec<u8>,
+        /// An earlier Font DICT whose Private DICT this one shares.
+        shares: Option<usize>,
     }
     let mut fd_emits: Vec<FdBakeEmit> = Vec::with_capacity(parsed.fd_array.len());
     // The Private DICTs' blends resolve at the same coordinates.
     let mut private_blend = BlendCache::new(ivs.as_ref(), ivs_bytes.unwrap_or_default(), coords);
-    for (fd_bytes, &private_dict) in parsed.fd_array.iter().zip(&parsed.per_fd_private) {
+    for (i, (fd_bytes, &private_dict)) in parsed
+        .fd_array
+        .iter()
+        .zip(&parsed.per_fd_private)
+        .enumerate()
+    {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
-        let priv_entries = if private_dict.is_empty() {
+        let shares = parsed.private_of.get(i).copied().filter(|&j| j != i);
+        let priv_entries = if private_dict.is_empty() || shares.is_some() {
             Vec::new()
         } else {
             super::private::bake_private(walk_dict(private_dict)?, &mut private_blend)?
@@ -123,6 +131,7 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
             font_dict_body,
             font_dict_private_slot,
             new_private_body,
+            shares,
         });
     }
 
@@ -202,9 +211,20 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
     let mut per_fd_private_abs: Vec<usize> = Vec::with_capacity(fd_count);
     let mut per_fd_private_size: Vec<usize> = Vec::with_capacity(fd_count);
     for f in &fd_emits {
-        per_fd_private_abs.push(out.len());
-        per_fd_private_size.push(f.new_private_body.len());
-        out.extend_from_slice(&f.new_private_body);
+        // A shared Private DICT is written once, where its first Font
+        // DICT put it.
+        let earlier = f.shares.and_then(|j| {
+            per_fd_private_abs
+                .get(j)
+                .copied()
+                .zip(per_fd_private_size.get(j).copied())
+        });
+        let (abs, size) = earlier.unwrap_or((out.len(), f.new_private_body.len()));
+        if earlier.is_none() {
+            out.extend_from_slice(&f.new_private_body);
+        }
+        per_fd_private_abs.push(abs);
+        per_fd_private_size.push(size);
     }
 
     // Patch Top DICT placeholders.

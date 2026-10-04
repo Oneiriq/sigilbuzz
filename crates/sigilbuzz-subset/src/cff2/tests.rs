@@ -47,16 +47,30 @@ fn analysis_helpers_reach_cff2_module() {
 /// per gid, an explicit FDSelect map, no local subrs, and an
 /// optional VariationStore blob.
 fn build_synthetic_cff2(charstrings: &[&[u8]], fd_select: &[u8], vstore: Option<&[u8]>) -> Vec<u8> {
+    build_synthetic_cff2_sharing(charstrings, fd_select, vstore, None)
+}
+
+/// [`build_synthetic_cff2`], with every Font DICT naming the one
+/// Private DICT `shared` when it is given.
+fn build_synthetic_cff2_sharing(
+    charstrings: &[&[u8]],
+    fd_select: &[u8],
+    vstore: Option<&[u8]>,
+    shared: Option<&[u8]>,
+) -> Vec<u8> {
     assert_eq!(charstrings.len(), fd_select.len());
     let n_fds = (*fd_select.iter().max().unwrap_or(&0) as usize) + 1;
     let cs_index = encode_index_cff2(charstrings);
     let global_subr_index = encode_index_cff2(&[]);
     let fd_select_bytes = emit_fd_select_format0(fd_select);
 
-    // Per-FD Private DICTs (one op for shape).
-    let private_bodies: Vec<Vec<u8>> = (0..n_fds)
-        .map(|_| alloc::vec![139u8 /* 0 */, 20u8 /* defaultWidthX */])
-        .collect();
+    // Per-FD Private DICTs (one op for shape), or the one shared.
+    let private_bodies: Vec<Vec<u8>> = match shared {
+        Some(body) => alloc::vec![body.to_vec()],
+        None => (0..n_fds)
+            .map(|_| alloc::vec![139u8 /* 0 */, 20u8 /* defaultWidthX */])
+            .collect(),
+    };
 
     // Font DICTs with placeholder Private (size + off) operands.
     let mut font_dict_bodies: Vec<Vec<u8>> = Vec::with_capacity(n_fds);
@@ -163,15 +177,16 @@ fn build_synthetic_cff2(charstrings: &[&[u8]], fd_select: &[u8], vstore: Option<
     for i in 0..n_fds {
         let body_abs_in_out = fd_array_abs + fd_body_offsets_in_index[i];
         let (size_slot, off_slot) = font_dict_priv_slots[i];
+        let p = if shared.is_some() { 0 } else { i };
         patch_dict_offset(
             &mut out,
             body_abs_in_out + size_slot,
-            private_bodies[i].len() as i32,
+            private_bodies[p].len() as i32,
         );
         patch_dict_offset(
             &mut out,
             body_abs_in_out + off_slot,
-            per_fd_priv_abs[i] as i32,
+            per_fd_priv_abs[p] as i32,
         );
     }
 

@@ -32,6 +32,7 @@
 //! offset from that dict.
 
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
@@ -125,9 +126,14 @@ struct ParsedCff2<'a> {
     global_subrs: Vec<&'a [u8]>,
     /// FDArray INDEX entries (Font DICT bodies).
     fd_array: Vec<&'a [u8]>,
-    /// Per-FD: (Private DICT bytes, Local Subrs INDEX entries).
+    /// Per-FD: (Private DICT bytes, Local Subrs INDEX entries). Font
+    /// DICTs that name the same Private DICT share one parse.
     per_fd_private: Vec<&'a [u8]>,
-    per_fd_local_subrs: Vec<Vec<&'a [u8]>>,
+    per_fd_local_subrs: Vec<Rc<Vec<&'a [u8]>>>,
+    /// Per-FD: the first Font DICT that names the same Private DICT
+    /// (its own index when none before it does). A bake writes each
+    /// Private DICT once, however many Font DICTs name it.
+    private_of: Vec<usize>,
     /// FDSelect parsed into per-gid FD indices.
     fd_select: Vec<u8>,
     /// VariationStore bytes (the u16-length-prefixed payload, when
@@ -206,10 +212,13 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
         fd_array_off.ok_or(SubsetError::Unsupported("CFF2 Top DICT missing FDArray"))? as usize;
     let (fd_array, _) = read_index_cff2(data, fd_array_off)?;
 
-    // Walk each Font DICT for its Private offset.
+    // Walk each Font DICT for its Private offset. Many Font DICTs can
+    // name one Private DICT; it and its Local Subrs are read once.
     let mut per_fd_private: Vec<&[u8]> = Vec::with_capacity(fd_array.len());
-    let mut per_fd_local_subrs: Vec<Vec<&[u8]>> = Vec::with_capacity(fd_array.len());
-    for fd_bytes in &fd_array {
+    let mut per_fd_local_subrs: Vec<Rc<Vec<&[u8]>>> = Vec::with_capacity(fd_array.len());
+    let mut private_of: Vec<usize> = Vec::with_capacity(fd_array.len());
+    let mut first_fd_of: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+    for (i, fd_bytes) in fd_array.iter().enumerate() {
         let fd_entries = walk_dict(fd_bytes)?;
         // The last well-formed Private operator wins.
         let priv_info = fd_entries
@@ -217,18 +226,29 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
             .rev()
             .filter(|e| e.op == OP_PRIVATE)
             .find_map(private_operands);
-        let (priv_bytes, locals) = match priv_info {
-            Some((size, off)) => read_private_dict(
-                data,
-                size,
-                off,
-                read_index_cff2,
-                "CFF2 Private DICT past end",
-            )?,
-            None => (&[][..], Vec::new()),
+        let shared = priv_info.and_then(|key| first_fd_of.get(&key).copied());
+        let (priv_bytes, locals, first) = match (priv_info, shared) {
+            (Some(_), Some(j)) => (
+                per_fd_private.get(j).copied().unwrap_or_default(),
+                per_fd_local_subrs.get(j).cloned().unwrap_or_default(),
+                j,
+            ),
+            (Some((size, off)), None) => {
+                let (priv_bytes, locals) = read_private_dict(
+                    data,
+                    size,
+                    off,
+                    read_index_cff2,
+                    "CFF2 Private DICT past end",
+                )?;
+                first_fd_of.insert((size, off), i);
+                (priv_bytes, Rc::new(locals), i)
+            }
+            (None, _) => (&[][..], Rc::default(), i),
         };
         per_fd_private.push(priv_bytes);
         per_fd_local_subrs.push(locals);
+        private_of.push(first);
     }
 
     // Adobe's CFF2 builds elide FDSelect when the font has a single
@@ -269,6 +289,7 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
         fd_array,
         per_fd_private,
         per_fd_local_subrs,
+        private_of,
         fd_select,
         vstore_blob,
     })
