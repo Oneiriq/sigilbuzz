@@ -87,7 +87,7 @@ fn merge_jamo_syllables(codepoints: &[char], glyphs: &mut [Glyph], level: Cluste
 /// `nko ` script tags, whose `isol`, `init`, `medi`, and `fina` follow
 /// the Arabic-style joining forms of the letters, as in HarfBuzz
 /// (`setup_masks_arabic_plan`). Clusters merge at the monotone
-/// characters level, the default of a Rust [`crate::Buffer`].
+/// characters level.
 pub fn shape_nko(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,

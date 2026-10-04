@@ -250,10 +250,11 @@ impl SubAssign for BufferFlags {
 ///   clusters and a reordered glyph keeps its own offset, so clusters
 ///   can come out of order.
 ///
-/// HarfBuzz defaults to [`Self::MonotoneGraphemes`] (the C API does
-/// too). A Rust [`Buffer`] defaults to [`Self::MonotoneCharacters`],
-/// the level closest to what sigilbuzz produced before it supported
-/// cluster levels.
+/// The default is [`Self::MonotoneGraphemes`], as in HarfBuzz and the
+/// C API. Before 0.24.0 a Rust [`Buffer`] defaulted to
+/// [`Self::MonotoneCharacters`], which gives a combining mark (and the
+/// other characters a grapheme merges) a cluster of its own; call
+/// [`Buffer::set_cluster_level`] with it to keep those clusters.
 ///
 /// # Examples
 ///
@@ -261,20 +262,22 @@ impl SubAssign for BufferFlags {
 /// use sigilbuzz::{Buffer, ClusterLevel};
 ///
 /// let mut buffer = Buffer::new();
-/// assert_eq!(buffer.cluster_level(), ClusterLevel::MonotoneCharacters);
-/// buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
+/// assert_eq!(buffer.cluster_level(), ClusterLevel::MonotoneGraphemes);
 /// assert!(buffer.cluster_level().is_monotone());
 /// assert!(buffer.cluster_level().is_graphemes());
+/// buffer.set_cluster_level(ClusterLevel::MonotoneCharacters);
+/// assert!(buffer.cluster_level().is_characters());
 /// ```
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClusterLevel {
     /// Characters merge into their grapheme, and clusters stay in
     /// order (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`, HarfBuzz's
-    /// default).
+    /// default and sigilbuzz's).
+    #[default]
     MonotoneGraphemes,
     /// Every character starts with its own cluster, and clusters stay
-    /// in order (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS`).
-    #[default]
+    /// in order (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS`). The
+    /// default of a Rust [`Buffer`] before 0.24.0.
     MonotoneCharacters,
     /// Every character keeps its own cluster, in whatever order
     /// shaping leaves them (`HB_BUFFER_CLUSTER_LEVEL_CHARACTERS`).
@@ -336,7 +339,8 @@ impl Buffer {
     }
 
     /// The cluster level set with [`Self::set_cluster_level`];
-    /// [`ClusterLevel::MonotoneCharacters`] until then.
+    /// [`ClusterLevel::MonotoneGraphemes`], HarfBuzz's default, until
+    /// then.
     #[must_use]
     pub const fn cluster_level(&self) -> ClusterLevel {
         self.cluster_level
@@ -357,14 +361,15 @@ impl Buffer {
     /// let mut buffer = Buffer::new();
     /// buffer.push_str("x\u{0301}");
     ///
-    /// // The combining acute keeps its own cluster ...
+    /// // The default grapheme level merges the combining acute into
+    /// // the cluster of its base ...
     /// let clusters = |b: &Buffer| -> Vec<u32> {
     ///     shape(&font, b, &[]).unwrap().glyphs.iter().map(|g| g.cluster).collect()
     /// };
-    /// assert_eq!(clusters(&buffer), [0, 1]);
-    /// // ... until the grapheme levels merge it into its base.
-    /// buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
     /// assert_eq!(clusters(&buffer), [0, 0]);
+    /// // ... and the character levels give it its own.
+    /// buffer.set_cluster_level(ClusterLevel::MonotoneCharacters);
+    /// assert_eq!(clusters(&buffer), [0, 1]);
     /// # Ok::<(), sigilbuzz::Error>(())
     /// ```
     pub fn set_cluster_level(&mut self, level: ClusterLevel) {
@@ -468,7 +473,8 @@ mod tests {
     fn flags_and_level_survive_clear() {
         let mut b = Buffer::new();
         assert_eq!(b.flags(), BufferFlags::DEFAULT);
-        assert_eq!(b.cluster_level(), ClusterLevel::MonotoneCharacters);
+        assert_eq!(b.cluster_level(), ClusterLevel::MonotoneGraphemes);
+        assert_eq!(ClusterLevel::default(), ClusterLevel::MonotoneGraphemes);
         b.set_flags(BufferFlags::BOT | BufferFlags::REMOVE_DEFAULT_IGNORABLES);
         b.set_cluster_level(ClusterLevel::Characters);
         b.push_str("abc");

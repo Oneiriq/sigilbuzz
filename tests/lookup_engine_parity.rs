@@ -91,13 +91,15 @@ fn a_cgj_that_blocked_mark_reordering_stays_hidden_from_gsub() {
     //
     // Acute (230) then cedilla (202): the CGJ kept them from being
     // reordered, so it stays hidden and the acute keeps its own form.
+    // At the default grapheme level the marks and the CGJ share the
+    // cluster of the base.
     assert_eq!(
         marks(RUBIK, "f\u{0301}\u{034F}\u{0327}"),
         [
             (162, 0, 0, 0),
-            (1126, 1, -280, 190),
-            (928, 3, 0, 0),
-            (1137, 5, -340, 0)
+            (1126, 0, -280, 190),
+            (928, 0, 0, 0),
+            (1137, 0, -340, 0)
         ]
     );
     // Cedilla then acute were in order: the CGJ is skipped and the
@@ -106,9 +108,9 @@ fn a_cgj_that_blocked_mark_reordering_stays_hidden_from_gsub() {
         marks(RUBIK, "f\u{0327}\u{034F}\u{0301}"),
         [
             (162, 0, 0, 0),
-            (1154, 1, -340, 0),
-            (928, 3, 0, 0),
-            (1145, 5, -308, 10)
+            (1154, 0, -340, 0),
+            (928, 0, 0, 0),
+            (1145, 0, -308, 10)
         ]
     );
     // Before a base the CGJ blocks nothing either: "f", CGJ, "i"
@@ -143,10 +145,10 @@ fn a_gpos_context_subtable_that_does_not_match_leaves_the_next_its_turn() {
     assert_eq!(
         got,
         [
-            (97, 12, 0, 134),
+            (97, 10, 0, 134),
             (62, 10, 661, 0),
             (4263, 8, 261, 0),
-            (97, 6, 0, -9),
+            (97, 4, 0, -9),
             (4173, 4, 343, 0),
             (4366, 2, 336, 0),
             (4330, 0, 674, 0),

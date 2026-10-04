@@ -109,8 +109,7 @@ pub fn assign_mongolian_forms_in_context(
 ///
 /// `codepoints` and `glyphs` start 1:1 (a glyph per codepoint, post
 /// cmap). After the call `glyphs` may have shrunk through ligature
-/// collapse. Clusters merge at the monotone characters level, the
-/// default of a Rust [`crate::Buffer`].
+/// collapse. Clusters merge at the monotone characters level.
 pub fn shape_mongolian(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,

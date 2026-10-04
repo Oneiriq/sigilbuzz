@@ -86,9 +86,9 @@ signatures only change in a major version.
     `Buffer::{set_insert_dotted_circle, insert_dotted_circle}` pair that 0.22.0
     development builds had.
   - `ClusterLevel` and `Buffer::{set_cluster_level, cluster_level}`: HarfBuzz's four
-    cluster levels. A Rust `Buffer` defaults to `MonotoneCharacters`; the C API
-    defaults to HarfBuzz's `MONOTONE_GRAPHEMES`. Both settings survive
-    `Buffer::clear`.
+    cluster levels. A Rust `Buffer` and the C API both default to HarfBuzz's
+    `MonotoneGraphemes` (`MONOTONE_GRAPHEMES`); before 0.24.0 a Rust `Buffer`
+    defaulted to `MonotoneCharacters`. Both settings survive `Buffer::clear`.
 
 `sigilbuzz-render`:
 

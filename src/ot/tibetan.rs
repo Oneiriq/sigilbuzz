@@ -42,8 +42,7 @@ pub const fn is_tibetan(ch: char) -> bool {
 /// Engine, as HarfBuzz does, every GSUB feature included.
 /// `codepoints` and `glyphs` are 1:1 on entry. After the call `glyphs`
 /// may have shrunk (ligature) or grown (multiple substitution).
-/// Clusters merge at the monotone characters level, the default of a
-/// Rust [`crate::Buffer`].
+/// Clusters merge at the monotone characters level.
 pub fn shape_tibetan(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,
