@@ -404,3 +404,36 @@ fn rubik_vmtx_passthrough_when_source_has_none() {
     assert!(baked.vmtx().unwrap().is_none(), "vmtx not synthesised");
     assert!(baked.vvar().unwrap().is_none(), "VVAR not synthesised");
 }
+
+#[test]
+fn outline_and_plan_coordinates_round_the_way_harfbuzz_does() {
+    // -0.9 is -14745.6 F2DOT14 steps. A HarfBuzz font rounds it to 16.16
+    // first (-58982, which is -14745.5 steps) and then up to -14745; the
+    // instancer's plan rounds it straight to -14746.
+    assert_eq!(
+        super::snap_f2dot14(super::round_16_16(-0.9)) * 16384.0,
+        -14745.0
+    );
+    assert_eq!(super::f2dot14_grid(-0.9), -14746);
+    // Values on the grid stay put either way.
+    assert_eq!(super::snap_f2dot14(super::round_16_16(0.5)), 0.5);
+    assert_eq!(super::f2dot14_grid(0.5), 8192);
+}
+
+#[test]
+fn avar_maps_f2dot14_units_rounding_halves_up() {
+    use super::axes::map_f2dot14;
+    let map = [(-16384, -16384), (-2, -1), (0, 0), (2, 1), (16384, 16384)];
+    // Halfway between map points rounds up, either side of zero.
+    assert_eq!(map_f2dot14(&map, 1), 1);
+    assert_eq!(map_f2dot14(&map, -1), 0);
+    // On a map point, its value.
+    assert_eq!(map_f2dot14(&map, 2), 1);
+    // Past the ends, shifted by the nearest pair.
+    let short = [(-8192, -4096), (8192, 4096)];
+    assert_eq!(map_f2dot14(&short, 9000), 4904);
+    assert_eq!(map_f2dot14(&short, -9000), -4904);
+    // No map, or a single pair, shifts.
+    assert_eq!(map_f2dot14(&[], 77), 77);
+    assert_eq!(map_f2dot14(&[(10, 20)], 77), 87);
+}

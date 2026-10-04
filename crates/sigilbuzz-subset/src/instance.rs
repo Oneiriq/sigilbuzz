@@ -45,6 +45,31 @@
 //! `GPOS` and `GDEF` deltas. (CFF2 charstrings and their store keep
 //! their own rounding.)
 //!
+//! # Coordinates
+//!
+//! HarfBuzz's instancer reaches the post-`avar` coordinates two ways,
+//! and the bake takes each table's from the way HarfBuzz does (see
+//! [`F2Dot14`]):
+//!
+//! - The outline coordinates: each normalized value rounded to 16.16,
+//!   mapped through `avar`, rounded to 16.16 again and then to F2DOT14,
+//!   as a HarfBuzz font set to the instance places them. The outlines
+//!   and the metrics their phantom points give (`glyf`, `hmtx`, `vmtx`,
+//!   `VORG`, `head`, `hhea`, `vhea`), the `HVAR` and `VVAR` advances of
+//!   a font without `gvar`, and CFF2 charstrings take these. A partial
+//!   instance bakes its new default outlines and metrics at them too.
+//! - The plan coordinates: each normalized value rounded to F2DOT14,
+//!   mapped through `avar` in F2DOT14 units, then rounded again, as
+//!   HarfBuzz's instancer plans its axis locations. The `GDEF` store
+//!   (and so the `GPOS` values, anchors and ligature carets that vary
+//!   through it), `cvar`, `BASE`, `MVAR` and the FeatureVariations
+//!   choice take these, and a partial instance projects every variation
+//!   table (`gvar`, `HVAR`, `VVAR`, `MVAR`, `GDEF`, `BASE`, `cvar`,
+//!   `CFF2`) onto its kept axes at them.
+//!
+//! The two differ by one F2DOT14 step where the rounding lands on
+//! different sides, which moves a delta by a unit now and then.
+//!
 //! # What gets dropped (or kept verbatim)
 //!
 //! When [`InstanceInput::drop_var_tables`] is true (the recommended
@@ -180,15 +205,16 @@ pub(crate) use ivs::{bake_ivs_partial, project_ivs_with, PinnedOnly, Projection,
 pub(crate) use region::project_region_onto_kept_axes;
 
 /// A normalized axis coordinate in `[-1.0, 1.0]`, where `0` is the axis
-/// default and `-1` and `1` its extremes. Pass the unrounded values
-/// [`sigilbuzz::tables::Fvar::normalize_coords`] gives: the instancer
-/// maps them through `avar` and only then rounds to the F2DOT14 grid,
-/// as HarfBuzz and fontTools do. Rounding before `avar` can land an
-/// axis one F2DOT14 step away and move outlines and advances by a unit.
-/// The `GPOS` values, anchors and ligature carets that vary through the
-/// `GDEF` store are resolved where HarfBuzz's instancer resolves them:
-/// at the values put on the F2DOT14 grid first, then mapped through
-/// `avar` and left unrounded.
+/// default and `-1` and `1` its extremes, before `avar`.
+///
+/// Pass each axis' unrounded normalized value, as
+/// [`sigilbuzz::tables::VariationAxis::normalize`] gives it. The
+/// instancer rounds it itself, the two ways HarfBuzz's instancer does
+/// for different tables (see the module docs): to 16.16 before `avar`
+/// and to F2DOT14 after it for the outlines and glyph metrics, and to
+/// F2DOT14 both before and after `avar` for the other variation tables.
+/// A value rounded before it gets here can land one F2DOT14 step away
+/// from HarfBuzz's and move outlines, advances or deltas by a unit.
 pub type F2Dot14 = f32;
 
 /// Per-axis pin policy for partial instancing.
@@ -331,18 +357,19 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // shaper's coord-space is post-avar, so the deltas we apply must
     // come from the same space.
     let coords = post_avar(face, &input.coords)?;
-    // The GPOS and GDEF bakes take the coordinates before rounding (see
-    // `layout_coords`).
-    let unrounded = layout_coords(face, &input.coords)?;
+    // The GPOS, GDEF, cvt, BASE and MVAR bakes and the FeatureVariations
+    // choice take the plan coordinates (see `plan_coords`); the outlines
+    // and glyph metrics take `coords`.
+    let plan = plan_coords(face, &input.coords)?;
 
     if face.record(tag::CFF2).is_some() {
-        return cff2_bake(face, input, &coords);
+        return cff2_bake(face, input, &coords, &plan);
     }
 
     let warnings = Warnings::default();
 
     // MVAR-aware bake of OS/2, hhea, post, vhea (when MVAR is present).
-    let mvar_bake = bake_mvar_metrics(face, &coords)?;
+    let mvar_bake = bake_mvar_metrics(face, &plan)?;
 
     // glyf, loca, and the metrics their phantom points give: hmtx,
     // vmtx, and the head, hhea and vhea fields that follow from them.
@@ -366,17 +393,17 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // GPOS variation bake: when the source carries GPOS variations
     // (VariationIndex offsets on value records and anchors), fold
     // every resolvable variation into the static field it adjusts at
-    // the unrounded coordinates and zero the offset slot. Runs *before* the
+    // the plan coordinates and zero the offset slot. Runs *before* the
     // GDEF.IVS prune below. The prune severs the only path back to
     // the IVS bytes, so any remaining VariationIndex would be orphan.
     let gpos_baked = if input.drop_var_tables {
-        bake_gpos_var(face, &unrounded)?
+        bake_gpos_var(face, &plan)?
     } else {
         None
     };
     // FeatureVariations: the record that matches at `coords` becomes
     // the default features, and the table goes.
-    let pinned = pinned_axes(&coords, &[]);
+    let pinned = pinned_axes(&plan, &[]);
     let gpos_baked = layout_variations(face, tag::GPOS, gpos_baked, &pinned, &[], &warnings)?;
     if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &[], &warnings)? {
         tables.push((tag::GSUB, b));
@@ -389,7 +416,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // caller wants the static "ship as static" output, prune it. See
     // module header for the GPOS-bake-then-IVS-prune ordering.
     let gdef_bake = if input.drop_var_tables {
-        prune_gdef_store(face, &unrounded, &warnings)?
+        prune_gdef_store(face, &plan, &warnings)?
     } else {
         GdefBake::Unchanged
     };
@@ -399,14 +426,14 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
 
     // BASE: the coordinates its store varies move to the instance.
     let base_bake = if input.drop_var_tables {
-        push_base(face, &coords, &[], &warnings, &mut tables)
+        push_base(face, &plan, &[], &warnings, &mut tables)
     } else {
         BaseBake::Unchanged
     };
 
     // cvt: the cvar deltas at the instance, which the glyph
     // instructions read.
-    if let Some(cvt) = cvar::bake_cvt(face, &coords, &[], &warnings).and_then(|b| b.cvt) {
+    if let Some(cvt) = cvar::bake_cvt(face, &plan, &[], &warnings).and_then(|b| b.cvt) {
         tables.push((cvar::CVT, cvt));
     }
 
@@ -455,56 +482,76 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     })
 }
 
-/// The post-avar coordinates of the normalized `coords`: mapped through
-/// `avar`, then put on the F2DOT14 grid, as HarfBuzz and fontTools
-/// place them. A variable font is drawn at those coordinates, so its
-/// instance is baked at them.
+/// The outline coordinates of the normalized `coords`: rounded to 16.16,
+/// mapped through `avar`, rounded to 16.16 again, then put on the
+/// F2DOT14 grid, as a HarfBuzz font set to the instance places them
+/// (`hb_ot_var_normalize_coords`). HarfBuzz's instancer bakes the
+/// outlines, and the advances `HVAR` and `VVAR` give, at these.
 fn post_avar(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
-    Ok(avar_mapped(face, coords)?
-        .into_iter()
-        .map(snap_f2dot14)
-        .collect())
-}
-
-/// The coordinates HarfBuzz's instancer resolves the `GDEF` store at,
-/// the one `GPOS` values, anchors and ligature carets vary through: the
-/// normalized `coords` put on the F2DOT14 grid, then mapped through
-/// `avar` and left unrounded. The outlines take [`post_avar`] instead.
-/// Resolving the store at these makes each delta round as HarfBuzz
-/// rounds it.
-fn layout_coords(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
-    let on_grid: Vec<f32> = coords.iter().copied().map(snap_f2dot14).collect();
-    avar_mapped(face, &on_grid)
-}
-
-/// `coords` mapped through `avar`, clamped to the normalized range (a
-/// non-finite value becomes zero).
-fn avar_mapped(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
+    let fixed: Vec<f32> = coords.iter().map(|&v| round_16_16(v)).collect();
     let mapped = match face.avar().map_err(SubsetError::from)? {
-        Some(av) => av.remap_all(coords),
-        None => coords.to_vec(),
+        Some(av) => av.remap_all(&fixed),
+        None => fixed,
     };
     Ok(mapped
         .into_iter()
-        .map(|v| {
-            if v.is_finite() {
-                v.clamp(-1.0, 1.0)
-            } else {
-                0.0
-            }
+        .map(|v| snap_f2dot14(round_16_16(v)))
+        .collect())
+}
+
+/// `v` rounded to 16.16, halves up, after clamping to the normalized
+/// range. A non-finite value becomes zero.
+fn round_16_16(v: f32) -> f32 {
+    if !v.is_finite() {
+        return 0.0;
+    }
+    util::round_half_up(v.clamp(-1.0, 1.0) * 65536.0) as f32 / 65536.0
+}
+
+/// The plan coordinates of the normalized `coords`: put on the F2DOT14
+/// grid, mapped through `avar` in F2DOT14 units, and rounded again, as
+/// HarfBuzz's instancer normalizes its axis locations. It resolves the
+/// `GDEF` store (which `GPOS` values, anchors and ligature carets vary
+/// through), `cvar`, `BASE` and `MVAR`, and pins the axes of a partial
+/// instance, at these rather than at the [`post_avar`] ones. They differ
+/// by a step where `avar` maps a coordinate between grid points.
+fn plan_coords(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
+    // A malformed avar fails here as it fails `post_avar`.
+    let has_avar = face.avar().map_err(SubsetError::from)?.is_some();
+    let maps = if has_avar {
+        face.table_bytes(tag::AVAR)
+            .ok()
+            .and_then(axes::avar_segment_maps)
+    } else {
+        None
+    };
+    Ok(coords
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let on_grid = i32::from(f2dot14_grid(v));
+            let mapped = maps
+                .as_ref()
+                .and_then(|m| m.get(i))
+                .map_or(on_grid, |map| axes::map_f2dot14(map, on_grid));
+            f32::from(glyf::clamp_i16(mapped.clamp(-16384, 16384))) / 16384.0
         })
         .collect())
+}
+
+/// `v` in F2DOT14 units, rounded halves up, after clamping to the
+/// normalized range. A non-finite value becomes zero.
+fn f2dot14_grid(v: f32) -> i16 {
+    if !v.is_finite() {
+        return 0;
+    }
+    glyf::clamp_i16(util::round_half_up(v.clamp(-1.0, 1.0) * 16384.0))
 }
 
 /// `v` on the F2DOT14 grid, rounded to nearest (halves up) and clamped to
 /// the normalized range. A non-finite value becomes zero.
 fn snap_f2dot14(v: f32) -> f32 {
-    if !v.is_finite() {
-        return 0.0;
-    }
-    f32::from(glyf::clamp_i16(util::round_half_up(
-        v.clamp(-1.0, 1.0) * 16384.0,
-    ))) / 16384.0
+    f32::from(f2dot14_grid(v)) / 16384.0
 }
 
 /// Applies the `BASE` variations at the post-avar `coords` (see
@@ -635,13 +682,15 @@ fn push_vertical_metrics(
     Ok(())
 }
 
-/// CFF2 path: rebuild the CFF2 table with `blend` resolved at `coords`,
+/// CFF2 path: rebuild the CFF2 table with `blend` resolved at the outline
+/// `coords` (the MVAR, layout and BASE bakes take the `plan` ones),
 /// then assemble a fresh SFNT directory mirroring the glyf path's
 /// hmtx/vmtx/MVAR bakes and GDEF.IVS prune.
 fn cff2_bake(
     face: &Face<'_>,
     input: &InstanceInput,
     coords: &[f32],
+    plan: &[f32],
 ) -> Result<InstancedOutput, SubsetError> {
     let maxp = face.maxp()?;
     let num_glyphs = maxp.num_glyphs;
@@ -653,7 +702,7 @@ fn cff2_bake(
     let hmtx_out = bake_hmtx(face, coords, num_glyphs)?;
     let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, None, &warnings);
     let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
-    let mvar_bake = bake_mvar_metrics(face, coords)?;
+    let mvar_bake = bake_mvar_metrics(face, plan)?;
 
     let head_out = face
         .table_bytes(tag::HEAD)
@@ -693,11 +742,11 @@ fn cff2_bake(
     }
 
     let gpos_baked = if input.drop_var_tables {
-        bake_gpos_var(face, coords)?
+        bake_gpos_var(face, plan)?
     } else {
         None
     };
-    let pinned = pinned_axes(coords, &[]);
+    let pinned = pinned_axes(plan, &[]);
     let gpos_baked = layout_variations(face, tag::GPOS, gpos_baked, &pinned, &[], &warnings)?;
     if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &[], &warnings)? {
         tables.push((tag::GSUB, b));
@@ -707,7 +756,7 @@ fn cff2_bake(
     }
 
     let gdef_bake = if input.drop_var_tables {
-        prune_gdef_store(face, coords, &warnings)?
+        prune_gdef_store(face, plan, &warnings)?
     } else {
         GdefBake::Unchanged
     };
@@ -716,7 +765,7 @@ fn cff2_bake(
     }
 
     let base_bake = if input.drop_var_tables {
-        push_base(face, coords, &[], &warnings, &mut tables)
+        push_base(face, plan, &[], &warnings, &mut tables)
     } else {
         BaseBake::Unchanged
     };

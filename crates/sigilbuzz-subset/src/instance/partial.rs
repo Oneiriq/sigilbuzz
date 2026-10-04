@@ -15,7 +15,7 @@ use super::metrics::{bake_vorg, MvarBake, VorgBake};
 use super::metrics_var::{bake_hvar_partial_with, bake_mvar_partial, bake_vvar_partial_with};
 use super::store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
 use super::{
-    layout_coords, post_avar, push_base, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput,
+    plan_coords, post_avar, push_base, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput,
 };
 use crate::base::BaseBake;
 use crate::sfnt;
@@ -73,10 +73,14 @@ pub(super) fn partial_instance(
     let pins = &input.axis_pins;
     let coords = &input.coords;
 
-    // Apply avar's piecewise-linear remap if the source ships one. The
-    // Pin-axis support-scalar evaluation must use post-avar coords
-    // (the IVS regions are defined in the post-avar space).
-    let post_avar_coords = post_avar(face, coords)?;
+    // The coordinates after avar, the variation regions' space, in
+    // HarfBuzz's two forms: the new default outlines and glyph metrics
+    // are baked at the outline coordinates, as a HarfBuzz font set to
+    // the pinned location draws them, and every variation table is
+    // projected at the plan coordinates, as HarfBuzz's instancer pins
+    // its axes (see `plan_coords`).
+    let plan = plan_coords(face, coords)?;
+    let outline = post_avar(face, coords)?;
 
     let warnings = Warnings::default();
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
@@ -120,7 +124,7 @@ pub(super) fn partial_instance(
     } else {
         PinnedOnly::Keep
     };
-    let default_coords: Vec<f32> = post_avar_coords
+    let default_coords: Vec<f32> = outline
         .iter()
         .zip(pins)
         .map(|(&c, pin)| if *pin == AxisPin::Keep { 0.0 } else { c })
@@ -147,9 +151,9 @@ pub(super) fn partial_instance(
 
     // HVAR / VVAR / MVAR rewrites (optional). A malformed table is
     // dropped (its metrics stop varying) and reported.
-    let hvar = |b: &[u8]| bake_hvar_partial_with(b, &post_avar_coords, pins, pinned_only);
-    let vvar = |b: &[u8]| bake_vvar_partial_with(b, &post_avar_coords, pins, pinned_only);
-    let mvar = |b: &[u8]| bake_mvar_partial(b, &post_avar_coords, pins);
+    let hvar = |b: &[u8]| bake_hvar_partial_with(b, &plan, pins, pinned_only);
+    let vvar = |b: &[u8]| bake_vvar_partial_with(b, &plan, pins, pinned_only);
+    let mvar = |b: &[u8]| bake_mvar_partial(b, &plan, pins);
     type MetricsBake<'b> = &'b dyn Fn(&[u8]) -> Result<Vec<u8>, SubsetError>;
     let metrics_bakes: [([u8; 4], MetricsBake<'_>); 3] =
         [(tag::HVAR, &hvar), (tag::VVAR, &vvar), (tag::MVAR, &mvar)];
@@ -168,10 +172,8 @@ pub(super) fn partial_instance(
     }
     // GDEF.IVS rewrite (optional). The projection can renumber the
     // store's rows, so the GDEF carets follow the new numbering and so
-    // do the GPOS VariationIndex tables below. As in the full instance,
-    // the store is resolved at the unrounded coordinates.
-    let unrounded = layout_coords(face, coords)?;
-    let (gdef_bake, store_remap) = bake_gdef_store_partial(face, &unrounded, pins, &warnings)?;
+    // do the GPOS VariationIndex tables below.
+    let (gdef_bake, store_remap) = bake_gdef_store_partial(face, &plan, pins, &warnings)?;
     if let GdefBake::Rebuilt(b) = &gdef_bake {
         tables.push((tag::GDEF, b.clone()));
     }
@@ -186,7 +188,7 @@ pub(super) fn partial_instance(
 
     // FeatureVariations: conditions on the pinned axes are settled and
     // the kept axes renumbered.
-    let pinned = pinned_axes(&post_avar_coords, pins);
+    let pinned = pinned_axes(&plan, pins);
     let new_axis = kept_axis_indices(pins);
     if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &new_axis, &warnings)? {
         tables.push((tag::GSUB, b));
@@ -206,7 +208,7 @@ pub(super) fn partial_instance(
     // region trim via `bake_ivs_partial`; charstrings re-emit blend
     // ops with the surviving regions and pre-scaled deltas.
     if let Ok(cff2_bytes) = face.table_bytes(tag::CFF2) {
-        let new_cff2 = crate::cff2::bake_cff2_partial(cff2_bytes, &post_avar_coords, pins)?;
+        let new_cff2 = crate::cff2::bake_cff2_partial(cff2_bytes, &plan, pins)?;
         tables.push((tag::CFF2, new_cff2));
     }
 
@@ -228,7 +230,7 @@ pub(super) fn partial_instance(
         };
         let new_gvar = crate::gvar_partial::bake_gvar_partial_with(
             gvar_bytes,
-            &post_avar_coords,
+            &plan,
             pins,
             new_axis_count,
             &points,
@@ -238,11 +240,11 @@ pub(super) fn partial_instance(
 
     // BASE: the coordinates its store varies move to the new default,
     // and the store keeps the kept axes.
-    let base_bake = push_base(face, &post_avar_coords, pins, &warnings, &mut tables);
+    let base_bake = push_base(face, &plan, pins, &warnings, &mut tables);
 
     // cvt takes the cvar tuples left on the pinned axes only; cvar
     // keeps the rest, for the kept axes.
-    if let Some(bake) = cvar::bake_cvt(face, &post_avar_coords, pins, &warnings) {
+    if let Some(bake) = cvar::bake_cvt(face, &plan, pins, &warnings) {
         if let Some(cvt) = bake.cvt {
             tables.push((cvar::CVT, cvt));
         }
