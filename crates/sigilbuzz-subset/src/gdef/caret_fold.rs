@@ -9,8 +9,6 @@
 //! coordinate, and clears the offset, the same fold the GPOS bake
 //! applies to anchors (see [`crate::gpos_var`]).
 
-use sigilbuzz::tables::variation_store::ItemVariationStore;
-
 use crate::gpos_var::{fold_one_field, DeviceSlot};
 use crate::util::{StoreDeltas, WorkBudget, WORK_LIMIT};
 
@@ -27,11 +25,7 @@ fn read_u16(buf: &[u8], pos: usize) -> Option<usize> {
 /// once, and its cleared offset makes later visits no-ops. Many
 /// ligatures can share one LigGlyph, so the walk charges a
 /// [`WorkBudget`] for every caret it visits and stops once it runs out.
-pub(crate) fn fold_caret_variations(
-    gdef: &mut [u8],
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
-) {
+pub(crate) fn fold_caret_variations(gdef: &mut [u8], deltas: Option<&StoreDeltas<'_, '_>>) {
     let Some(list) = read_u16(gdef, 8).filter(|&off| off != 0) else {
         return;
     };
@@ -39,7 +33,6 @@ pub(crate) fn fold_caret_variations(
         return;
     };
     let budget = WorkBudget::new(WORK_LIMIT);
-    let deltas = store.map(|s| StoreDeltas::new(s, coords));
     for i in 0..count {
         let Some(lig) = read_u16(gdef, list + 4 + i * 2).filter(|&r| r != 0) else {
             continue;
@@ -62,7 +55,7 @@ pub(crate) fn fold_caret_variations(
                     field: Some(caret + 2),
                     slot: caret + 4,
                 };
-                fold_one_field(gdef, slot, deltas.as_ref());
+                fold_one_field(gdef, slot, deltas);
             }
         }
     }
@@ -74,7 +67,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::fold_caret_variations;
-    use sigilbuzz::tables::variation_store::ItemVariationStore;
+    use crate::util::StoreDeltas;
 
     fn u16_at(buf: &[u8], pos: usize) -> u16 {
         u16::from_be_bytes([buf[pos], buf[pos + 1]])
@@ -126,8 +119,8 @@ mod tests {
     fn format3_carets_fold_against_the_caret_value() {
         let (mut gdef, [plain, varied, hinted]) = gdef();
         let ivs = store();
-        let store = ItemVariationStore::parse(&ivs).unwrap();
-        fold_caret_variations(&mut gdef, Some(&store), &[1.0]);
+        let deltas = StoreDeltas::new(&ivs, &[1.0]).unwrap();
+        fold_caret_variations(&mut gdef, Some(&deltas));
         assert_eq!(u16_at(&gdef, plain + 2), 300, "format 1 untouched");
         assert_eq!(u16_at(&gdef, varied + 2), 507, "item 1, not the decoy");
         assert_eq!(u16_at(&gdef, varied + 4), 0);
@@ -141,7 +134,7 @@ mod tests {
         for len in [9, 14, 20, 26, 34] {
             let mut cut = gdef[..len].to_vec();
             let before = cut.clone();
-            fold_caret_variations(&mut cut, None, &[1.0]);
+            fold_caret_variations(&mut cut, None);
             assert_eq!(cut, before, "cut at {len}");
         }
     }

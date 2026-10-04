@@ -7,7 +7,6 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
-use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use super::glyf::{clamp_i16, GlyphMetrics};
@@ -110,11 +109,18 @@ fn write_u16(buf: &mut [u8], off: usize, v: u16) {
     }
 }
 
-/// The store of the HVAR or VVAR `table` (the store offset sits at byte
-/// 4 of both); `None` when it cannot be read.
-fn metrics_store(table: &[u8]) -> Option<ItemVariationStore<'_>> {
+/// The deltas at `coords` of the store of the HVAR or VVAR `table` (the
+/// store offset sits at byte 4 of both), reporting a spent budget
+/// against `tag`; `None` when the store cannot be read.
+fn metrics_deltas<'s, 'a>(
+    table: &'a [u8],
+    coords: &'s [f32],
+    warnings: &'s Warnings,
+    tag: [u8; 4],
+) -> Option<StoreDeltas<'s, 'a>> {
     let off = table.get(STORE_SLOT..).and_then(<[u8]>::first_chunk::<4>)?;
-    ItemVariationStore::parse(table.get(u32::from_be_bytes(*off) as usize..)?).ok()
+    let store = table.get(u32::from_be_bytes(*off) as usize..)?;
+    StoreDeltas::new(store, coords).map(|d| d.reporting(warnings, tag))
 }
 
 /// The offset of the index map whose slot is at byte `slot` of `table`;
@@ -147,6 +153,7 @@ pub(super) fn bake_hmtx(
     face: &Face<'_>,
     coords: &[f32],
     num_glyphs: u16,
+    warnings: &Warnings,
 ) -> Result<HmtxBake, SubsetError> {
     let hmtx = face.hmtx().map_err(SubsetError::from)?;
     let hvar = face.hvar().map_err(SubsetError::from)?;
@@ -155,8 +162,7 @@ pub(super) fn bake_hmtx(
         .as_ref()
         .and_then(|_| face.table_bytes(tag::HVAR).ok())
         .filter(|_| !coords.is_empty());
-    let store = hvar_bytes.and_then(metrics_store);
-    let deltas = store.as_ref().map(|s| StoreDeltas::new(s, coords));
+    let deltas = hvar_bytes.and_then(|b| metrics_deltas(b, coords, warnings, tag::HVAR));
     let advance_map = hvar_bytes.map_or(0, |b| map_offset(b, 8));
 
     let mut advances: Vec<u16> = Vec::with_capacity(num_glyphs as usize);
@@ -282,8 +288,7 @@ pub(super) fn bake_vmtx(
         .as_ref()
         .and_then(|_| face.table_bytes(tag::VVAR).ok())
         .filter(|_| !coords.is_empty());
-    let store = vvar_bytes.and_then(metrics_store);
-    let deltas = store.as_ref().map(|s| StoreDeltas::new(s, coords));
+    let deltas = vvar_bytes.and_then(|b| metrics_deltas(b, coords, warnings, tag::VVAR));
     let (advance_map, tsb_map) =
         vvar_bytes.map_or((0, 0), |b| (map_offset(b, 8), map_offset(b, 12)));
     for gid in 0..num_glyphs {
@@ -364,7 +369,10 @@ pub(super) fn bake_vorg(
         return VorgBake::Unchanged;
     }
     let store_off = offset_at(STORE_SLOT);
-    let store = match vvar_bytes.get(store_off..).map(ItemVariationStore::parse) {
+    let store = match vvar_bytes
+        .get(store_off..)
+        .map(|b| sigilbuzz::tables::variation_store::ItemVariationStore::parse(b).map(|_| b))
+    {
         Some(Ok(store)) => store,
         Some(Err(e)) => {
             warnings.parse_error(tag::VVAR, store_off, &e, "the vertical origin deltas");
@@ -380,7 +388,10 @@ pub(super) fn bake_vorg(
             return VorgBake::Unchanged;
         }
     };
-    let deltas = StoreDeltas::new(&store, coords);
+    let Some(deltas) = StoreDeltas::new(store, coords).map(|d| d.reporting(warnings, tag::VORG))
+    else {
+        return VorgBake::Unchanged;
+    };
     let delta = |gid: u16| glyph_delta(&deltas, vvar_bytes, map_off, gid, false);
     match crate::vorg::bake_vorg(vorg_bytes, num_glyphs, delta) {
         Ok(bytes) => VorgBake::Rebuilt(bytes),

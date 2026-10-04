@@ -12,7 +12,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use sigilbuzz::tables::variation_store::ItemVariationStore;
+use crate::util::StoreDeltas;
 
 use super::{
     bake_gpos_at_coords, strip_variation_indices, walk_gpos_device_slots,
@@ -117,8 +117,8 @@ fn anchor3(x: i16, y: i16, dev: u16) -> [u8; 10] {
 
 fn bake(gpos: &[u8]) -> Vec<u8> {
     let ivs = build_ivs(&[DECOY_DELTA, REAL_DELTA]);
-    let store = ItemVariationStore::parse(&ivs).unwrap();
-    bake_gpos_at_coords(gpos, Some(&store), &[1.0]).unwrap()
+    let store = StoreDeltas::new(&ivs, &[1.0]).unwrap();
+    bake_gpos_at_coords(gpos, Some(&store)).unwrap()
 }
 
 /// MarkBasePos (or MarkMarkPos) with one mark and one base, both

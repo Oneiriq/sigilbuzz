@@ -193,7 +193,7 @@ use crate::sfnt;
 use crate::util;
 use crate::warnings::Warnings;
 use crate::{SubsetError, SubsetWarning};
-use gdef_store::{prune_gdef_store, GdefBake};
+use gdef_store::{gdef_deltas, prune_gdef_store, GdefBake};
 use glyf::{bake_glyf_loca, GlyfLocaBake, GlyphMetrics};
 use metrics::{
     bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, hmtx_from_metrics, patch_head_bounds,
@@ -397,7 +397,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // GDEF.IVS prune below. The prune severs the only path back to
     // the IVS bytes, so any remaining VariationIndex would be orphan.
     let gpos_baked = if input.drop_var_tables {
-        bake_gpos_var(face, &plan)?
+        bake_gpos_var(face, &plan, &warnings)?
     } else {
         None
     };
@@ -603,7 +603,7 @@ fn push_glyf_tables(
     let baked = glyf_loca.metrics.as_deref();
     let hmtx_out = match baked {
         Some(m) => hmtx_from_metrics(m),
-        None => bake_hmtx(face, coords, num_glyphs)?,
+        None => bake_hmtx(face, coords, num_glyphs, warnings)?,
     };
     let vmtx = bake_vmtx(face, coords, num_glyphs, baked, warnings);
 
@@ -699,7 +699,7 @@ fn cff2_bake(
     let cff2_bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
     let new_cff2 = crate::cff2::bake_at_coords(cff2_bytes, coords)?;
 
-    let hmtx_out = bake_hmtx(face, coords, num_glyphs)?;
+    let hmtx_out = bake_hmtx(face, coords, num_glyphs, &warnings)?;
     let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, None, &warnings);
     let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
     let mvar_bake = bake_mvar_metrics(face, plan)?;
@@ -742,7 +742,7 @@ fn cff2_bake(
     }
 
     let gpos_baked = if input.drop_var_tables {
-        bake_gpos_var(face, plan)?
+        bake_gpos_var(face, plan, &warnings)?
     } else {
         None
     };
@@ -852,15 +852,21 @@ fn cff1_passthrough(
 /// The bake reads its `ItemVariationStore` from the *source* GDEF, not
 /// from a re-parsed copy, so it sees every region the source uses
 /// before the prune sever the path.
-fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, SubsetError> {
+fn bake_gpos_var(
+    face: &Face<'_>,
+    coords: &[f32],
+    warnings: &Warnings,
+) -> Result<Option<Vec<u8>>, SubsetError> {
     let gpos_bytes = match face.table_bytes(tag::GPOS) {
         Ok(b) => b,
         Err(_) => return Ok(None),
     };
-    let gdef = face.gdef().map_err(SubsetError::from)?;
-    let store = gdef.as_ref().and_then(|g| g.item_variation_store());
+    // Many value records and anchors can name one row; each row is
+    // resolved once.
+    let deltas = gdef_deltas(face, coords, warnings, tag::GPOS)?;
     Ok(crate::gpos_var::bake_gpos_at_coords(
-        gpos_bytes, store, coords,
+        gpos_bytes,
+        deltas.as_ref(),
     ))
 }
 

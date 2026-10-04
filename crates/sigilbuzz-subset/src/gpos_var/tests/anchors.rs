@@ -18,8 +18,8 @@ fn fold_anchor_format1_is_noop() {
     buf.extend_from_slice(&(-200i16).to_be_bytes());
     let original = buf.clone();
     let ivs_bytes = build_ivs_one_region_one_item(40);
-    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    fold_anchor_variations(&mut buf, 4, Some(&store), &[1.0]);
+    let store = StoreDeltas::new(&ivs_bytes, &[1.0]).unwrap();
+    fold_anchor_variations(&mut buf, 4, Some(&store));
     assert_eq!(buf, original);
 }
 
@@ -34,8 +34,8 @@ fn fold_anchor_format2_is_noop() {
     buf.extend_from_slice(&42u16.to_be_bytes()); // anchorPoint
     let original = buf.clone();
     let ivs_bytes = build_ivs_one_region_one_item(40);
-    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    fold_anchor_variations(&mut buf, 4, Some(&store), &[1.0]);
+    let store = StoreDeltas::new(&ivs_bytes, &[1.0]).unwrap();
+    fold_anchor_variations(&mut buf, 4, Some(&store));
     assert_eq!(buf, original);
 }
 
@@ -64,8 +64,8 @@ fn fold_anchor_format3_folds_x_and_y() {
     buf[y_dev_pos..y_dev_pos + 2].copy_from_slice(&((vi_pos - 4) as u16).to_be_bytes());
 
     let ivs_bytes = build_ivs_one_region_one_item(25);
-    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    fold_anchor_variations(&mut buf, 4, Some(&store), &[1.0]);
+    let store = StoreDeltas::new(&ivs_bytes, &[1.0]).unwrap();
+    fold_anchor_variations(&mut buf, 4, Some(&store));
     let x = i16::from_be_bytes([buf[6], buf[7]]);
     let y = i16::from_be_bytes([buf[8], buf[9]]);
     assert_eq!(x, 125);
@@ -80,7 +80,7 @@ fn fold_anchor_format3_folds_x_and_y() {
 fn fold_anchor_zero_offset_is_noop() {
     let mut buf = vec![0xAAu8; 16];
     let original = buf.clone();
-    fold_anchor_variations(&mut buf, 0, None, &[1.0]);
+    fold_anchor_variations(&mut buf, 0, None);
     assert_eq!(buf, original);
 }
 
@@ -160,8 +160,8 @@ fn cursive_pos_anchor_variation_folds() {
     set_y_device(&mut gpos, exit_y_dev_pos, sub_off + vi_rel as usize);
 
     let ivs_bytes = build_ivs_one_region_one_item(60);
-    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+    let store = StoreDeltas::new(&ivs_bytes, &[1.0]).unwrap();
+    let baked = bake_gpos_at_coords(&gpos, Some(&store)).unwrap();
 
     // Entry: x=500+60=560, y=100+60=160.
     assert_eq!(
@@ -289,8 +289,8 @@ fn mark_base_pos_anchor_variation_folds() {
     set_y_device(&mut gpos, base_y_dev_pos, sub_off + vi_rel as usize);
 
     let ivs_bytes = build_ivs_one_region_one_item(15);
-    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+    let store = StoreDeltas::new(&ivs_bytes, &[1.0]).unwrap();
+    let baked = bake_gpos_at_coords(&gpos, Some(&store)).unwrap();
 
     assert_eq!(
         i16::from_be_bytes([baked[mark_x_pos], baked[mark_x_pos + 1]]),
@@ -434,8 +434,8 @@ fn mark_lig_pos_anchor_variation_folds() {
     set_y_device(&mut gpos, comp1_y_dev_pos, sub_off + vi_rel as usize);
 
     let ivs_bytes = build_ivs_one_region_one_item(20);
-    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+    let store = StoreDeltas::new(&ivs_bytes, &[1.0]).unwrap();
+    let baked = bake_gpos_at_coords(&gpos, Some(&store)).unwrap();
 
     // Mark anchor: 5+20=25.
     assert_eq!(
@@ -544,8 +544,8 @@ fn mark_mark_pos_anchor_variation_folds() {
     set_y_device(&mut gpos, m2_y_dev_pos, sub_off + vi_rel as usize);
 
     let ivs_bytes = build_ivs_one_region_one_item(11);
-    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    let baked = bake_gpos_at_coords(&gpos, Some(&store), &[1.0]).unwrap();
+    let store = StoreDeltas::new(&ivs_bytes, &[1.0]).unwrap();
+    let baked = bake_gpos_at_coords(&gpos, Some(&store)).unwrap();
 
     assert_eq!(
         i16::from_be_bytes([baked[m1_x_pos], baked[m1_x_pos + 1]]),

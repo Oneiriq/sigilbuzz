@@ -9,6 +9,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
+use crate::warnings::Warnings;
 use crate::SubsetError;
 
 /// Default number of work units one walk over font data may spend.
@@ -68,38 +69,168 @@ impl WorkBudget {
     }
 }
 
-/// The deltas of an `ItemVariationStore` at fixed coordinates, each row
-/// worked out once.
+/// Work units a [`StoreDeltas`] may spend per byte of its store. A row
+/// costs one unit per delta slot, and a store whose subtables do not
+/// overlap holds at least a byte per slot of each row, so a real store
+/// spends at most twice its size.
+const STORE_WORK_PER_BYTE: u64 = 8;
+
+/// The least work a [`StoreDeltas`] may spend, for small stores.
+const MIN_STORE_WORK: u64 = 1 << 20;
+
+/// What a [`StoreDeltas`] reports once its budget runs out.
+const STORE_OVER_BUDGET: &str = "variation store: row work exceeds its budget";
+
+/// The deltas of an `ItemVariationStore` at fixed coordinates.
 ///
-/// Resolving one row walks every region its subtable names, and a
-/// small table can point many records (glyphs through an index map,
-/// GPOS value records, BASE coordinates) at one large row. Remembering
-/// each row's delta keeps the work to one walk per row the store holds.
+/// A small table can point many records (glyphs through an index map,
+/// GPOS value records and anchors, BASE coordinates, ligature carets)
+/// at one large row, and many rows at one region of many axes, so each
+/// row and each region is worked out once. Subtable offsets can still
+/// alias one large subtable under many outer indices, so every new row
+/// also charges a [`WorkBudget`] scaled to the store's size, one unit
+/// per delta slot. Past it, rows resolve to zero, which leaves their
+/// source values in place, and the run is warned.
 pub(crate) struct StoreDeltas<'s, 'a> {
-    store: &'s ItemVariationStore<'a>,
+    /// The store, from its first byte to the end of its table.
+    bytes: &'a [u8],
+    store: ItemVariationStore<'a>,
     coords: &'s [f32],
+    /// Each region's scalar at `coords`, by region index.
+    regions: RefCell<BTreeMap<u16, Option<f32>>>,
+    /// Each resolved row's delta, by `(outer, inner)`.
     memo: RefCell<BTreeMap<(u16, u16), f32>>,
+    work: WorkBudget,
+    /// Where a spent budget is reported, and against which table.
+    report: Option<(&'s Warnings, [u8; 4])>,
+    warned: Cell<bool>,
 }
 
 impl<'s, 'a> StoreDeltas<'s, 'a> {
-    /// The deltas of `store` at `coords`.
-    pub(crate) const fn new(store: &'s ItemVariationStore<'a>, coords: &'s [f32]) -> Self {
-        Self {
+    /// The deltas at `coords` of the store that starts at byte 0 of
+    /// `bytes`; `None` when the store cannot be read.
+    pub(crate) fn new(bytes: &'a [u8], coords: &'s [f32]) -> Option<Self> {
+        let store = ItemVariationStore::parse(bytes).ok()?;
+        let units = (bytes.len() as u64)
+            .saturating_mul(STORE_WORK_PER_BYTE)
+            .max(MIN_STORE_WORK);
+        Some(Self {
+            bytes,
             store,
             coords,
+            regions: RefCell::new(BTreeMap::new()),
             memo: RefCell::new(BTreeMap::new()),
+            work: WorkBudget::new(units),
+            report: None,
+            warned: Cell::new(false),
+        })
+    }
+
+    /// The same deltas, reporting a spent budget to `warnings` against
+    /// `table`.
+    pub(crate) fn reporting(self, warnings: &'s Warnings, table: [u8; 4]) -> Self {
+        Self {
+            report: Some((warnings, table)),
+            ..self
         }
     }
 
     /// The delta of row `(outer, inner)`, as
-    /// [`ItemVariationStore::delta`] gives it.
+    /// [`ItemVariationStore::delta`] gives it; zero once the budget is
+    /// spent.
     pub(crate) fn get(&self, outer: u16, inner: u16) -> f32 {
         if let Some(&d) = self.memo.borrow().get(&(outer, inner)) {
             return d;
         }
-        let d = self.store.delta(outer, inner, self.coords);
-        self.memo.borrow_mut().insert((outer, inner), d);
-        d
+        match self.resolve(outer, inner) {
+            Some(d) => {
+                self.memo.borrow_mut().insert((outer, inner), d);
+                d
+            }
+            None => {
+                if let Some((warnings, table)) = self.report.filter(|_| !self.warned.get()) {
+                    warnings.push(
+                        table,
+                        0,
+                        STORE_OVER_BUDGET,
+                        "the deltas of the rows past it",
+                    );
+                }
+                self.warned.set(true);
+                0.0
+            }
+        }
+    }
+
+    /// Works out row `(outer, inner)` the way
+    /// [`ItemVariationStore::delta`] does, summing in slot order, with
+    /// each region's scalar from the cache. A row the store cannot hold
+    /// is zero; `None` when the budget runs out.
+    fn resolve(&self, outer: u16, inner: u16) -> Option<f32> {
+        let b = self.bytes;
+        if outer >= self.store.subtable_count() {
+            return Some(0.0);
+        }
+        // The parse read every subtable offset.
+        let Some(off) = be_u32(b, 8 + 4 * usize::from(outer)) else {
+            return Some(0.0);
+        };
+        let off = off as usize;
+        let (Some(item_count), Some(word_raw), Some(slots)) = (
+            be_u16(b, off),
+            be_u16(b, off.saturating_add(2)),
+            be_u16(b, off.saturating_add(4)),
+        ) else {
+            return Some(0.0);
+        };
+        if !self.work.spend(usize::from(slots) + 1) {
+            return None;
+        }
+        let long_words = word_raw & 0x8000 != 0;
+        let word_count = word_raw & 0x7FFF;
+        if word_count > slots || inner >= item_count {
+            return Some(0.0);
+        }
+        let (wide, narrow) = if long_words { (4, 2) } else { (2, 1) };
+        let row_size = usize::from(word_count) * wide + usize::from(slots - word_count) * narrow;
+        let indexes = off + 6;
+        let rows = indexes + 2 * usize::from(slots);
+        let end = usize::from(item_count)
+            .checked_mul(row_size)
+            .and_then(|n| n.checked_add(rows));
+        if end.map_or(true, |end| b.len() < end) {
+            return Some(0.0);
+        }
+        let mut cursor = rows + usize::from(inner) * row_size;
+        let mut out: f32 = 0.0;
+        for slot in 0..slots {
+            let (value, size) = match (slot < word_count, long_words) {
+                (true, true) => (be_u32(b, cursor).map(|v| v as i32), 4),
+                (true, false) | (false, true) => {
+                    (be_u16(b, cursor).map(|v| i32::from(v as i16)), 2)
+                }
+                (false, false) => (b.get(cursor).map(|&v| i32::from(v as i8)), 1),
+            };
+            cursor += size;
+            let (Some(value), Some(region)) = (value, be_u16(b, indexes + 2 * usize::from(slot)))
+            else {
+                return Some(0.0);
+            };
+            if let Some(scalar) = self.region(region) {
+                out += scalar * value as f32;
+            }
+        }
+        Some(out)
+    }
+
+    /// The scalar of region `index` at the coordinates, worked out once.
+    fn region(&self, index: u16) -> Option<f32> {
+        if let Some(&s) = self.regions.borrow().get(&index) {
+            return s;
+        }
+        let s = self.store.region_scalar(index, self.coords);
+        self.regions.borrow_mut().insert(index, s);
+        s
     }
 
     /// Rows worked out so far.
@@ -107,6 +238,32 @@ impl<'s, 'a> StoreDeltas<'s, 'a> {
     pub(crate) fn rows(&self) -> usize {
         self.memo.borrow().len()
     }
+
+    /// Regions worked out so far.
+    #[cfg(test)]
+    pub(crate) fn regions(&self) -> usize {
+        self.regions.borrow().len()
+    }
+
+    /// Work units left.
+    #[cfg(test)]
+    pub(crate) fn work_left(&self) -> u64 {
+        self.work.left.get()
+    }
+}
+
+/// The big-endian `u16` at byte `off` of `b`.
+fn be_u16(b: &[u8], off: usize) -> Option<u16> {
+    b.get(off..)
+        .and_then(<[u8]>::first_chunk::<2>)
+        .map(|v| u16::from_be_bytes(*v))
+}
+
+/// The big-endian `u32` at byte `off` of `b`.
+fn be_u32(b: &[u8], off: usize) -> Option<u32> {
+    b.get(off..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .map(|v| u32::from_be_bytes(*v))
 }
 
 /// Patches `head.indexToLocFormat` (offset 50: 0=short, 1=long).
@@ -220,6 +377,128 @@ pub(crate) fn round_half_up(v: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An ItemVariationStore over `axes` axes with `regions` regions
+    /// (region `r` peaks at 1.0 on axis `r % axes` alone) and `outers`
+    /// subtable offsets that all point at one subtable of `rows` rows
+    /// over `slots` slots (slot `s` names region `s % regions`). The
+    /// first `words` slots are wide, and `long` widens every slot.
+    fn build_store(
+        axes: u16,
+        regions: u16,
+        outers: u16,
+        slots: u16,
+        rows: u16,
+        words: u16,
+        long: bool,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes());
+        let region_off = 8 + 4 * usize::from(outers);
+        out.extend_from_slice(&(region_off as u32).to_be_bytes());
+        out.extend_from_slice(&outers.to_be_bytes());
+        let sub_off = region_off + 4 + 6 * usize::from(axes) * usize::from(regions);
+        for _ in 0..outers {
+            out.extend_from_slice(&(sub_off as u32).to_be_bytes());
+        }
+        out.extend_from_slice(&axes.to_be_bytes());
+        out.extend_from_slice(&regions.to_be_bytes());
+        for r in 0..regions {
+            for a in 0..axes {
+                let peak: i16 = if a == r % axes { 16384 } else { 0 };
+                for v in [0, peak, peak] {
+                    out.extend_from_slice(&v.to_be_bytes());
+                }
+            }
+        }
+        out.extend_from_slice(&rows.to_be_bytes());
+        let flag = if long { 0x8000 } else { 0 };
+        out.extend_from_slice(&(flag | words).to_be_bytes());
+        out.extend_from_slice(&slots.to_be_bytes());
+        for s in 0..slots {
+            out.extend_from_slice(&(s % regions).to_be_bytes());
+        }
+        for row in 0..rows {
+            for s in 0..slots {
+                let v = (i32::from(row) * 3 - i32::from(s) * 5 + 1) % 100;
+                match (s < words, long) {
+                    (true, true) => out.extend_from_slice(&(v * 1000).to_be_bytes()),
+                    (true, false) | (false, true) => {
+                        out.extend_from_slice(&((v * 100) as i16).to_be_bytes());
+                    }
+                    (false, false) => out.push(v as i8 as u8),
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn store_deltas_match_the_core_store() {
+        let coords = [0.5, 0.25, 0.75];
+        for (words, long) in [(0, false), (2, false), (0, true), (2, true)] {
+            let bytes = build_store(3, 4, 2, 5, 6, words, long);
+            let core = ItemVariationStore::parse(&bytes).unwrap();
+            let deltas = StoreDeltas::new(&bytes, &coords).unwrap();
+            for outer in 0..3 {
+                for inner in 0..8 {
+                    assert_eq!(
+                        deltas.get(outer, inner).to_bits(),
+                        core.delta(outer, inner, &coords).to_bits(),
+                        "({outer}, {inner}) with {words} words, long {long}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn store_deltas_evaluate_each_region_once() {
+        // 4,000 rows over one region of 512 axes: the region is worked
+        // out once, and each row costs its one slot plus one.
+        let coords = alloc::vec![0.5; 512];
+        let bytes = build_store(512, 1, 1, 1, 4000, 0, false);
+        let core = ItemVariationStore::parse(&bytes).unwrap();
+        let deltas = StoreDeltas::new(&bytes, &coords).unwrap();
+        let budget = deltas.work_left();
+        for inner in 0..4000 {
+            assert_eq!(deltas.get(0, inner), core.delta(0, inner, &coords));
+        }
+        assert_eq!(deltas.regions(), 1);
+        assert_eq!(deltas.rows(), 4000);
+        assert_eq!(budget - deltas.work_left(), 4000 * 2);
+    }
+
+    #[test]
+    fn store_deltas_stop_at_the_budget_on_aliased_subtables() {
+        // 4,096 outer indices alias one subtable of 1,000 slots, so no
+        // two keys share a row yet every key walks 1,000 slots. The
+        // walk stops once it has spent its budget; the rows past it
+        // read zero, and the run is warned once.
+        let bytes = build_store(1, 1, 4096, 1000, 2, 0, false);
+        let core = ItemVariationStore::parse(&bytes).unwrap();
+        let warnings = Warnings::default();
+        let deltas = StoreDeltas::new(&bytes, &[1.0])
+            .unwrap()
+            .reporting(&warnings, *b"GPOS");
+        let budget = deltas.work_left();
+        assert_eq!(budget, MIN_STORE_WORK, "a small store gets the floor");
+        let affordable = budget / 1001;
+        for outer in 0..4096u16 {
+            let d = deltas.get(outer, 0);
+            if u64::from(outer) < affordable {
+                assert_eq!(d, core.delta(outer, 0, &[1.0]));
+                assert_ne!(d, 0.0);
+            } else {
+                assert_eq!(d, 0.0, "outer {outer} is past the budget");
+            }
+        }
+        assert_eq!(deltas.rows() as u64, affordable);
+        assert_eq!(deltas.work_left(), 0);
+        let warned = warnings.into_sorted();
+        assert_eq!(warned.len(), 1);
+        assert_eq!(warned[0].context, STORE_OVER_BUDGET);
+    }
 
     #[test]
     fn write_loc_format_short_long() {

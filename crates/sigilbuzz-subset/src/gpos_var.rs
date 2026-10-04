@@ -76,8 +76,6 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use sigilbuzz::tables::variation_store::ItemVariationStore;
-
 use crate::util::{StoreDeltas, WorkBudget, WORK_LIMIT};
 
 mod anchors;
@@ -329,8 +327,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
 }
 
 /// Folds every supported `VariationIndex` in the source GPOS into the
-/// static field it adjusts at `coords` and zeros the offset slot.
-/// Lookup types we do not understand ride through verbatim.
+/// static field it adjusts, by the store `deltas` (at the instance's
+/// coordinates), and zeros the offset slot. Lookup types we do not
+/// understand ride through verbatim.
 ///
 /// Returns `Some(new_gpos_bytes)` when the source carries a parseable
 /// GPOS header, else `None` (caller passes through). The returned
@@ -339,15 +338,11 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
 /// we zeroed change.
 pub(crate) fn bake_gpos_at_coords(
     gpos_bytes: &[u8],
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
+    deltas: Option<&StoreDeltas<'_, '_>>,
 ) -> Option<Vec<u8>> {
     let mut buf = gpos_bytes.to_vec();
-    // Many value records and anchors can name one row; each row is
-    // resolved once.
-    let deltas = store.map(|s| StoreDeltas::new(s, coords));
     let walked = walk_gpos_device_slots(&mut buf, &mut |b, slot| {
-        fold_one_field(b, slot, deltas.as_ref());
+        fold_one_field(b, slot, deltas);
     });
     walked.then_some(buf)
 }

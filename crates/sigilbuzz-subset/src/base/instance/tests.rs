@@ -108,7 +108,9 @@ fn read(bytes: &[u8], coords: &[f32]) -> (Option<i16>, Option<(i16, i16)>) {
 #[test]
 fn a_full_instance_moves_the_coordinates_and_drops_the_store() {
     let src = base_with_store();
-    let out = apply_variations(&src, &[1.0, 0.5], &[]).unwrap().unwrap();
+    let out = apply_variations(&src, &[1.0, 0.5], &[], &Warnings::default())
+        .unwrap()
+        .unwrap();
     // Row (0, 0): 10 + 20 * 0.5 + 4 * 0.5 = 22; row (1, 0): -30.
     assert_eq!(read(&out, &[]), (Some(-98), Some((-230, 880))));
     assert_eq!(&out[..4], &[0, 1, 0, 0], "version 1.0");
@@ -134,7 +136,9 @@ fn a_full_instance_moves_the_coordinates_and_drops_the_store() {
 fn a_partial_instance_folds_the_pinned_axis_into_the_coordinates() {
     let src = base_with_store();
     let pins = [AxisPin::Pin, AxisPin::Keep];
-    let out = apply_variations(&src, &[1.0, 0.0], &pins).unwrap().unwrap();
+    let out = apply_variations(&src, &[1.0, 0.0], &pins, &Warnings::default())
+        .unwrap()
+        .unwrap();
     assert_eq!(&out[..4], &[0, 1, 0, 1], "still version 1.1");
     // The default carries the pinned axis: -120 + 10. The kept axis
     // still varies it as the source does at axis 0 = 1.
@@ -160,7 +164,7 @@ fn pinning_outside_a_region_drops_its_deltas() {
     // keeps the source's coordinates, and only axis 1 still varies.
     let src = base_with_store();
     let pins = [AxisPin::Pin, AxisPin::Keep];
-    let out = apply_variations(&src, &[-1.0, 0.0], &pins)
+    let out = apply_variations(&src, &[-1.0, 0.0], &pins, &Warnings::default())
         .unwrap()
         .unwrap();
     assert_eq!(read(&out, &[0.0]), (Some(-120), Some((-200, 880))));
@@ -172,9 +176,15 @@ fn pinning_outside_a_region_drops_its_deltas() {
 fn tables_without_a_store_are_left_alone() {
     let mut src = base_with_store();
     src[8..12].copy_from_slice(&[0; 4]);
-    assert_eq!(apply_variations(&src, &[1.0, 1.0], &[]).unwrap(), None);
+    assert_eq!(
+        apply_variations(&src, &[1.0, 1.0], &[], &Warnings::default()).unwrap(),
+        None
+    );
     src[2..4].copy_from_slice(&[0, 0]);
-    assert_eq!(apply_variations(&src, &[1.0, 1.0], &[]).unwrap(), None);
+    assert_eq!(
+        apply_variations(&src, &[1.0, 1.0], &[], &Warnings::default()).unwrap(),
+        None
+    );
 }
 
 #[test]

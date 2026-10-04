@@ -65,7 +65,7 @@ pub(crate) fn instance_base(
             return BaseBake::Dropped;
         }
     };
-    match apply_variations(bytes, coords, pins) {
+    match apply_variations(bytes, coords, pins, warnings) {
         Ok(Some(out)) => BaseBake::Rebuilt(out),
         Ok(None) => BaseBake::Unchanged,
         Err(SubsetError::Parse(e)) => {
@@ -90,6 +90,7 @@ fn apply_variations(
     bytes: &[u8],
     coords: &[f32],
     pins: &[AxisPin],
+    warnings: &Warnings,
 ) -> Result<Option<Vec<u8>>, SubsetError> {
     let minor = read::u16_at(bytes, 2, CTX)?;
     if minor < 1 || read::u32_at(bytes, 8, CTX)? == 0 {
@@ -97,7 +98,7 @@ fn apply_variations(
     }
     let store_off = read::offset32_at(bytes, 8, 0, "BASE store offset past the end")?;
     let store_bytes = &bytes[store_off..];
-    let store = ItemVariationStore::parse(store_bytes).map_err(|e| shift(e, store_off))?;
+    ItemVariationStore::parse(store_bytes).map_err(|e| shift(e, store_off))?;
     let layout = layout(bytes)?;
 
     let full = pins.iter().all(|p| *p == AxisPin::Pin);
@@ -112,7 +113,9 @@ fn apply_variations(
         })
         .collect();
     // Coordinates can share a row; each row is resolved once.
-    let deltas = StoreDeltas::new(&store, &default_coords);
+    let deltas = StoreDeltas::new(store_bytes, &default_coords)
+        .ok_or(SubsetError::Unsupported("BASE store could not be read"))?
+        .reporting(warnings, tag::BASE);
     let projected: Option<(Vec<u8>, RegionRemap)> = if full {
         None
     } else {

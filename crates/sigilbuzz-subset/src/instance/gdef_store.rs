@@ -18,6 +18,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use crate::layout::GidMap;
+use crate::util::StoreDeltas;
 use crate::warnings::Warnings;
 use crate::SubsetError;
 
@@ -38,6 +39,42 @@ pub(super) fn has_store(gdef: &[u8]) -> bool {
         .get(2..4)
         .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
     minor >= 3 && gdef.get(14..18).is_some_and(|off| off != [0; 4])
+}
+
+/// The bytes of the store of `gdef`, from its first byte to the end of
+/// the table, where the core GDEF parser reads it; `None` without one.
+pub(super) fn store_bytes(gdef: &[u8]) -> Option<&[u8]> {
+    if !has_store(gdef) {
+        return None;
+    }
+    let off = gdef.get(14..).and_then(<[u8]>::first_chunk::<4>)?;
+    gdef.get(u32::from_be_bytes(*off) as usize..)
+}
+
+/// The deltas of the face's GDEF store at `coords`, reporting a spent
+/// budget against `table`; `None` when the face has no store.
+pub(super) fn gdef_deltas<'s, 'a>(
+    face: &Face<'a>,
+    coords: &'s [f32],
+    warnings: &'s Warnings,
+    table: [u8; 4],
+) -> Result<Option<StoreDeltas<'s, 'a>>, SubsetError> {
+    // The core parse reports a malformed GDEF, and says whether it has
+    // a store at all.
+    let gdef = face.gdef()?;
+    if gdef
+        .as_ref()
+        .and_then(|g| g.item_variation_store())
+        .is_none()
+    {
+        return Ok(None);
+    }
+    Ok(face
+        .table_bytes(tag::GDEF)
+        .ok()
+        .and_then(store_bytes)
+        .and_then(|s| StoreDeltas::new(s, coords))
+        .map(|d| d.reporting(warnings, table)))
 }
 
 /// Every glyph of the face under its own id.
@@ -61,9 +98,8 @@ pub(super) fn prune_gdef_store(
         return Ok(GdefBake::Unchanged);
     }
     let mut folded = bytes.to_vec();
-    let gdef = face.gdef()?;
-    let store = gdef.as_ref().and_then(|g| g.item_variation_store());
-    crate::gdef::fold_caret_variations(&mut folded, store, coords);
+    let deltas = gdef_deltas(face, coords, warnings, tag::GDEF)?;
+    crate::gdef::fold_caret_variations(&mut folded, deltas.as_ref());
     let rebuilt = crate::gdef::rewrite_gdef_bytes(&folded, &identity_map(face)?, false, warnings)?;
     Ok(match rebuilt {
         Some(bytes) => GdefBake::Rebuilt(bytes),
