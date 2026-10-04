@@ -95,7 +95,11 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
     /// cover the glyph, which is then drawn from `glyf` or CFF.
     pub(crate) fn draw<S: OutlineSink>(&mut self, glyph_id: u16, sink: &mut S) -> Result<bool> {
         let coords = &self.font_coords;
-        let Some(composite) = self.varc.resolve(glyph_id, coords, coords, &mut self.memo) else {
+        let max = self.components_left.saturating_add(1);
+        let Some(composite) = self
+            .varc
+            .resolve(glyph_id, coords, coords, &mut self.memo, max)
+        else {
             return Ok(false);
         };
         self.path.push(glyph_id);
@@ -163,7 +167,11 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
                 return Ok(());
             }
             let font_coords = &self.font_coords;
-            if let Some(composite) = self.varc.resolve(gid, coords, font_coords, &mut self.memo) {
+            let max = self.components_left.saturating_add(1);
+            if let Some(composite) =
+                self.varc
+                    .resolve(gid, coords, font_coords, &mut self.memo, max)
+            {
                 self.path.push(gid);
                 let drawn = self.draw_composite(gid, &composite, transform, depth, sink);
                 self.path.pop();

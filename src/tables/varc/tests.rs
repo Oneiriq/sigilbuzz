@@ -987,18 +987,20 @@ fn a_memo_keeps_composites_and_scalars_by_coords() {
     let table = build_varc(&[1], &[&record], Some(&mention_store(1000)), None);
     let varc = Varc::parse(&table).unwrap();
     let mut memo = VarcMemo::new();
-    let first = varc.resolve(1, &[1.0], &[], &mut memo).unwrap();
+    let first = varc.resolve(1, &[1.0], &[], &mut memo, usize::MAX).unwrap();
     // Keeping [1.0] (2), the record (1), its coords (1), the scalars
     // (1000 and one axis) and the walk (1000).
     assert_eq!(memo.work_done(), 2005);
-    let again = varc.resolve(1, &[1.0], &[], &mut memo).unwrap();
+    let again = varc.resolve(1, &[1.0], &[], &mut memo, usize::MAX).unwrap();
     assert!(Rc::ptr_eq(&first, &again));
     assert_eq!(memo.work_done(), 2005);
-    let half = varc.resolve(1, &[0.5], &[], &mut memo).unwrap();
+    let half = varc.resolve(1, &[0.5], &[], &mut memo, usize::MAX).unwrap();
     assert_eq!(half.components[0].transform[4], 500.0);
     assert_eq!(memo.work_done(), 2 * 2005);
     // A glyph VARC has no record for costs nothing.
-    assert!(varc.resolve(5, &[0.25], &[], &mut memo).is_none());
+    assert!(varc
+        .resolve(5, &[0.25], &[], &mut memo, usize::MAX)
+        .is_none());
     assert_eq!(memo.work_done(), 2 * 2005);
 }
 
@@ -1045,4 +1047,21 @@ fn coords_past_harfbuzz_limit_start_from_the_font_coords() {
         .composite_with_font_coords(1, &wide[..4096], &[0.25])
         .unwrap();
     assert_eq!(c.components[0].coords.len(), 4096);
+}
+
+#[test]
+fn a_walk_reads_no_more_components_than_it_can_draw() {
+    // 100,000 three-byte components of glyph 5. A walk that can draw
+    // two more components asks for three, the third failing it, so the
+    // other 99,997 records are never read or kept.
+    let record = [0x00, 0x00, 0x05].repeat(100_000);
+    let table = build_varc(&[1], &[&record], None, None);
+    let varc = Varc::parse(&table).unwrap();
+    let mut memo = VarcMemo::new();
+    let c = varc.resolve(1, &[], &[], &mut memo, 3).unwrap();
+    assert_eq!(c.components.len(), 3);
+    // Keeping the empty coords (1) and three records (3).
+    assert_eq!(memo.work_done(), 4);
+    // Without a cap, the list holds every record.
+    assert_eq!(varc.composite(1, &[]).unwrap().components.len(), 100_000);
 }

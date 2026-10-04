@@ -306,12 +306,19 @@ impl<'a> Varc<'a> {
     /// reached again at the same coords costs nothing more. `None` when
     /// VARC does not cover `gid`. Every call with one `memo` must pass
     /// the same `font_coords`.
+    ///
+    /// Reading stops once the composite holds `max_components`: a walk
+    /// that may draw `n` more components passes `n + 1`, since a longer
+    /// list fails the walk anyway, so a record of a million components
+    /// costs no more than the walk can use. A composite cut short that
+    /// way is only kept for a walk that is about to fail.
     pub(crate) fn resolve(
         &self,
         gid: u16,
         coords: &[f32],
         font_coords: &[f32],
         memo: &mut VarcMemo,
+        max_components: usize,
     ) -> Option<Rc<VarcComposite>> {
         if !self.covers(gid) {
             return None;
@@ -322,7 +329,8 @@ impl<'a> Varc<'a> {
                 return Some(Rc::clone(known));
             }
         }
-        let composite = Rc::new(self.composite_at(gid, coords, font_coords, id, memo)?);
+        let composite =
+            Rc::new(self.composite_at(gid, (coords, font_coords), id, memo, max_components)?);
         if let Some(id) = id {
             memo.per_coords[id]
                 .composites
@@ -345,19 +353,20 @@ impl<'a> Varc<'a> {
             return None;
         }
         let id = memo.coords_id(coords);
-        self.composite_at(gid, coords, font_coords, id, memo)
+        self.composite_at(gid, (coords, font_coords), id, memo, usize::MAX)
     }
 
-    /// [`Self::composite_in`] with what the walk keeps for `coords` at
-    /// index `id`, or with nothing kept when the walk had no work left
-    /// to keep a copy of the coords.
+    /// [`Self::composite_in`] at the glyph's coords and the font's, with
+    /// what the walk keeps for the glyph's coords at index `id`, or with
+    /// nothing kept when the walk had no work left to keep a copy of
+    /// them. Stops reading once the list holds `max_components`.
     fn composite_at(
         &self,
         gid: u16,
-        coords: &[f32],
-        font_coords: &[f32],
+        (coords, font_coords): (&[f32], &[f32]),
         id: Option<usize>,
         memo: &mut VarcMemo,
+        max_components: usize,
     ) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
         // HarfBuzz reads a record past the end of the INDEX as empty.
@@ -374,7 +383,7 @@ impl<'a> Varc<'a> {
         };
         let mut composite = VarcComposite::default();
         let mut r = Reader::new(raw);
-        while !r.is_empty() {
+        while !r.is_empty() && composite.components.len() < max_components {
             // A VarComponent stops when bytes run out. Reaching the
             // end mid-record means the font is malformed; we skip the
             // rest rather than error so a single bad glyph doesn't
