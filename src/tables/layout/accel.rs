@@ -334,6 +334,14 @@ impl Accel<'_, '_> {
         self.subtable_may_start(false, index, glyph)
     }
 
+    /// True when [`Self::subtable_may_start`] admits every glyph that
+    /// [`Self::may_have`] admits: the lookup keeps no digest per
+    /// subtable, its subtables all having the lookup's.
+    #[inline]
+    pub(crate) fn subtables_rule_out_nothing_more(&self) -> bool {
+        matches!(self, Self::Built(a) if a.subtables.is_empty())
+    }
+
     /// False only when subtable `index` cannot start at `glyph`, as a
     /// check ahead of applying it. Without digests, a subtable that is
     /// already `parsed` is let through: it looks the glyph up in its

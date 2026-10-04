@@ -60,7 +60,9 @@ impl<'a, T: Subtable<'a>> LazySubtables<'a, T> {
     pub(super) fn new(lookup: Lookup<'a>) -> Self {
         let count = usize::from(lookup.subtable_count());
         Self {
-            first: [UNPARSED; INLINE_SLOTS],
+            // An inline slot past the last subtable reads as one that
+            // does not parse, so `slot` needs no bounds check of its own.
+            first: core::array::from_fn(|i| if i < count { UNPARSED } else { FAILED }),
             rest: alloc::vec![UNPARSED; count.saturating_sub(INLINE_SLOTS)],
             lookup,
             parsed: Vec::new(),
@@ -71,12 +73,10 @@ impl<'a, T: Subtable<'a>> LazySubtables<'a, T> {
         }
     }
 
-    /// The slot of subtable `index`, `None` past the last subtable.
+    /// The slot of subtable `index`: [`FAILED`] or `None` past the last
+    /// subtable.
     #[inline]
     fn slot(&self, index: u16) -> Option<u32> {
-        if index >= self.len() {
-            return None;
-        }
         let i = usize::from(index);
         match i.checked_sub(INLINE_SLOTS) {
             None => self.first.get(i).copied(),
@@ -194,6 +194,7 @@ impl<'a, T: Subtable<'a>> LazySubtables<'a, T> {
     /// glyphs reach however many subtables: once the
     /// [`SUBTABLE_CACHES`]th subtable that parses is found, every later
     /// one is known to have no cache.
+    #[inline]
     pub(super) fn has_cache(&mut self, index: u16) -> bool {
         if usize::from(index) < SUBTABLE_CACHES {
             return true;

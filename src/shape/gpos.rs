@@ -377,8 +377,11 @@ fn apply_subtables_at(
 ) -> Option<usize> {
     let horizontal = att.direction.is_horizontal();
     let id = glyphs.get(at)?.glyph_id as u16;
+    // The walk only stops at glyphs the lookup's digest admits, so a
+    // lookup without digests of its own subtables admits all of them.
+    let every = accel.subtables_rule_out_nothing_more();
     for index in 0..subtables.len() {
-        let admits = |parsed| accel.subtable_may_start(parsed, usize::from(index), id);
+        let admits = |parsed| every || accel.subtable_may_start(parsed, usize::from(index), id);
         let Some((sub, digests)) = subtables.get_admitted(index, admits) else {
             continue;
         };
