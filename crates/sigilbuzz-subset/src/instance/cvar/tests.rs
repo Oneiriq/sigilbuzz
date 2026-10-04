@@ -147,9 +147,16 @@ fn a_malformed_cvar_is_an_error() {
     let mut version_2 = cvar.clone();
     version_2[1] = 2;
     assert!(rebuild(&cvt, &version_2, &[1.0], &pins).is_err());
-    // Two deltas for two values, the second cut off.
+    // A delta run that claims more deltas than its tuple holds.
+    let mut short_run = cvar.clone();
+    let last = short_run.len() - 5;
+    short_run[last] = 0x43;
+    assert_eq!(rebuild(&cvt, &short_run, &[1.0], &pins), Err(MALFORMED));
+    // Data cut off before the end its size names ends the tuples, as
+    // in HarfBuzz: nothing applies, and nothing fails.
     cvar.truncate(cvar.len() - 2);
-    assert_eq!(rebuild(&cvt, &cvar, &[1.0], &pins), Err(MALFORMED));
+    let bake = rebuild(&cvt, &cvar, &[1.0], &pins).unwrap();
+    assert_eq!(values_of(&bake.cvt.unwrap()), [100, 200]);
     // A data offset past the end.
     let mut far = cvar_of(&[T(&[1.0], None, &[1, 2])], None);
     far[6..8].copy_from_slice(&0xFFF0u16.to_be_bytes());
@@ -257,4 +264,33 @@ fn zero_deltas_are_not_kept() {
     // one, the index 1000) and one delta.
     assert_eq!(&new_cvar[4..6], &[0, 1]);
     assert_eq!(new_cvar.len(), 8 + 6 + 4 + 2);
+}
+
+#[test]
+fn tuples_before_one_whose_data_runs_past_the_end_still_apply() {
+    // Two tuples; the second names more data than the table holds,
+    // though not so much that its header would stop the walk.
+    let cvt = cvt_of(&[100, 200]);
+    let mut cvar = cvar_of(&[T(&[1.0], None, &[3, 4]), T(&[-1.0], None, &[5, 6])], None);
+    // The second tuple's data size, in its header.
+    let second = 8 + 6 + 2;
+    let at = second - 2;
+    cvar[at..at + 2].copy_from_slice(&12u16.to_be_bytes());
+    let bake = rebuild(&cvt, &cvar, &[1.0], &[AxisPin::Pin]).unwrap();
+    assert_eq!(values_of(&bake.cvt.unwrap()), [103, 204]);
+}
+
+#[test]
+fn deltas_turn_dense_once_that_is_smaller() {
+    // Sparse while the list is short; past half the cvt, one value per
+    // entry. Sums come out the same either way.
+    let mut d = Deltas::Sparse(Vec::new());
+    d.add(1, 0.25, 4);
+    d.add(1, 0.25, 4);
+    assert!(matches!(&d, Deltas::Sparse(list) if list.len() == 2));
+    assert_eq!(d.rounded(), [(1, 1)]);
+    d.add(3, -2.0, 4);
+    assert!(matches!(&d, Deltas::Dense(values) if values.len() == 4));
+    d.add(3, -0.5, 4);
+    assert_eq!(d.rounded(), [(1, 1), (3, -2)]);
 }

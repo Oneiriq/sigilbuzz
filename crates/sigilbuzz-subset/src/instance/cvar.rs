@@ -88,8 +88,78 @@ struct Kept {
     /// region needs them.
     region: Vec<f32>,
     intermediate: bool,
-    /// The scaled nonzero deltas, summed, by `cvt ` index.
-    deltas: BTreeMap<usize, f32>,
+    /// The scaled nonzero deltas, summed by `cvt ` index.
+    deltas: Deltas,
+}
+
+/// The deltas of one rebuilt tuple: a list of `(index, delta)` while it
+/// is short, one value per `cvt ` entry once that is smaller. Either way
+/// it holds at most 8 bytes per nonzero delta the source packs.
+enum Deltas {
+    Sparse(Vec<(u32, f32)>),
+    Dense(Vec<f32>),
+}
+
+impl Deltas {
+    /// Adds `d` to entry `index` of a `cvt ` of `num_cvt` values.
+    fn add(&mut self, index: usize, d: f32, num_cvt: usize) {
+        match self {
+            Self::Sparse(list) => {
+                list.push((index as u32, d));
+                if list.len() > num_cvt / 2 {
+                    let mut dense = alloc::vec![0.0f32; num_cvt];
+                    for &(i, v) in list.iter() {
+                        if let Some(slot) = dense.get_mut(i as usize) {
+                            *slot += v;
+                        }
+                    }
+                    *self = Self::Dense(dense);
+                }
+            }
+            Self::Dense(values) => {
+                if let Some(slot) = values.get_mut(index) {
+                    *slot += d;
+                }
+            }
+        }
+    }
+
+    /// The summed deltas, rounded halves up, without the zeros, in
+    /// index order.
+    fn rounded(&self) -> Vec<(usize, i32)> {
+        let mut out: Vec<(usize, i32)> = Vec::new();
+        match self {
+            Self::Sparse(list) => {
+                // A stable sort keeps the deltas of one index in the
+                // order they were added, so they sum the same way.
+                let mut sorted = list.clone();
+                sorted.sort_by_key(|&(i, _)| i);
+                let mut k = 0;
+                while let Some(&(index, first)) = sorted.get(k) {
+                    let mut sum = first;
+                    k += 1;
+                    while let Some(&(i, v)) = sorted.get(k) {
+                        if i != index {
+                            break;
+                        }
+                        sum += v;
+                        k += 1;
+                    }
+                    out.push((index as usize, round_half_up(sum)));
+                }
+            }
+            Self::Dense(values) => {
+                out.extend(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &v)| (i, round_half_up(v))),
+                );
+            }
+        }
+        out.retain(|&(_, d)| d != 0);
+        out
+    }
 }
 
 /// [`bake_cvt`] on the tables' bytes.
@@ -138,7 +208,12 @@ fn rebuild(
         let end = cursor
             .checked_add(usize::from(tuple.variation_data_size))
             .ok_or(MALFORMED)?;
-        let bytes = data.get(cursor..end).ok_or(MALFORMED)?;
+        // Data that runs past the table ends the tuples too, as
+        // HarfBuzz's partial instancer stops there; the earlier tuples
+        // still apply.
+        let Some(bytes) = data.get(cursor..end) else {
+            break;
+        };
         cursor = end;
         // `cvar` has no shared tuples: a tuple without its own peak
         // applies nowhere, as HarfBuzz reads it.
@@ -213,12 +288,12 @@ fn rebuild(
             kept.push(Kept {
                 region,
                 intermediate,
-                deltas: BTreeMap::new(),
+                deltas: Deltas::Sparse(Vec::new()),
             });
         }
         if let Some(tuple) = kept.get_mut(at) {
             for (index, d) in scaled {
-                *tuple.deltas.entry(index).or_insert(0.0) += d;
+                tuple.deltas.add(index, d, num_cvt);
             }
         }
     }
@@ -257,12 +332,7 @@ fn kept_region(kept: &[(f32, f32, f32)]) -> (Vec<f32>, bool) {
 fn encode_cvar(kept: &[Kept], num_cvt: usize) -> Result<Option<Vec<u8>>, &'static str> {
     let mut tuples: Vec<(&Kept, Vec<u8>)> = Vec::new();
     for tuple in kept {
-        let rounded: Vec<(usize, i32)> = tuple
-            .deltas
-            .iter()
-            .map(|(&index, &d)| (index, round_half_up(d)))
-            .filter(|&(_, d)| d != 0)
-            .collect();
+        let rounded = tuple.deltas.rounded();
         if rounded.is_empty() {
             continue;
         }
