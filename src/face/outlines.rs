@@ -183,9 +183,12 @@ impl<'a> Face<'a> {
     ///   it sits.
     /// - A component that names the glyph it belongs to draws that
     ///   glyph's `glyf` or CFF outline instead of recursing.
-    ///
-    /// A glyph that draws more than 2048 components or 2^20 ops, or nests
-    /// components more than 64 deep, fails with `Malformed`.
+    /// - The condition and delta work of every composite the glyph
+    ///   reaches shares one budget (see
+    ///   [`Varc::composite_with_font_coords`](crate::tables::Varc::composite_with_font_coords)),
+    ///   and a glyph reached again at the same coords is resolved once.
+    ///   A glyph that draws more than 2048 components or 2^20 ops, or
+    ///   nests components more than 64 deep, fails with `Malformed`.
     pub fn glyph_outline_at_coords(
         &self,
         glyph_id: u16,

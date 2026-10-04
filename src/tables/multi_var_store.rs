@@ -341,12 +341,14 @@ impl<'a> MultiVarStore<'a> {
         }
     }
 
-    /// Scalars for each entry of `region_indexes`, in order. Each
-    /// distinct region is evaluated once, so a subtable that names one
-    /// large region many times does not repeat the work.
-    fn scalars_for(&self, region_indexes: &[u16], coords: &[f32]) -> Vec<f32> {
+    /// Scalars for each entry of `region_indexes`, in order, and the
+    /// number of region axes evaluated for them. Each distinct region is
+    /// evaluated once, so a subtable that names one large region many
+    /// times does not repeat the work.
+    fn scalars_for(&self, region_indexes: &[u16], coords: &[f32]) -> (Vec<f32>, usize) {
         let mut cache: BTreeMap<usize, f32> = BTreeMap::new();
-        region_indexes
+        let mut axis_steps = 0usize;
+        let scalars = region_indexes
             .iter()
             .map(|&ri| {
                 let Some(&slot) = self.region_slots.get(ri as usize) else {
@@ -355,11 +357,14 @@ impl<'a> MultiVarStore<'a> {
                 let Some(region) = self.regions.get(slot) else {
                     return 0.0;
                 };
-                *cache
-                    .entry(slot)
-                    .or_insert_with(|| sparse_region_scalar(region, coords))
+                *cache.entry(slot).or_insert_with(|| {
+                    let (scalar, steps) = sparse_region_scalar_steps(region, coords);
+                    axis_steps = axis_steps.saturating_add(steps);
+                    scalar
+                })
             })
-            .collect()
+            .collect();
+        (scalars, axis_steps)
     }
 
     /// Per-region scalars for all regions referenced by subtable `outer`,
@@ -368,7 +373,7 @@ impl<'a> MultiVarStore<'a> {
     #[must_use]
     pub fn region_scalars(&self, outer: u16, coords: &[f32]) -> Option<Vec<f32>> {
         let sub = self.subtable(outer)?;
-        Some(self.scalars_for(&sub.region_indexes, coords))
+        Some(self.scalars_for(&sub.region_indexes, coords).0)
     }
 
     /// Number of regions referenced by subtable `outer`.
@@ -443,7 +448,7 @@ impl<'a> MultiVarStore<'a> {
         let Some(slot) = self.subtable_slot(outer) else {
             return;
         };
-        let scalars = self.slot_scalars(slot, coords);
+        let (scalars, _) = self.slot_scalars(slot, coords);
         self.add_slot_deltas(slot, inner, &scalars, out);
     }
 
@@ -462,12 +467,14 @@ impl<'a> MultiVarStore<'a> {
     }
 
     /// The scalar of each region index of the subtable in `slot` at
-    /// `coords`, for [`Self::add_slot_deltas`]. Costs one step per
-    /// region index plus one evaluation per distinct region.
-    pub(crate) fn slot_scalars(&self, slot: usize, coords: &[f32]) -> Vec<f32> {
-        self.subtables
-            .get(slot)
-            .map_or_else(Vec::new, |s| self.scalars_for(&s.region_indexes, coords))
+    /// `coords`, for [`Self::add_slot_deltas`], and the number of region
+    /// axes evaluated for them. Costs one step per region index plus one
+    /// evaluation per distinct region.
+    pub(crate) fn slot_scalars(&self, slot: usize, coords: &[f32]) -> (Vec<f32>, usize) {
+        self.subtables.get(slot).map_or_else(
+            || (Vec::new(), 0),
+            |s| self.scalars_for(&s.region_indexes, coords),
+        )
     }
 
     /// [`Self::add_deltas`] for the subtable in `slot`, with its region
@@ -589,15 +596,20 @@ impl<'a> TupleFetcher<'a> {
 /// Scalar of one sparse region at `coords`: the product of its
 /// per-axis falloffs, stopping early at zero.
 fn sparse_region_scalar(region: &SparseRegion, coords: &[f32]) -> f32 {
+    sparse_region_scalar_steps(region, coords).0
+}
+
+/// [`sparse_region_scalar`], with the number of axes it evaluated.
+fn sparse_region_scalar_steps(region: &SparseRegion, coords: &[f32]) -> (f32, usize) {
     let mut scalar = 1.0_f32;
-    for axis in &region.axes {
+    for (steps, axis) in region.axes.iter().enumerate() {
         let coord = *coords.get(axis.axis_index as usize).unwrap_or(&0.0);
         scalar *= axis_scalar(axis.start, axis.peak, axis.end, coord);
         if scalar == 0.0 {
-            return 0.0;
+            return (0.0, steps + 1);
         }
     }
-    scalar
+    (scalar, region.axes.len())
 }
 
 /// Triangular region falloff for one axis. Returns `1.0` at `peak`,
