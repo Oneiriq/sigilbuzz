@@ -507,3 +507,41 @@ fn shared_condition_sets_are_charged_to_a_budget() {
         Err(Error::Malformed { offset, .. }) if offset == fv
     ));
 }
+
+/// Records that share a condition set and a substitution share their
+/// parse: memory follows the table, not the records naming it.
+#[test]
+fn records_share_the_sets_they_name() {
+    let records: u32 = 200;
+    let conditions: u16 = 100;
+    let mut table = Vec::new();
+    push(&mut table, &[1, 1, 0, 0, 0]);
+    table.extend_from_slice(&14u32.to_be_bytes());
+    push(&mut table, &[1, 0]);
+    table.extend_from_slice(&records.to_be_bytes());
+    let set = 8 + records as usize * 8;
+    let condition = 2 + usize::from(conditions) * 4;
+    let fts = set + condition + 8;
+    for _ in 0..records {
+        table.extend_from_slice(&(set as u32).to_be_bytes());
+        table.extend_from_slice(&(fts as u32).to_be_bytes());
+    }
+    push(&mut table, &[conditions]);
+    for _ in 0..conditions {
+        table.extend_from_slice(&(condition as u32).to_be_bytes());
+    }
+    push(&mut table, &[1, 0, 0, 0x4000]);
+    // A FeatureTableSubstitution 1.0 with no records.
+    push(&mut table, &[1, 0, 0]);
+    let fv = read(&table).unwrap().unwrap();
+    assert_eq!(fv.records.len(), 200);
+    let first = &fv.records[0];
+    assert_eq!(first.conditions.len(), 100);
+    for record in &fv.records {
+        assert!(alloc::rc::Rc::ptr_eq(&record.conditions, &first.conditions));
+        assert!(alloc::rc::Rc::ptr_eq(
+            &record.substitutions,
+            &first.substitutions
+        ));
+    }
+}
