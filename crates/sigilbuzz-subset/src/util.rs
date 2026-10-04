@@ -1,10 +1,12 @@
 //! Small in-place rewrites for tables we mostly pass through, plus the
 //! work budget shared by the table walkers.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 
 use sigilbuzz::tables::tag;
+use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
 use crate::SubsetError;
@@ -63,6 +65,47 @@ impl WorkBudget {
     /// Refills the budget to `units`.
     pub(crate) fn reset(&self, units: u64) {
         self.left.set(units);
+    }
+}
+
+/// The deltas of an `ItemVariationStore` at fixed coordinates, each row
+/// worked out once.
+///
+/// Resolving one row walks every region its subtable names, and a
+/// small table can point many records (glyphs through an index map,
+/// GPOS value records, BASE coordinates) at one large row. Remembering
+/// each row's delta keeps the work to one walk per row the store holds.
+pub(crate) struct StoreDeltas<'s, 'a> {
+    store: &'s ItemVariationStore<'a>,
+    coords: &'s [f32],
+    memo: RefCell<BTreeMap<(u16, u16), f32>>,
+}
+
+impl<'s, 'a> StoreDeltas<'s, 'a> {
+    /// The deltas of `store` at `coords`.
+    pub(crate) const fn new(store: &'s ItemVariationStore<'a>, coords: &'s [f32]) -> Self {
+        Self {
+            store,
+            coords,
+            memo: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// The delta of row `(outer, inner)`, as
+    /// [`ItemVariationStore::delta`] gives it.
+    pub(crate) fn get(&self, outer: u16, inner: u16) -> f32 {
+        if let Some(&d) = self.memo.borrow().get(&(outer, inner)) {
+            return d;
+        }
+        let d = self.store.delta(outer, inner, self.coords);
+        self.memo.borrow_mut().insert((outer, inner), d);
+        d
+    }
+
+    /// Rows worked out so far.
+    #[cfg(test)]
+    pub(crate) fn rows(&self) -> usize {
+        self.memo.borrow().len()
     }
 }
 

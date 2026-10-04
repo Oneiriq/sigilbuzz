@@ -13,7 +13,7 @@ use sigilbuzz::Face;
 use super::glyf::{clamp_i16, GlyphMetrics};
 use crate::hmtx::emit_long_metrics;
 use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
-use crate::util::round_half_up;
+use crate::util::{round_half_up, StoreDeltas};
 use crate::warnings::Warnings;
 use crate::SubsetError;
 
@@ -110,6 +110,39 @@ fn write_u16(buf: &mut [u8], off: usize, v: u16) {
     }
 }
 
+/// The store of the HVAR or VVAR `table` (the store offset sits at byte
+/// 4 of both); `None` when it cannot be read.
+fn metrics_store(table: &[u8]) -> Option<ItemVariationStore<'_>> {
+    let off = table.get(STORE_SLOT..).and_then(<[u8]>::first_chunk::<4>)?;
+    ItemVariationStore::parse(table.get(u32::from_be_bytes(*off) as usize..)?).ok()
+}
+
+/// The offset of the index map whose slot is at byte `slot` of `table`;
+/// 0 when there is none.
+fn map_offset(table: &[u8], slot: usize) -> usize {
+    table
+        .get(slot..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .map_or(0, |b| u32::from_be_bytes(*b) as usize)
+}
+
+/// The delta `deltas` gives glyph `gid` through the index map at
+/// `map_off` of `table`, as the core `HVAR` and `VVAR` readers give it:
+/// without a map, an advance reads row `(0, gid)` (`implicit`) and other
+/// metrics have none; a glyph the map does not name has none.
+fn glyph_delta(
+    deltas: &StoreDeltas<'_, '_>,
+    table: &[u8],
+    map_off: usize,
+    gid: u16,
+    implicit: bool,
+) -> f32 {
+    if map_off == 0 {
+        return if implicit { deltas.get(0, gid) } else { 0.0 };
+    }
+    read_index_map(table, map_off, gid).map_or(0.0, |(outer, inner)| deltas.get(outer, inner))
+}
+
 pub(super) fn bake_hmtx(
     face: &Face<'_>,
     coords: &[f32],
@@ -117,14 +150,22 @@ pub(super) fn bake_hmtx(
 ) -> Result<HmtxBake, SubsetError> {
     let hmtx = face.hmtx().map_err(SubsetError::from)?;
     let hvar = face.hvar().map_err(SubsetError::from)?;
+    // Many glyphs can map to one row; each row is resolved once.
+    let hvar_bytes = hvar
+        .as_ref()
+        .and_then(|_| face.table_bytes(tag::HVAR).ok())
+        .filter(|_| !coords.is_empty());
+    let store = hvar_bytes.and_then(metrics_store);
+    let deltas = store.as_ref().map(|s| StoreDeltas::new(s, coords));
+    let advance_map = hvar_bytes.map_or(0, |b| map_offset(b, 8));
 
     let mut advances: Vec<u16> = Vec::with_capacity(num_glyphs as usize);
     let mut lsbs: Vec<i16> = Vec::with_capacity(num_glyphs as usize);
     for gid in 0..num_glyphs {
         let base_adv = hmtx.advance(gid).unwrap_or(0);
         let base_lsb = hmtx.lsb(gid).unwrap_or(0);
-        let adv_delta = match hvar.as_ref() {
-            Some(h) if !coords.is_empty() => h.advance_delta(gid, coords),
+        let adv_delta = match (&deltas, hvar_bytes) {
+            (Some(d), Some(b)) => glyph_delta(d, b, advance_map, gid, true),
             _ => 0.0,
         };
         // hmtx advances are unsigned; clamp at 0 if a delta would
@@ -236,16 +277,24 @@ pub(super) fn bake_vmtx(
     // shared one extends the long range below.
     let mut advances: Vec<u16> = Vec::with_capacity(num_glyphs as usize);
     let mut tsbs: Vec<i16> = Vec::with_capacity(num_glyphs as usize);
+    // Many glyphs can map to one row; each row is resolved once.
+    let vvar_bytes = vvar
+        .as_ref()
+        .and_then(|_| face.table_bytes(tag::VVAR).ok())
+        .filter(|_| !coords.is_empty());
+    let store = vvar_bytes.and_then(metrics_store);
+    let deltas = store.as_ref().map(|s| StoreDeltas::new(s, coords));
+    let (advance_map, tsb_map) =
+        vvar_bytes.map_or((0, 0), |b| (map_offset(b, 8), map_offset(b, 12)));
     for gid in 0..num_glyphs {
         let base_adv = vmtx.advance(gid).unwrap_or(0);
         let base_tsb = vmtx.tsb(gid).unwrap_or(0);
-        let adv_delta = match vvar.as_ref() {
-            Some(v) if !coords.is_empty() => v.advance_height_delta(gid, coords),
-            _ => 0.0,
-        };
-        let tsb_delta = match vvar.as_ref() {
-            Some(v) if !coords.is_empty() => v.top_side_bearing_delta(gid, coords).unwrap_or(0.0),
-            _ => 0.0,
+        let (adv_delta, tsb_delta) = match (&deltas, vvar_bytes) {
+            (Some(d), Some(b)) => (
+                glyph_delta(d, b, advance_map, gid, true),
+                glyph_delta(d, b, tsb_map, gid, false),
+            ),
+            _ => (0.0, 0.0),
         };
         let new_adv = i32::from(base_adv).saturating_add(round_half_up(adv_delta));
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
@@ -331,10 +380,8 @@ pub(super) fn bake_vorg(
             return VorgBake::Unchanged;
         }
     };
-    let delta = |gid: u16| {
-        read_index_map(vvar_bytes, map_off, gid)
-            .map_or(0.0, |(outer, inner)| store.delta(outer, inner, coords))
-    };
+    let deltas = StoreDeltas::new(&store, coords);
+    let delta = |gid: u16| glyph_delta(&deltas, vvar_bytes, map_off, gid, false);
     match crate::vorg::bake_vorg(vorg_bytes, num_glyphs, delta) {
         Ok(bytes) => VorgBake::Rebuilt(bytes),
         Err(e) => {

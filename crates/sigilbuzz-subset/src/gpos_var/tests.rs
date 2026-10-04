@@ -42,8 +42,9 @@ fn fold_anchor_variations(
     store: Option<&ItemVariationStore<'_>>,
     coords: &[f32],
 ) {
+    let deltas = store.map(|s| StoreDeltas::new(s, coords));
     visit_anchor(buf, anchor_off, &mut |b, slot| {
-        fold_one_field(b, slot, store, coords);
+        fold_one_field(b, slot, deltas.as_ref());
     });
 }
 
@@ -96,7 +97,11 @@ fn fold_one_field_zeros_absent_offset_noop() {
     buf[0..2].copy_from_slice(&100i16.to_be_bytes());
     let ivs_bytes = build_ivs_one_region_one_item(80);
     let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    fold_one_field(&mut buf, subtable_slot(0, 4), Some(&store), &[1.0]);
+    fold_one_field(
+        &mut buf,
+        subtable_slot(0, 4),
+        Some(&StoreDeltas::new(&store, &[1.0])),
+    );
     let cur = i16::from_be_bytes([buf[0], buf[1]]);
     assert_eq!(cur, 100);
 }
@@ -116,7 +121,11 @@ fn fold_one_field_resolves_variation_index_and_zeros_offset() {
     buf[12..14].copy_from_slice(&0x8000u16.to_be_bytes());
     let ivs_bytes = build_ivs_one_region_one_item(80);
     let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    fold_one_field(&mut buf, subtable_slot(0, 4), Some(&store), &[1.0]);
+    fold_one_field(
+        &mut buf,
+        subtable_slot(0, 4),
+        Some(&StoreDeltas::new(&store, &[1.0])),
+    );
     let cur = i16::from_be_bytes([buf[0], buf[1]]);
     assert_eq!(cur, 130);
     assert_eq!(buf[4], 0);
@@ -136,7 +145,11 @@ fn fold_one_field_rounds_half_deltas_up() {
         buf[12..14].copy_from_slice(&0x8000u16.to_be_bytes());
         let ivs_bytes = build_ivs_one_region_one_item(delta);
         let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-        fold_one_field(&mut buf, subtable_slot(0, 4), Some(&store), &[0.5]);
+        fold_one_field(
+            &mut buf,
+            subtable_slot(0, 4),
+            Some(&StoreDeltas::new(&store, &[0.5])),
+        );
         let cur = i16::from_be_bytes([buf[0], buf[1]]);
         assert_eq!(cur, expected, "delta {delta}");
     }
@@ -152,7 +165,7 @@ fn fold_one_field_device_table_zeros_offset_only() {
     buf[8..10].copy_from_slice(&8u16.to_be_bytes()); // startSize
     buf[10..12].copy_from_slice(&16u16.to_be_bytes()); // endSize
     buf[12..14].copy_from_slice(&3u16.to_be_bytes()); // deltaFormat = Device
-    fold_one_field(&mut buf, subtable_slot(0, 4), None, &[]);
+    fold_one_field(&mut buf, subtable_slot(0, 4), None);
     let cur = i16::from_be_bytes([buf[0], buf[1]]);
     assert_eq!(cur, 50);
     assert_eq!(buf[4], 0);
@@ -167,7 +180,7 @@ fn fold_one_field_variation_without_store_zeros_offset_only() {
     buf[8..10].copy_from_slice(&0u16.to_be_bytes());
     buf[10..12].copy_from_slice(&0u16.to_be_bytes());
     buf[12..14].copy_from_slice(&0x8000u16.to_be_bytes());
-    fold_one_field(&mut buf, subtable_slot(0, 4), None, &[1.0]);
+    fold_one_field(&mut buf, subtable_slot(0, 4), None);
     let cur = i16::from_be_bytes([buf[0], buf[1]]);
     assert_eq!(cur, 50);
     assert_eq!(buf[4], 0);
@@ -185,7 +198,11 @@ fn fold_one_field_saturates_at_i16_max() {
     // delta = 30000 -> 30000 + 30000 saturates at i16::MAX (32767).
     let ivs_bytes = build_ivs_one_region_one_item(30000);
     let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
-    fold_one_field(&mut buf, subtable_slot(0, 4), Some(&store), &[1.0]);
+    fold_one_field(
+        &mut buf,
+        subtable_slot(0, 4),
+        Some(&StoreDeltas::new(&store, &[1.0])),
+    );
     let cur = i16::from_be_bytes([buf[0], buf[1]]);
     assert_eq!(cur, i16::MAX);
 }
@@ -412,7 +429,7 @@ fn value_record_device_without_static_field_skips_write() {
     let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
     visit_value_record(&mut buf, 0, 0, 0x0010, &mut |b, slot| {
         assert_eq!(slot.field, None);
-        fold_one_field(b, slot, Some(&store), &[1.0]);
+        fold_one_field(b, slot, Some(&StoreDeltas::new(&store, &[1.0])));
     });
     // The offset slot is zeroed and nothing else changes.
     assert_eq!(&buf[0..2], &[0, 0]);
@@ -456,4 +473,18 @@ fn bake_visits_a_shared_subtable_once() {
     let x = i16::from_be_bytes([baked[24 + 6], baked[24 + 7]]);
     assert_eq!(x, 90);
     assert_eq!(&baked[24 + 8..24 + 10], &[0, 0]);
+}
+
+#[test]
+fn store_deltas_resolve_each_row_once() {
+    // A thousand records naming one row resolve it once; the answer is
+    // the store's own.
+    let ivs_bytes = build_ivs_one_region_one_item(80);
+    let store = ItemVariationStore::parse(&ivs_bytes).unwrap();
+    let deltas = StoreDeltas::new(&store, &[0.5]);
+    for _ in 0..1000 {
+        assert_eq!(deltas.get(0, 0), store.delta(0, 0, &[0.5]));
+    }
+    assert_eq!(deltas.get(3, 9), 0.0);
+    assert_eq!(deltas.rows(), 2);
 }

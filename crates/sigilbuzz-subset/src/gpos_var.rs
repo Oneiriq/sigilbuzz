@@ -78,7 +78,7 @@ use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
-use crate::util::{WorkBudget, WORK_LIMIT};
+use crate::util::{StoreDeltas, WorkBudget, WORK_LIMIT};
 
 mod anchors;
 mod value_records;
@@ -176,8 +176,7 @@ pub(crate) type SlotVisitor<'v> = dyn FnMut(&mut [u8], DeviceSlot) + 'v;
 pub(crate) fn fold_one_field(
     buf: &mut [u8],
     slot: DeviceSlot,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
+    store: Option<&StoreDeltas<'_, '_>>,
 ) {
     let Some(target) = slot.target(buf) else {
         // Null slot: nothing to fold or sever.
@@ -200,7 +199,7 @@ pub(crate) fn fold_one_field(
     let Some(store) = store else {
         return;
     };
-    let scaled = round_delta(store.delta(outer, inner, coords));
+    let scaled = round_delta(store.get(outer, inner));
     let Some(field) = slot.field else {
         return;
     };
@@ -344,8 +343,11 @@ pub(crate) fn bake_gpos_at_coords(
     coords: &[f32],
 ) -> Option<Vec<u8>> {
     let mut buf = gpos_bytes.to_vec();
+    // Many value records and anchors can name one row; each row is
+    // resolved once.
+    let deltas = store.map(|s| StoreDeltas::new(s, coords));
     let walked = walk_gpos_device_slots(&mut buf, &mut |b, slot| {
-        fold_one_field(b, slot, store, coords);
+        fold_one_field(b, slot, deltas.as_ref());
     });
     walked.then_some(buf)
 }

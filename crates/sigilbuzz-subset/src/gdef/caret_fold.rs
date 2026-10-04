@@ -12,7 +12,7 @@
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use crate::gpos_var::{fold_one_field, DeviceSlot};
-use crate::util::{WorkBudget, WORK_LIMIT};
+use crate::util::{StoreDeltas, WorkBudget, WORK_LIMIT};
 
 fn read_u16(buf: &[u8], pos: usize) -> Option<usize> {
     let bytes = buf.get(pos..pos.checked_add(2)?)?;
@@ -39,6 +39,7 @@ pub(crate) fn fold_caret_variations(
         return;
     };
     let budget = WorkBudget::new(WORK_LIMIT);
+    let deltas = store.map(|s| StoreDeltas::new(s, coords));
     for i in 0..count {
         let Some(lig) = read_u16(gdef, list + 4 + i * 2).filter(|&r| r != 0) else {
             continue;
@@ -61,7 +62,7 @@ pub(crate) fn fold_caret_variations(
                     field: Some(caret + 2),
                     slot: caret + 4,
                 };
-                fold_one_field(gdef, slot, store, coords);
+                fold_one_field(gdef, slot, deltas.as_ref());
             }
         }
     }

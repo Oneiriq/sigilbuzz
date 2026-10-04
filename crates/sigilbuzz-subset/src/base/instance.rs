@@ -28,7 +28,7 @@ use sigilbuzz::{Error, Face};
 use super::{layout, CTX};
 use crate::instance::{project_ivs_with, AxisPin, PinnedOnly, Projection, RegionRemap};
 use crate::read;
-use crate::util::round_half_up;
+use crate::util::{round_half_up, StoreDeltas};
 use crate::warnings::Warnings;
 use crate::SubsetError;
 
@@ -111,6 +111,8 @@ fn apply_variations(
             _ => c,
         })
         .collect();
+    // Coordinates can share a row; each row is resolved once.
+    let deltas = StoreDeltas::new(&store, &default_coords);
     let projected: Option<(Vec<u8>, RegionRemap)> = if full {
         None
     } else {
@@ -155,7 +157,7 @@ fn apply_variations(
         }
         let outer = read::u16_at(bytes, device_at, CTX)?;
         let inner = read::u16_at(bytes, device_at + 2, CTX)?;
-        let delta = round_half_up(store.delta(outer, inner, &default_coords));
+        let delta = round_half_up(deltas.get(outer, inner));
         let coordinate = i16::from_be_bytes([bytes[at + 2], bytes[at + 3]]);
         let moved = i32::from(coordinate)
             .saturating_add(delta)
