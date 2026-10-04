@@ -79,7 +79,7 @@ use crate::tables::parse::Reader;
 
 use contextual::apply_contextual;
 use insertion::apply_insertion;
-use ligature::apply_ligature;
+use ligature::{apply_ligature, remove_deleted};
 use non_contextual::apply_non_contextual;
 use rearrangement::apply_rearrangement;
 
@@ -223,6 +223,10 @@ const LIG_ACTION_STORE: u32 = 1 << 30;
 const LIG_ACTION_OFFSET_SIGN: u32 = 1 << 29;
 const LIG_ACTION_OFFSET_MASK: u32 = 0x3FFF_FFFF;
 
+/// A glyph a ligature absorbed. It stays in the run, in the deleted-glyph
+/// class, until every chain has run.
+const DELETED_GLYPH: u16 = 0xFFFF;
+
 impl<'a> Morx<'a> {
     /// Parses a `morx` table. The data slice starts at the table's
     /// first byte (`version`).
@@ -351,6 +355,10 @@ impl<'a> Morx<'a> {
     /// The returned vector is the new glyph id stream; it is always
     /// the same length as the mapping vector.
     ///
+    /// Components a ligature absorbs stay in the run, in the
+    /// deleted-glyph class, until every chain has run, and are removed
+    /// then, as HarfBuzz removes them after `morx`.
+    ///
     /// Insertion subtables stop inserting once the run would exceed
     /// eight times the input length (at least 1024 glyphs), and each
     /// subtable walk stops after eight state-machine steps per glyph.
@@ -370,6 +378,10 @@ impl<'a> Morx<'a> {
                 apply_subtable(body, &mut glyphs, &mut origins, max_len);
             }
         }
+        // HarfBuzz removes the glyphs ligatures deleted once morx is
+        // done, so later subtables still see them, in the deleted-glyph
+        // class.
+        remove_deleted(&mut glyphs, &mut origins);
         (glyphs, origins)
     }
 }
@@ -519,7 +531,7 @@ fn apply_subtable(
 fn class_for(state: &StateTableHeader<'_>, glyph: Option<u16>) -> Result<u16> {
     match glyph {
         None => Ok(CLASS_END_OF_TEXT),
-        Some(0xFFFF) => Ok(CLASS_DELETED_GLYPH),
+        Some(DELETED_GLYPH) => Ok(CLASS_DELETED_GLYPH),
         Some(g) => state.class_of(g),
     }
 }

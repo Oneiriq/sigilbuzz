@@ -198,7 +198,7 @@ pub struct Buffer {
     /// `true` once a caller picked the direction with
     /// [`Buffer::set_direction`]. While `false`, `direction` is only
     /// the LTR default and `shape()` may choose vertical layout for
-    /// Mongolian-dominant text. [`Buffer::clear`] resets it.
+    /// Mongolian text. [`Buffer::clear`] resets it.
     pub(crate) direction_explicit: bool,
     /// Script the whole buffer shapes as, set by
     /// [`Buffer::set_script`]. `None` segments the text into script
@@ -277,8 +277,8 @@ impl Buffer {
     /// [`Self::direction`] goes back to the [`Direction::Ltr`] default
     /// and [`Self::has_explicit_direction`] to `false`, so
     /// [`crate::shape`] once again picks the layout itself (vertical for
-    /// Mongolian-dominant text). The text, script, language, and
-    /// context are kept.
+    /// text that starts with a Mongolian character). The text, script,
+    /// language, and context are kept.
     ///
     /// ```
     /// use sigilbuzz::{Buffer, Direction};
@@ -300,9 +300,11 @@ impl Buffer {
     /// [`Self::set_direction`], false while
     /// [`Self::direction`] only reports the LTR default.
     ///
-    /// [`crate::shape`] lays out Mongolian-dominant text vertically
-    /// (top to bottom) only while no direction is explicit; an
-    /// explicit [`Direction::Ltr`] keeps it horizontal.
+    /// [`crate::shape`] lays out text that starts with a character of
+    /// the Mongolian script from the Mongolian block (U+1800..U+18AF)
+    /// vertically (top to bottom) only while no direction is explicit;
+    /// an explicit [`Direction::Ltr`] keeps it horizontal. HarfBuzz has
+    /// no such default.
     ///
     /// ```
     /// use sigilbuzz::{Buffer, Direction};
@@ -339,18 +341,21 @@ impl Buffer {
     }
 
     /// Splits the buffer's text into maximal script runs and yields
-    /// one `ScriptRun` per run. Consecutive codepoints sharing the
-    /// same resolved script collapse into a single run; `COMMON`
-    /// (digits, punctuation, ASCII space, ZWJ/ZWNJ/bidi marks, the
-    /// tatweel, the dandas) and `INHERITED` (combining marks)
+    /// one `ScriptRun` per run. Each character takes the bucket of its
+    /// Unicode Script property ([`crate::script_of`]), and consecutive
+    /// codepoints sharing the same resolved script collapse into a
+    /// single run; `COMMON` (digits, punctuation, ASCII space,
+    /// ZWJ/ZWNJ/bidi marks, the tatweel, the dandas), `INHERITED`
+    /// (combining marks), and `UNKNOWN` (unassigned and private-use)
     /// codepoints, as the Unicode Script property gives them, extend
     /// whichever real script ran before them, matching HarfBuzz's
     /// `select_shaper_for_script` segmentation. A Hangul tone mark
     /// (U+302E, U+302F) extends the run before it too.
     ///
-    /// A leading `COMMON`/`INHERITED` span before the first real
-    /// script codepoint joins that script's run, the way HarfBuzz
-    /// gives a buffer the script of its first non-`COMMON` character.
+    /// A leading `COMMON`/`INHERITED`/`UNKNOWN` span before the first
+    /// real script codepoint joins that script's run, the way HarfBuzz
+    /// gives a buffer the script of its first character of a real
+    /// script (`hb_buffer_guess_segment_properties`).
     /// Text with no real script at all is one `Script::Other` run
     /// with the default `DFLT` priority, same treatment HarfBuzz gives
     /// a pure-digits or pure-punctuation run.
@@ -372,17 +377,11 @@ impl Buffer {
         let mut current: Option<(Script, usize)> = None;
         for (byte, ch) in self.text.char_indices() {
             let raw = script_of(ch);
-            // `COMMON` / `INHERITED` extend the previous real-script
-            // run if one exists. In sigilbuzz the only explicit bucket
-            // we keep for these characters is `Script::Other` (ASCII
-            // digits / punctuation land in `Script::Latin`; combining
-            // marks inherit their cluster base's script via the
-            // `script_of` range table). So the only codepoints we
-            // still need to actively extend are the Unicode format
-            // characters (ZWJ/ZWNJ/LRM/RLM/ALM) plus any other char
-            // that `script_of` could not classify. Everything with a
-            // real script bucket attaches normally through the
-            // script-equality test below.
+            // `COMMON` / `INHERITED` / `UNKNOWN` extend the previous
+            // real-script run if one exists (their `script_of` bucket
+            // is `Script::Other`). Everything with a real script
+            // bucket attaches through the script-equality test
+            // below.
             let resolved = if is_common_or_inherited(ch) {
                 current.map_or(leading, |(s, _)| s)
             } else if is_hangul_tone_mark(ch) {
@@ -517,9 +516,8 @@ pub fn script_priority_for(script: Script) -> &'static [[u8; 4]] {
         Script::Cyrillic => CYRL_PRIORITY,
         Script::Greek => GREK_PRIORITY,
         Script::Han => HANI_PRIORITY,
-        // The buckets that take their code points from the Unicode
-        // Script property try their own tag. Scripts sigilbuzz has no
-        // bucket for fall back to DFLT.
+        // The buckets added in 0.22.0 try their own tag. Scripts
+        // sigilbuzz has no bucket for fall back to DFLT.
         other => other.table_script_priority().unwrap_or(DFLT_ONLY),
     }
 }
@@ -699,12 +697,8 @@ mod tests {
 
     #[test]
     fn script_runs_common_digits_stick_to_preceding_script() {
-        // "Price: ₪100 שלום": digits land in Script::Latin bucket
-        // via script_of, so they extend the Latin prefix. The shekel
-        // sign U+20AA falls outside our range table (Script::Other)
-        // but still extends the previous run because it is a COMMON
-        // codepoint in Unicode; sigilbuzz groups it with Latin here
-        // because `Script::Other` matches nothing-scripted neighbors.
+        // "Price: 100 שלום": the colon, the spaces, and the digits
+        // are COMMON, so they extend the Latin prefix.
         let mut b = Buffer::new();
         b.push_str("Price: 100 \u{05E9}\u{05DC}\u{05D5}\u{05DD}");
         let runs = b.script_runs();

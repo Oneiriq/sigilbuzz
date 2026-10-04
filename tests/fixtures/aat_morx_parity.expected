@@ -1,0 +1,27 @@
+# HarfBuzz 14.5.0 (uharfbuzz 0.56.2) AAT shaping of the morx fixtures.
+# shape <font> <text> <gid>:<cluster>...
+shape aat_morx_contextual.ttf ab 7:0 8:1
+shape aat_morx_contextual.ttf ba 2:0 1:1
+shape aat_morx_contextual.ttf aab 1:0 7:1 8:2
+shape aat_morx_contextual.ttf abab 7:0 8:1 7:2 8:3
+shape aat_morx_contextual.ttf x 13:0
+shape aat_morx_contextual.ttf xa 6:0 1:1
+shape aat_morx_contextual.ttf cx 7:0 13:1
+shape aat_morx_contextual.ttf ca 7:0 1:1
+shape aat_morx_contextual.ttf acb 8:0 14:1 2:2
+shape aat_morx_contextual.ttf xx 6:0 13:1
+shape aat_morx_contextual.ttf bx 2:0 13:1
+shape aat_morx_ligature.ttf fi 9:0
+shape aat_morx_ligature.ttf ff 10:0
+shape aat_morx_ligature.ttf ffi 11:0
+shape aat_morx_ligature.ttf fff 10:0 3:2
+shape aat_morx_ligature.ttf fffi 10:0 9:2
+shape aat_morx_ligature.ttf ffffi 10:0 11:2
+shape aat_morx_ligature.ttf lx 12:0
+shape aat_morx_ligature.ttf lxlx 12:0 12:2
+shape aat_morx_ligature.ttf xlx 6:0 12:1
+shape aat_morx_ligature.ttf ab 1:0 2:1
+shape aat_morx_ligature.ttf abc 1:0 2:1 14:2
+shape aat_morx_ligature.ttf cc 8:0
+shape aat_morx_ligature.ttf ccc 8:0 14:2
+shape aat_morx_ligature.ttf fiab 9:0 1:2 2:3

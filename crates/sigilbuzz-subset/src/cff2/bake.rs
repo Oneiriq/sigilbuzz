@@ -6,12 +6,12 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use super::{
-    bake_token_budget, biased_subr, charge_token, decode_operand_f32, encode_charstring_number,
-    parse_cff2, serialise_cff2_top_dict, BlendCache, MAX_BAKE_DEPTH, OP_BLEND, OP_CALLGSUBR,
-    OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO, OP_HMOVETO,
-    OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE, OP_RLINETO,
-    OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO, OP_VSINDEX,
-    OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
+    bake_token_budget, biased_subr, charge_token, decode_operand_f64, encode_charstring_number_f64,
+    parse_cff2, serialise_cff2_top_dict, BlendCache, MAX_BAKE_DEPTH, MAX_STACK, OP_BLEND,
+    OP_CALLGSUBR, OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO,
+    OP_HMOVETO, OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE,
+    OP_RLINETO, OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO,
+    OP_VSINDEX, OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
 };
 use crate::cff::{
     emit_fd_select_auto, encode_index_cff2, patch_dict_offset, serialise_font_dict,
@@ -38,14 +38,17 @@ use crate::SubsetError;
 ///    pasting the body. Inlining also lets us drop the local + global
 ///    Subr INDEX entirely.
 /// 2. **Resolve `blend`**: pop `n`, then `n*nRegions` deltas, then `n`
-///    masters; emit only the `n` resolved scalars
-///    (`master + Σ scalar(coords) * delta`). The trailing count and the
-///    delta operands are dropped.
+///    masters; emit only the `n` resolved values
+///    (`master + Σ scalar(coords) * delta`), each rounded to the nearest
+///    whole number, halves away from zero, as HarfBuzz's instancer
+///    writes them. The trailing count and the delta operands are
+///    dropped.
 /// 3. **Strip `vsindex`**: tracks which IVS subtable subsequent
-///    `blend`s read from. Dropped from the output (no blend remains).
-/// 4. Re-encode all push operands. After blend resolution masters can
-///    become non-integer floats; we emit them via the `b0=255` 16.16
-///    fixed form when fractional, integer forms otherwise.
+///    `blend`s read from, starting from the one the glyph's Private
+///    DICT sets. Dropped from the output (no blend remains).
+/// 4. Re-encode all push operands: whole numbers in the integer forms,
+///    and a source operand with a fraction in the `b0=255` 16.16 fixed
+///    form it came in.
 ///
 /// The output drops VariationStore, GlobalSubr INDEX entries, and per-FD
 /// LocalSubr INDEX entries. Top DICT keeps CharStrings / FDArray /
@@ -94,7 +97,8 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
             .get(fd as usize)
             .map(|locals| locals.as_slice())
             .unwrap_or(&[]);
-        let baked = baker.bake_charstring(cs, local_subrs)?;
+        let vsindex = parsed.per_fd_vsindex.get(fd as usize).copied().unwrap_or(0);
+        let baked = baker.bake_charstring(cs, local_subrs, vsindex)?;
         new_charstrings.push(baked);
     }
 
@@ -271,8 +275,9 @@ struct Baker<'a> {
     blend: BlendCache<'a>,
     global_subrs: &'a [&'a [u8]],
     local_subrs: &'a [&'a [u8]],
-    /// Operand stack: floats so blend deltas don't lose precision.
-    stack: Vec<f32>,
+    /// Operand stack, in double precision as HarfBuzz keeps it, so a
+    /// 16.16 operand round-trips and blend sums don't lose precision.
+    stack: Vec<f64>,
     /// Output charstring bytes.
     out: Vec<u8>,
     /// Current vsindex (which IVS subtable blend draws from).
@@ -297,15 +302,18 @@ impl<'a> Baker<'a> {
         }
     }
 
+    /// Bakes one charstring of a Font DICT with `local_subrs` whose
+    /// Private DICT sets `vsindex`.
     fn bake_charstring(
         &mut self,
         cs: &[u8],
         local_subrs: &'a [&'a [u8]],
+        vsindex: u16,
     ) -> Result<Vec<u8>, SubsetError> {
         self.local_subrs = local_subrs;
         self.stack.clear();
         self.out = Vec::new();
-        self.vsindex = 0;
+        self.vsindex = vsindex;
         self.stem_count = 0;
         self.run(cs, 0)?;
         Ok(core::mem::take(&mut self.out))
@@ -324,8 +332,13 @@ impl<'a> Baker<'a> {
                 "CFF2 bake: charstring work budget exceeded",
             )?;
             if b0 >= 32 || b0 == OP_SHORTINT {
-                let (val, len) = decode_operand_f32(code, pos)
+                let (val, len) = decode_operand_f64(code, pos)
                     .ok_or(SubsetError::Unsupported("CFF2 bake: operand truncated"))?;
+                if self.stack.len() >= MAX_STACK {
+                    return Err(SubsetError::Unsupported(
+                        "CFF2 bake: operand stack past 513 operands",
+                    ));
+                }
                 self.stack.push(val);
                 pos += len;
                 continue;
@@ -341,7 +354,7 @@ impl<'a> Baker<'a> {
                     let v = self.stack.pop().ok_or(SubsetError::Unsupported(
                         "CFF2 bake: vsindex without operand",
                     ))?;
-                    if v < 0.0 || v > f32::from(u16::MAX) {
+                    if v < 0.0 || v > f64::from(u16::MAX) {
                         return Err(SubsetError::Unsupported(
                             "CFF2 bake: vsindex operand out of range",
                         ));
@@ -444,32 +457,41 @@ impl<'a> Baker<'a> {
             .and_then(|total_deltas| total_deltas.checked_add(n))
             .ok_or(UNDERFLOW)?;
         let start = self.stack.len().checked_sub(needed).ok_or(UNDERFLOW)?;
+        // The deltas were charged as they were pushed; each value the
+        // blend works out is charged here, so blends that leave the same
+        // values again and again (no regions) cost what they do.
+        self.budget = self.budget.checked_sub(n).ok_or(SubsetError::Unsupported(
+            "CFF2 bake: charstring work budget exceeded",
+        ))?;
         let (masters, deltas) = self
             .stack
             .get_mut(start..)
             .and_then(|tail| tail.split_at_mut_checked(n))
             .ok_or(UNDERFLOW)?;
-        if n_regions > 0 {
-            for (master, row) in masters.iter_mut().zip(deltas.chunks_exact(n_regions)) {
-                let mut accum = 0.0_f32;
-                for (&delta, &s) in row.iter().zip(scalars) {
-                    accum += s * delta;
-                }
-                *master += accum;
+        // Each value rounds once its deltas are in, as HarfBuzz's
+        // instancer rounds a blend at fixed coordinates.
+        for (i, master) in masters.iter_mut().enumerate() {
+            // `i * n_regions` stays below `needed`, which did not overflow.
+            let row = deltas
+                .get(i * n_regions..(i + 1) * n_regions)
+                .unwrap_or_default();
+            let mut accum = 0.0_f64;
+            for (&delta, &s) in row.iter().zip(scalars) {
+                accum += f64::from(s) * delta;
             }
+            *master = (*master + accum).round();
         }
         self.stack.truncate(start + n);
         Ok(())
     }
 
     /// Emits the operands currently sitting on the operand stack as
-    /// CFF2 push bytes, then clears the stack. The numbers that
-    /// survive blend resolution may be fractional; we use the 16.16
-    /// fixed form (`b0=255`) when needed and the integer forms
-    /// otherwise.
+    /// CFF2 push bytes, then clears the stack. Blend results are whole
+    /// numbers; a source operand with a fraction keeps the 16.16 fixed
+    /// form (`b0=255`).
     fn flush_stack(&mut self) {
         for v in self.stack.drain(..) {
-            encode_charstring_number(v, &mut self.out);
+            encode_charstring_number_f64(v, &mut self.out);
         }
     }
 }

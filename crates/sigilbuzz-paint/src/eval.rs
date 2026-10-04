@@ -108,7 +108,8 @@ pub fn evaluate(face: &Face<'_>, gid: GlyphId) -> Vec<DrawCmd> {
 /// every `PaintVar*` node visited. `coords` is the normalized axis
 /// vector, the same shape sigilbuzz's
 /// [`Face::glyph_outline_at_coords`](sigilbuzz::Face::glyph_outline_at_coords)
-/// accepts. An empty slice is the static (no-deltas) path.
+/// accepts. An empty slice is the static (no-deltas) path. The deltas
+/// are read at the coords rounded to F2DOT14, as HarfBuzz reads them.
 #[must_use]
 pub fn evaluate_at_coords(face: &Face<'_>, gid: GlyphId, coords: &[f32]) -> Vec<DrawCmd> {
     evaluate_with(face, gid, &EvalOptions::new().with_coords(coords))

@@ -33,35 +33,34 @@ pub enum SubrKind {
 }
 
 // Type 2 opcode numbers we need to recognize. Values from Adobe TN
-// 5177 §3 and §4. Kept private so `cff::scan_subr_calls` is the only
-// surface for charstring walking from the subsetter side.
+// 5177 §3 and §4. Shared with the subsetter's charstring walk.
 pub(super) const OP_HSTEM: u8 = 1;
-const OP_VSTEM: u8 = 3;
-const OP_VMOVETO: u8 = 4;
-const OP_RLINETO: u8 = 5;
-const OP_HLINETO: u8 = 6;
-const OP_VLINETO: u8 = 7;
-const OP_RRCURVETO: u8 = 8;
+pub(super) const OP_VSTEM: u8 = 3;
+pub(super) const OP_VMOVETO: u8 = 4;
+pub(super) const OP_RLINETO: u8 = 5;
+pub(super) const OP_HLINETO: u8 = 6;
+pub(super) const OP_VLINETO: u8 = 7;
+pub(super) const OP_RRCURVETO: u8 = 8;
 pub(super) const OP_CALLSUBR: u8 = 10;
 pub(super) const OP_RETURN: u8 = 11;
 pub(super) const OP_ESCAPE: u8 = 12;
 pub(super) const OP_ENDCHAR: u8 = 14;
-const OP_VSINDEX: u8 = 15;
-const OP_BLEND: u8 = 16;
-const OP_HSTEMHM: u8 = 18;
+pub(super) const OP_VSINDEX: u8 = 15;
+pub(super) const OP_BLEND: u8 = 16;
+pub(super) const OP_HSTEMHM: u8 = 18;
 pub(super) const OP_HINTMASK: u8 = 19;
-const OP_CNTRMASK: u8 = 20;
+pub(super) const OP_CNTRMASK: u8 = 20;
 pub(super) const OP_RMOVETO: u8 = 21;
-const OP_HMOVETO: u8 = 22;
-const OP_VSTEMHM: u8 = 23;
-const OP_RCURVELINE: u8 = 24;
-const OP_RLINECURVE: u8 = 25;
-const OP_VVCURVETO: u8 = 26;
-const OP_HHCURVETO: u8 = 27;
+pub(super) const OP_HMOVETO: u8 = 22;
+pub(super) const OP_VSTEMHM: u8 = 23;
+pub(super) const OP_RCURVELINE: u8 = 24;
+pub(super) const OP_RLINECURVE: u8 = 25;
+pub(super) const OP_VVCURVETO: u8 = 26;
+pub(super) const OP_HHCURVETO: u8 = 27;
 pub(super) const OP_SHORTINT: u8 = 28;
 pub(super) const OP_CALLGSUBR: u8 = 29;
-const OP_VHCURVETO: u8 = 30;
-const OP_HVCURVETO: u8 = 31;
+pub(super) const OP_VHCURVETO: u8 = 30;
+pub(super) const OP_HVCURVETO: u8 = 31;
 
 /// One subroutine call discovered by [`scan_subr_calls`].
 ///
@@ -99,10 +98,14 @@ pub struct SubrCall {
 /// of the byte stream. CFF1 charstrings stop at `endchar` or
 /// end-of-stream. Both behaviors produce the same call list.
 ///
-/// The stem count that sizes `hintmask` / `cntrmask` data starts at 0
-/// for every body. A subroutine that uses a hint mask set up by its
-/// caller's stem hints is therefore sized as if no stems were
-/// declared. This is a known limitation of the per-body scan.
+/// The scan reads one body on its own. The stem count that sizes
+/// `hintmask` / `cntrmask` data starts at 0 for every body, so a
+/// subroutine whose masks count stems its caller declared is misread,
+/// and the operands a CFF2 `blend` drops depend on a variation store
+/// the scan does not see, so the stack is cleared there. The subsetter
+/// itself does not scan bodies alone: it runs each kept glyph through
+/// its subroutine calls (see `cff::walk`), which sizes masks and blends
+/// as HarfBuzz does.
 ///
 /// # Errors
 ///
@@ -314,6 +317,10 @@ pub fn encode_int_operand(v: i32) -> Vec<u8> {
 /// 0-based indices into the source INDEX. The caller renumbers these
 /// to a 0..N compacted layout in input order.
 ///
+/// Each body is read on its own, with the limits [`scan_subr_calls`]
+/// describes. The subsetter runs the kept glyphs through their calls
+/// instead, which sizes hint masks and CFF2 blends as HarfBuzz does.
+///
 /// # Errors
 ///
 /// Propagates [`scan_subr_calls`] errors from any walked charstring
@@ -377,8 +384,10 @@ fn mark_call(
     }
 }
 
-/// Identifies the set of kept global subroutines whose body (directly
-/// or transitively through other globals) calls a local subroutine.
+/// Identifies the global subroutines whose body (directly or
+/// transitively through other globals) calls a local subroutine, from
+/// the calls of each global body given: `(global index, calls)` pairs
+/// for `n` globals. A global without a pair calls nothing.
 ///
 /// In CID-keyed CFF1 fonts each gid belongs to a Font DICT (FD) with
 /// its own local subroutine INDEX. A `callsubr` from inside a *global*
@@ -388,27 +397,22 @@ fn mark_call(
 /// concrete local-index after subsetting because different FDs renumber
 /// their locals independently.
 ///
-/// Returns a boolean keep-mask aligned with `global_subrs`: index `i`
-/// is `true` when global `i` reaches a local call (and therefore must
-/// be duplicated per kept FD by the rewriter). Globals that only call
-/// other non-cross-FD globals are *not* marked.
-///
-/// # Errors
-///
-/// Propagates [`scan_subr_calls`] errors from any walked global body.
-pub fn compute_cross_fd_globals(
-    global_subrs: &[&[u8]],
-    local_count: usize,
-) -> Result<Vec<bool>, SubsetError> {
-    let n = global_subrs.len();
+/// Returns a boolean mask of `n` entries: index `i` is `true` when
+/// global `i` reaches a local call (and therefore must be duplicated
+/// per kept FD by the rewriter). Globals that only call other
+/// non-cross-FD globals are *not* marked.
+pub(super) fn cross_fd_globals<'c>(
+    n: usize,
+    bodies: impl IntoIterator<Item = (usize, &'c [SubrCall])>,
+) -> Vec<bool> {
     let mut is_cross: Vec<bool> = alloc::vec![false; n];
     // `callers[g]` lists every global whose body calls global `g`.
     let mut callers: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
     let mut pending: Vec<usize> = Vec::new();
     // Pass 1: mark every global whose body directly calls a local, and
     // record the global-to-global call edges.
-    for (i, body) in global_subrs.iter().enumerate() {
-        for call in scan_subr_calls(body, local_count, n)? {
+    for (i, calls) in bodies {
+        for call in calls {
             match call.kind {
                 SubrKind::Local => {
                     if let Some(flag) = is_cross.get_mut(i) {
@@ -447,7 +451,7 @@ pub fn compute_cross_fd_globals(
             }
         }
     }
-    Ok(is_cross)
+    is_cross
 }
 
 fn collect_kept(keep: &[bool]) -> Vec<u32> {
@@ -657,46 +661,142 @@ pub(super) fn renumber_charstring_impl(
     cross_fd_override: impl Fn(usize) -> Option<u32>,
 ) -> Result<(), SubsetError> {
     let calls = scan_subr_calls(charstring, old_local_count, old_global_count)?;
-    let new_local_bias = subr_bias(new_local_count);
-    let new_global_bias = subr_bias(new_global_count);
     for call in calls.iter().rev() {
         // Reverse iteration so earlier rewrites don't shift later
         // offsets, but since we always re-encode at the original byte
         // width, the offsets stay stable. Reverse-iterate anyway as a
         // belt-and-suspenders against future variable-width changes.
-        if call.index_after_bias < 0 {
-            return Err(SubsetError::Unsupported(
-                "CFF charstring negative subr index after bias",
-            ));
-        }
-        let old_idx = usize::try_from(call.index_after_bias)
-            .map_err(|_| SubsetError::Unsupported("CFF charstring calls dropped subroutine"))?;
-        let new_idx =
-            match call.kind {
-                SubrKind::Local => local_renumber.get(old_idx).copied().flatten().ok_or(
-                    SubsetError::Unsupported("CFF charstring calls dropped subroutine"),
-                )?,
-                SubrKind::Global => {
-                    if let Some(target) = cross_fd_override(old_idx) {
-                        target
-                    } else {
-                        global_renumber.get(old_idx).copied().flatten().ok_or(
-                            SubsetError::Unsupported("CFF charstring calls dropped subroutine"),
-                        )?
-                    }
-                }
-            };
-        let new_bias = match call.kind {
-            SubrKind::Local => new_local_bias,
-            SubrKind::Global => new_global_bias,
-        };
-        let new_raw = (new_idx as i64) - i64::from(new_bias);
-        if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&new_raw) {
-            return Err(SubsetError::Unsupported(
-                "CFF renumber: new raw operand out of i32 range",
-            ));
-        }
-        renumber_subr_call(charstring, call, new_raw as i32)?;
+        let new_raw = new_raw_operand(
+            call,
+            new_local_count,
+            new_global_count,
+            local_renumber,
+            global_renumber,
+            &cross_fd_override,
+        )?;
+        renumber_subr_call(charstring, call, new_raw)?;
     }
     Ok(())
+}
+
+/// The raw operand `call` takes once its subroutine is renumbered: the
+/// new index, through `local_renumber`, `cross_fd_override` or
+/// `global_renumber`, less the bias of the new INDEX.
+fn new_raw_operand(
+    call: &SubrCall,
+    new_local_count: usize,
+    new_global_count: usize,
+    local_renumber: &[Option<u32>],
+    global_renumber: &[Option<u32>],
+    cross_fd_override: &impl Fn(usize) -> Option<u32>,
+) -> Result<i32, SubsetError> {
+    if call.index_after_bias < 0 {
+        return Err(SubsetError::Unsupported(
+            "CFF charstring negative subr index after bias",
+        ));
+    }
+    let old_idx = usize::try_from(call.index_after_bias)
+        .map_err(|_| SubsetError::Unsupported("CFF charstring calls dropped subroutine"))?;
+    let dropped = SubsetError::Unsupported("CFF charstring calls dropped subroutine");
+    let (new_idx, new_bias) = match call.kind {
+        SubrKind::Local => (
+            local_renumber
+                .get(old_idx)
+                .copied()
+                .flatten()
+                .ok_or(dropped)?,
+            subr_bias(new_local_count),
+        ),
+        SubrKind::Global => (
+            match cross_fd_override(old_idx) {
+                Some(target) => target,
+                None => global_renumber
+                    .get(old_idx)
+                    .copied()
+                    .flatten()
+                    .ok_or(dropped)?,
+            },
+            subr_bias(new_global_count),
+        ),
+    };
+    let new_raw = i64::from(new_idx) - i64::from(new_bias);
+    i32::try_from(new_raw)
+        .map_err(|_| SubsetError::Unsupported("CFF renumber: new raw operand out of i32 range"))
+}
+
+/// How the subroutines of one kind (the locals of one Font DICT, or the
+/// globals) are renumbered in a subset.
+pub(crate) struct Remap<'r> {
+    /// The count of the source INDEX, whose bias a call's number holds.
+    pub(crate) old_count: usize,
+    /// The count of the rebuilt INDEX, whose bias a new number takes.
+    pub(crate) new_count: usize,
+    /// The new index of a source subroutine, `None` when it is dropped.
+    pub(crate) new_index: &'r dyn Fn(usize) -> Option<u32>,
+}
+
+/// The new index of source subroutine `old` when `kept` (ascending) lists
+/// the kept ones in their new order: its position in `kept`.
+pub(crate) fn kept_position(kept: &[u32], old: usize) -> Option<u32> {
+    let old = u32::try_from(old).ok()?;
+    kept.binary_search(&old).ok().map(|i| i as u32)
+}
+
+/// The body `body` with the subroutine number of each call in `calls`,
+/// call sites found in it in byte order, renumbered through `local` and
+/// `global`.
+///
+/// A call's source subroutine is worked out again from the number it
+/// pushes and the bias of `local.old_count` or `global.old_count`, not
+/// taken from the call: one global subroutine body serves every Font
+/// DICT, and the bias of its local calls is the bias of the local INDEX
+/// of the Font DICT that runs it.
+///
+/// A new number that fits the width of the push it replaces is padded
+/// to that width, so the body keeps its size. One that cannot be, a
+/// value in `-107..=107` replacing a 2-byte push or any value wider
+/// than its push, is written in its own shortest form and the bytes
+/// after it move: nothing in a charstring addresses its own bytes, and
+/// HarfBuzz re-encodes every call this way.
+pub(crate) fn rewrite_calls(
+    body: &[u8],
+    calls: &[SubrCall],
+    local: &Remap<'_>,
+    global: &Remap<'_>,
+) -> Result<Vec<u8>, SubsetError> {
+    const BAD_SITE: SubsetError =
+        SubsetError::Unsupported("CFF charstring call sites out of order");
+    const DROPPED: SubsetError =
+        SubsetError::Unsupported("CFF charstring calls dropped subroutine");
+    let mut out = Vec::with_capacity(body.len());
+    let mut pos = 0;
+    for call in calls {
+        let start = call.operand_byte_offset;
+        let end = start.checked_add(call.operand_byte_len).ok_or(BAD_SITE)?;
+        out.extend_from_slice(body.get(pos..start).ok_or(BAD_SITE)?);
+        if end > body.len() {
+            return Err(BAD_SITE);
+        }
+        let remap = match call.kind {
+            SubrKind::Local => local,
+            SubrKind::Global => global,
+        };
+        let old = i64::from(call.raw_operand) + i64::from(subr_bias(remap.old_count));
+        let old = usize::try_from(old)
+            .ok()
+            .filter(|&i| i < remap.old_count)
+            .ok_or(DROPPED)?;
+        let new = (remap.new_index)(old).ok_or(DROPPED)?;
+        let new_raw = i64::from(new) - i64::from(subr_bias(remap.new_count));
+        let new_raw = i32::try_from(new_raw).map_err(|_| {
+            SubsetError::Unsupported("CFF renumber: new raw operand out of i32 range")
+        })?;
+        match encode_int_operand_at_width(new_raw, call.operand_byte_len) {
+            Ok(padded) if padded.len() == call.operand_byte_len => out.extend_from_slice(&padded),
+            _ => out.extend_from_slice(&encode_int_operand(new_raw)),
+        }
+        pos = end;
+    }
+    out.extend_from_slice(body.get(pos..).ok_or(BAD_SITE)?);
+    Ok(out)
 }

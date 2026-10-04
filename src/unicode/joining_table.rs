@@ -7,7 +7,7 @@
 // Date: 2025-08-14
 //
 // Source: https://www.unicode.org/Public/17.0.0/ucd/extracted/DerivedGeneralCategory.txt
-// Retrieved: 2026-09-26
+// Retrieved: 2026-10-04
 // DerivedGeneralCategory-17.0.0.txt
 // Date: 2025-07-24, 00:12:50 GMT
 

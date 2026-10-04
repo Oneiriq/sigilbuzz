@@ -25,6 +25,30 @@ use crate::SubsetError;
 pub(super) struct HmtxBake {
     pub(super) bytes: Vec<u8>,
     pub(super) number_of_h_metrics: u16,
+    /// Every glyph's advance, in glyph order.
+    pub(super) advances: Vec<u16>,
+    /// Every glyph's left side bearing, in glyph order.
+    pub(super) lsbs: Vec<i16>,
+}
+
+impl HmtxBake {
+    /// The `OS/2` `xAvgCharWidth` of these metrics, as HarfBuzz's
+    /// instancer works it out: the mean of the advances that are not
+    /// zero, rounded, or 0 when every advance is.
+    pub(super) fn avg_char_width(&self) -> u16 {
+        let (total, count) = self
+            .advances
+            .iter()
+            .filter(|&&a| a != 0)
+            .fold((0u64, 0u64), |(t, c), &a| (t + u64::from(a), c + 1));
+        if count == 0 {
+            return 0;
+        }
+        // HarfBuzz's `roundf` of the quotient in double precision,
+        // `floor(x + 0.5)`. At most 65,535 advances of at most 65,535
+        // each, so the sum fits and so does the mean.
+        (total as f64 / count as f64 + 0.5).floor() as u16
+    }
 }
 
 /// Builds `hmtx` from the metrics of the baked glyphs.
@@ -35,6 +59,8 @@ pub(super) fn hmtx_from_metrics(metrics: &[GlyphMetrics]) -> HmtxBake {
     HmtxBake {
         bytes,
         number_of_h_metrics,
+        advances,
+        lsbs,
     }
 }
 
@@ -59,7 +85,13 @@ pub(super) fn patch_head_bounds(head: &mut [u8], metrics: &[GlyphMetrics]) {
             u[3].max(b[3]),
         ]
     });
-    for (i, v) in union.iter().enumerate() {
+    write_head_box(head, union);
+}
+
+/// Writes `(xMin, yMin, xMax, yMax)` into the `head` bytes (bytes 36
+/// to 43).
+pub(super) fn write_head_box(head: &mut [u8], bounds: [i16; 4]) {
+    for (i, v) in bounds.iter().enumerate() {
         write_i16(head, 36 + 2 * i, *v);
     }
 }
@@ -94,6 +126,18 @@ pub(super) fn patch_line_extremes(table: &mut [u8], metrics: &[GlyphMetrics], ve
         write_i16(table, 12, clamp_i16(lead));
         write_i16(table, 14, clamp_i16(trail));
         write_i16(table, 16, clamp_i16(extent));
+    }
+}
+
+/// Writes the largest advance (byte 10) and, when given, the smallest
+/// leading and trailing bearings and the largest extent (bytes 12, 14
+/// and 16) into `hhea` or `vhea`.
+pub(super) fn write_line_extremes(table: &mut [u8], max_advance: u16, extremes: Option<[i16; 3]>) {
+    write_u16(table, 10, max_advance);
+    if let Some([lead, trail, extent]) = extremes {
+        write_i16(table, 12, lead);
+        write_i16(table, 14, trail);
+        write_i16(table, 16, extent);
     }
 }
 
@@ -190,6 +234,8 @@ pub(super) fn bake_hmtx(
     Ok(HmtxBake {
         bytes,
         number_of_h_metrics,
+        advances,
+        lsbs,
     })
 }
 

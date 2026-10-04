@@ -214,8 +214,9 @@ fn feature_slice_is_accepted_but_ignored_today() {
 fn decomposed_input_the_font_cannot_compose_keeps_both_characters() {
     // The test font maps neither 'e', the combining acute, nor the
     // precomposed 'é': normalization only recomposes into a composite
-    // the font maps, so both characters stay, each on .notdef, and
-    // each keeps its own cluster.
+    // the font maps, so both characters stay, each on .notdef. The
+    // default grapheme level puts the acute in the cluster of its
+    // base; the character levels give it its own.
     let data = build_shapeable_font();
     let blob = Blob::new(&data);
     let face = Face::parse(&blob, 0).unwrap();
@@ -226,6 +227,10 @@ fn decomposed_input_the_font_cannot_compose_keeps_both_characters() {
     let shaped = shape(&font, &buffer, &[]).unwrap();
     assert_eq!(shaped.len(), 2);
     assert_eq!(shaped.glyphs[0].glyph_id, 0);
+    assert_eq!(shaped.glyphs[1].cluster, 0);
+    buffer.set_cluster_level(crate::ClusterLevel::MonotoneCharacters);
+    let shaped = shape(&font, &buffer, &[]).unwrap();
+    assert_eq!(shaped.len(), 2);
     assert_eq!(shaped.glyphs[1].cluster, 1);
 }
 

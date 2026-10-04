@@ -5,8 +5,9 @@ use alloc::vec::Vec;
 
 use super::{parse_cff2, serialise_cff2_top_dict, ParsedCff2};
 use crate::cff::{
-    compute_kept_subrs, emit_fd_select_auto, encode_index_cff2, kept_fd_positions,
-    patch_dict_offset, renumber_charstring, serialise_font_dict, serialise_private_dict, walk_dict,
+    emit_fd_select_auto, encode_index_cff2, kept_fd_positions, kept_position, patch_dict_offset,
+    rewrite_calls, serialise_font_dict, serialise_private_dict, walk_budget, walk_dict,
+    BlendRegions, CharstringWalk, FdWalk, Remap, SubrCall,
 };
 use crate::SubsetError;
 
@@ -27,14 +28,15 @@ use crate::SubsetError;
 /// output (the spec requires FDSelect on disk when CIDCount > 0,
 /// which any non-empty CFF2 satisfies).
 ///
-/// Unreachable subroutines are pruned. Per-kept-FD `compute_kept_subrs`
-/// runs the transitive closure over each FD's kept charstrings against
-/// that FD's local INDEX; the global keep-set is the union across FDs.
-/// The byte-stable charstring renumber pads narrower natural-width
-/// operands back to the source's original byte slot
-/// (`cff::encode_int_operand_at_width`), so a renumbered call
-/// site never shifts the surrounding charstring even when the new
-/// (post-bias) operand value is smaller than the original.
+/// Unreachable subroutines are pruned. Every kept glyph runs through
+/// its subroutine calls (see `cff::walk`), its `blend`s reading their
+/// region counts from the VariationStore so blended stem hints size the
+/// hint masks. The subroutines reached are kept: each FD's locals, and
+/// the globals, the union across FDs.
+/// A renumbered subroutine number keeps the width of the push it
+/// replaces where it fits (`cff::encode_int_operand_at_width`), so the
+/// charstring keeps its size; one that does not fit takes its shortest
+/// form and the charstring's later bytes move.
 ///
 /// `kept_gids` must be sorted ascending and contain gid 0.
 ///
@@ -88,174 +90,124 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
         .map(|&old| fd_pos_of[usize::from(old)] as u8)
         .collect();
 
-    // Step 3: per-kept-FD subroutine keep-set. Each kept FD runs its
-    // own `compute_kept_subrs` over the kept charstrings that route to
-    // that FD against its FD-private local INDEX; the global keep-set
-    // is the union across all kept FDs. The byte-stable renumber path
-    // pads narrower-natural operands back to the source's original
-    // byte slot when there's a wider form available (3-byte shortint,
-    // 5-byte fixed, the two 2-byte forms). The single hole, a
-    // `-107..=107` value that has to land in a 2-byte slot, has no
-    // 2-byte representation in Type 2 charstrings, so for that case
-    // the rewriter falls back to keeping every source subroutine
-    // verbatim with identity renumbering (preserving the source
-    // bias). The fallback is detected lazily inside
-    // [`emit_with_keep_set`]: try the pruned attempt; on the specific
-    // "cannot pad operand" error retry with identity.
-    let (pruned_per_fd_kept_local, pruned_kept_global_idx) = {
-        let mut kept_global_set: alloc::vec::Vec<bool> =
-            alloc::vec![false; parsed.global_subrs.len()];
-        let mut per_fd_kept_local: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
-        for &old_fd in &kept_fds_sorted {
-            let mut cs_for_this_fd: Vec<&[u8]> = Vec::new();
-            for (i, &gid) in kept_gids.iter().enumerate() {
-                if kept_fd_old[i] == old_fd {
-                    cs_for_this_fd.push(parsed.char_strings[gid as usize]);
-                }
+    // Step 3: run every kept glyph through its subroutine calls, FD by
+    // FD. The subroutines reached are the ones kept: each FD's locals,
+    // and the globals, the union across FDs.
+    let store = parsed.vstore_blob.and_then(|blob| blob.get(2..));
+    let mut walk = CharstringWalk::new(
+        &parsed.global_subrs,
+        Some(BlendRegions::new(store)),
+        walk_budget(cff_bytes.len()),
+    );
+    let mut fd_walks: Vec<FdWalk<'_>> = Vec::with_capacity(kept_fds_sorted.len());
+    let mut charstring_calls: Vec<Vec<SubrCall>> = alloc::vec![Vec::new(); kept_gids.len()];
+    for &old_fd in &kept_fds_sorted {
+        let locals = parsed.per_fd_local_subrs[old_fd as usize].as_slice();
+        let vsindex = parsed.per_fd_vsindex[old_fd as usize];
+        let mut fd_walk = FdWalk::new(locals, vsindex);
+        for (i, &gid) in kept_gids.iter().enumerate() {
+            if kept_fd_old[i] == old_fd {
+                charstring_calls[i] =
+                    walk.glyph(&mut fd_walk, parsed.char_strings[gid as usize])?;
             }
-            let fd_local_subrs = &parsed.per_fd_local_subrs[old_fd as usize];
-            let (kept_local, kept_global) =
-                compute_kept_subrs(&cs_for_this_fd, fd_local_subrs, &parsed.global_subrs)?;
-            for &gi in &kept_global {
-                kept_global_set[gi as usize] = true;
-            }
-            per_fd_kept_local.push(kept_local);
         }
-        let kept_global_idx: Vec<u32> = kept_global_set
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &k)| if k { Some(i as u32) } else { None })
-            .collect();
-        (per_fd_kept_local, kept_global_idx)
-    };
-
-    // Identity fallback keep-set: every source subr survives.
-    let identity_per_fd_kept_local: Vec<Vec<u32>> = kept_fds_sorted
-        .iter()
-        .map(|&old_fd| (0..parsed.per_fd_local_subrs[old_fd as usize].len() as u32).collect())
-        .collect();
-    let identity_kept_global_idx: Vec<u32> = (0..parsed.global_subrs.len() as u32).collect();
-
-    match emit_with_keep_set(
+        fd_walks.push(fd_walk);
+    }
+    emit(
         cff_bytes,
         &parsed,
         kept_gids,
         &kept_fd_old,
         &kept_fds_sorted,
         &new_fd_select,
-        &pruned_per_fd_kept_local,
-        &pruned_kept_global_idx,
-    ) {
-        Ok(out) => Ok(out),
-        Err(SubsetError::Unsupported("CFF renumber: cannot pad operand to original width")) => {
-            emit_with_keep_set(
-                cff_bytes,
-                &parsed,
-                kept_gids,
-                &kept_fd_old,
-                &kept_fds_sorted,
-                &new_fd_select,
-                &identity_per_fd_kept_local,
-                &identity_kept_global_idx,
-            )
-        }
-        Err(e) => Err(e),
-    }
+        &walk,
+        &fd_walks,
+        &charstring_calls,
+    )
 }
 
+/// Lays out the subset table: the subroutines `walk` reached (each
+/// kept FD's `fds` entry, in `kept_fds_sorted` order), with every call
+/// site it found renumbered, the kept glyphs' charstrings with theirs
+/// (`charstring_calls`, in `kept_gids` order), and FDArray and FDSelect
+/// for the kept FDs.
 #[allow(clippy::too_many_arguments)]
-fn emit_with_keep_set(
+fn emit(
     cff_bytes: &[u8],
     parsed: &ParsedCff2<'_>,
     kept_gids: &[u16],
     kept_fd_old: &[u8],
     kept_fds_sorted: &[u8],
     new_fd_select: &[u8],
-    per_fd_kept_local: &[Vec<u32>],
-    kept_global_idx: &[u32],
+    walk: &CharstringWalk<'_>,
+    fds: &[FdWalk<'_>],
+    charstring_calls: &[Vec<SubrCall>],
 ) -> Result<Vec<u8>, SubsetError> {
-    let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
-    for (new_i, &old_i) in kept_global_idx.iter().enumerate() {
-        global_renumber[old_i as usize] = Some(new_i as u32);
-    }
-    let new_global_count = kept_global_idx.len();
-    let old_global_count = parsed.global_subrs.len();
+    let per_fd_kept_local: Vec<Vec<u32>> = fds.iter().map(FdWalk::kept_locals).collect();
+    let kept_global_idx = walk.kept_globals();
+    let new_global = |old: usize| kept_position(&kept_global_idx, old);
+    let global = Remap {
+        old_count: parsed.global_subrs.len(),
+        new_count: kept_global_idx.len(),
+        new_index: &new_global,
+    };
+    let local_maps: Vec<_> = per_fd_kept_local
+        .iter()
+        .map(|kept| move |old: usize| kept_position(kept, old))
+        .collect();
+    let local_remap = |fd_pos: usize| Remap {
+        old_count: parsed.per_fd_local_subrs[usize::from(kept_fds_sorted[fd_pos])].len(),
+        new_count: per_fd_kept_local[fd_pos].len(),
+        new_index: &local_maps[fd_pos],
+    };
 
-    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> =
-        Vec::with_capacity(kept_fds_sorted.len());
-    for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
-        let local_count = parsed.per_fd_local_subrs[old_fd as usize].len();
-        let mut renumber: Vec<Option<u32>> = alloc::vec![None; local_count];
-        for (new_i, &old_i) in per_fd_kept_local[i].iter().enumerate() {
-            renumber[old_i as usize] = Some(new_i as u32);
-        }
-        per_fd_local_renumber.push(renumber);
-    }
-
-    // Step 5: rewrite each kept charstring.
+    // Step 5: rewrite each kept charstring and subroutine at the call
+    // sites the walk found in it.
     let fd_pos_of = kept_fd_positions(kept_fds_sorted);
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
-        let old_fd = kept_fd_old[i];
-        let new_fd_pos = fd_pos_of[usize::from(old_fd)];
-        let fd_local_subrs_old = &parsed.per_fd_local_subrs[old_fd as usize];
-        let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
-        let new_local_count = per_fd_kept_local[new_fd_pos].len();
-        let mut cs = parsed.char_strings[gid as usize].to_vec();
-        renumber_charstring(
-            &mut cs,
-            fd_local_subrs_old.len(),
-            old_global_count,
-            new_local_count,
-            new_global_count,
-            fd_local_renumber,
-            &global_renumber,
-        )?;
-        new_charstrings.push(cs);
+        let local = local_remap(fd_pos_of[usize::from(kept_fd_old[i])]);
+        new_charstrings.push(rewrite_calls(
+            parsed.char_strings[gid as usize],
+            &charstring_calls[i],
+            &local,
+            &global,
+        )?);
     }
 
     // Per-FD local subrs (renumbered).
     let mut new_per_fd_local_subrs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(kept_fds_sorted.len());
     for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
         let fd_local_subrs_old = &parsed.per_fd_local_subrs[old_fd as usize];
-        let kept_local_idx = &per_fd_kept_local[i];
-        let fd_local_renumber = &per_fd_local_renumber[i];
-        let new_local_count = kept_local_idx.len();
-        let mut new_locals: Vec<Vec<u8>> = kept_local_idx
-            .iter()
-            .map(|&idx| fd_local_subrs_old[idx as usize].to_vec())
-            .collect();
-        for sub in &mut new_locals {
-            renumber_charstring(
-                sub,
-                fd_local_subrs_old.len(),
-                old_global_count,
-                new_local_count,
-                new_global_count,
-                fd_local_renumber,
-                &global_renumber,
-            )?;
+        let local = local_remap(i);
+        let mut new_locals: Vec<Vec<u8>> = Vec::with_capacity(per_fd_kept_local[i].len());
+        for &idx in &per_fd_kept_local[i] {
+            new_locals.push(rewrite_calls(
+                fd_local_subrs_old[idx as usize],
+                fds[i].local_calls(idx as usize).unwrap_or_default(),
+                &local,
+                &global,
+            )?);
         }
         new_per_fd_local_subrs.push(new_locals);
     }
 
-    // Renumber globals: pass an empty local table; calls into locals
+    // Renumber globals: pass an empty local pool; calls into locals
     // from globals would cross-FD-collide and surface a hard error.
-    let mut new_global_subrs: Vec<Vec<u8>> = kept_global_idx
-        .iter()
-        .map(|&i| parsed.global_subrs[i as usize].to_vec())
-        .collect();
-    let empty_local: Vec<Option<u32>> = Vec::new();
-    for sub in &mut new_global_subrs {
-        renumber_charstring(
-            sub,
-            0,
-            old_global_count,
-            0,
-            new_global_count,
-            &empty_local,
-            &global_renumber,
-        )?;
+    let no_local = |_: usize| None;
+    let no_locals = Remap {
+        old_count: 0,
+        new_count: 0,
+        new_index: &no_local,
+    };
+    let mut new_global_subrs: Vec<Vec<u8>> = Vec::with_capacity(kept_global_idx.len());
+    for &g in &kept_global_idx {
+        new_global_subrs.push(rewrite_calls(
+            parsed.global_subrs[g as usize],
+            walk.global_calls(g as usize).unwrap_or_default(),
+            &no_locals,
+            &global,
+        )?);
     }
 
     // FDSelect bytes.

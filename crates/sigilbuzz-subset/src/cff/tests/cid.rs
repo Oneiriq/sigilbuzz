@@ -587,3 +587,82 @@ fn cid_global_calls_local_unused_fd_drops_duplicate() {
     // Exactly one duplicate should remain (the one for FD 0).
     assert_eq!(parsed.global_subrs.len(), 1);
 }
+
+#[test]
+fn cid_cross_fd_global_mask_is_sized_by_the_callers_stems() {
+    // Each glyph declares nine stems and calls global 0, which holds a
+    // two-byte hint mask and then calls local 0: a cross-FD global.
+    // Read on its own, its mask is empty and its first byte, 9, a
+    // reserved opcode.
+    let mut g0 = alloc::vec![OP_HINTMASK, 9, 9];
+    g0.extend_from_slice(&encode_int_operand(-107));
+    g0.extend_from_slice(&[OP_CALLSUBR, OP_RETURN]);
+    let local: Vec<u8> = alloc::vec![139, 139, OP_RMOVETO, OP_RETURN];
+    let mut cs0: Vec<u8> = (0..18).map(|v| (139 + v) as u8).collect();
+    cs0.push(18); // hstemhm
+    cs0.extend_from_slice(&encode_int_operand(-107));
+    cs0.extend_from_slice(&[OP_CALLGSUBR, OP_ENDCHAR]);
+    let cs1 = cs0.clone();
+    let charstrings: Vec<&[u8]> = alloc::vec![cs0.as_slice(), cs1.as_slice()];
+    let globals: Vec<&[u8]> = alloc::vec![g0.as_slice()];
+    let per_fd_locals: Vec<Vec<&[u8]>> =
+        alloc::vec![alloc::vec![local.as_slice()], alloc::vec![local.as_slice()]];
+    let cff =
+        build_synthetic_cid_cff1_with_subrs(&charstrings, &[0u8, 1], &globals, &per_fd_locals);
+
+    let new_cff = subset_non_identity(&cff, &[0u16, 1]).unwrap();
+    let parsed = parse_cff1(&new_cff).unwrap();
+    // One duplicate of the global per FD, each with its mask intact.
+    assert_eq!(parsed.global_subrs.len(), 2);
+    for body in &parsed.global_subrs {
+        assert_eq!(body, &g0.as_slice());
+    }
+}
+
+#[test]
+fn cid_cross_fd_duplicates_resolve_locals_with_their_fds_bias() {
+    // FD 0 has 1 local (bias 107) and FD 1 has 1,240 (bias 1131), so
+    // global 0's `-107 callsubr` runs FD 0's local 0 and FD 1's local
+    // 1024. Glyph 1 (FD 1) also calls FD 1's local 0 itself. Each FD's
+    // duplicate of the global must call its own FD's local: FD 1's
+    // keeps locals 0 and 1024 as 0 and 1, so its duplicate calls 1.
+    let mut g0 = encode_int_operand(-107);
+    g0.extend_from_slice(&[OP_CALLSUBR, OP_RETURN]);
+    let fd0_local: Vec<u8> = alloc::vec![139, 139, OP_RMOVETO, OP_RETURN];
+    let fd1_local_0: Vec<u8> = alloc::vec![140, 140, OP_RMOVETO, OP_RETURN];
+    let fd1_local_1024: Vec<u8> = alloc::vec![141, 141, OP_RMOVETO, OP_RETURN];
+    let filler: Vec<u8> = alloc::vec![OP_RETURN];
+    let mut fd1_locals: Vec<&[u8]> = alloc::vec![filler.as_slice(); 1240];
+    fd1_locals[0] = &fd1_local_0;
+    fd1_locals[1024] = &fd1_local_1024;
+    let mut cs0 = encode_int_operand(-107);
+    cs0.extend_from_slice(&[OP_CALLGSUBR, OP_ENDCHAR]);
+    let mut cs1 = encode_int_operand(-107);
+    cs1.push(OP_CALLGSUBR);
+    cs1.extend_from_slice(&encode_int_operand(-1131));
+    cs1.extend_from_slice(&[OP_CALLSUBR, OP_ENDCHAR]);
+    let charstrings: Vec<&[u8]> = alloc::vec![cs0.as_slice(), cs1.as_slice()];
+    let globals: Vec<&[u8]> = alloc::vec![g0.as_slice()];
+    let per_fd_locals: Vec<Vec<&[u8]>> = alloc::vec![alloc::vec![fd0_local.as_slice()], fd1_locals];
+    let cff =
+        build_synthetic_cid_cff1_with_subrs(&charstrings, &[0u8, 1], &globals, &per_fd_locals);
+
+    let new_cff = subset_non_identity(&cff, &[0u16, 1]).unwrap();
+    let parsed = parse_cff1(&new_cff).unwrap();
+    // Slot 0 is FD 0's duplicate, slot 1 FD 1's.
+    assert_eq!(parsed.global_subrs.len(), 2);
+    assert_eq!(parsed.global_subrs[0], g0.as_slice());
+    let mut fd1_dup = encode_int_operand(1 - 107);
+    fd1_dup.extend_from_slice(&[OP_CALLSUBR, OP_RETURN]);
+    assert_eq!(parsed.global_subrs[1], fd1_dup.as_slice());
+    // FD 1's new locals are its locals 0 and 1024, in that order.
+    let (fd_array, _) = read_index(&new_cff, parsed.fd_array_off.unwrap() as usize).unwrap();
+    let entries = walk_dict(fd_array[1]).unwrap();
+    let (size, off) = entries
+        .iter()
+        .find(|e| e.op == OP_PRIVATE)
+        .and_then(private_operands)
+        .unwrap();
+    let (_, locals) = read_private_dict(&new_cff, size, off, read_index, "past end").unwrap();
+    assert_eq!(locals, [fd1_local_0.as_slice(), fd1_local_1024.as_slice()]);
+}

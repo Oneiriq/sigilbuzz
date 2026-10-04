@@ -13,12 +13,20 @@
 //!   bits, `inner` in the low 16 bits.
 //!
 //! No other table is consulted; GDEF's variation store belongs to GDEF
-//! and GPOS. The sentinel `0xFFFFFFFF` and an empty coordinate slice
-//! both mean "no delta".
+//! and GPOS. The sentinel `0xFFFFFFFF` means "no delta".
+//!
+//! The coordinates are rounded to F2DOT14 first, multiples of 1/16384
+//! with halves rounded up, the precision HarfBuzz stores a font's
+//! coordinates in. Shaping and `Face::glyph_outline_at_coords` round
+//! them the same way, so a paint and the outlines it fills vary at the
+//! same instance. Coordinates that all round to zero, or none at all,
+//! are the default instance and mean "no delta".
 //!
 //! Both [`crate::evaluate_with`] and [`crate::walk`] read deltas through
 //! the same [`Deltas`] value, so they never disagree about units or index
 //! mapping.
+
+use alloc::vec::Vec;
 
 use sigilbuzz::tables::colr::{ClipBox, Colr, VarIndexBase};
 use sigilbuzz::tables::variation_store::ItemVariationStore;
@@ -27,18 +35,19 @@ use sigilbuzz::tables::variation_store::ItemVariationStore;
 const NO_VARIATION: VarIndexBase = VarIndexBase::MAX;
 
 /// Variation deltas for one evaluation: COLR's item variation store,
-/// its optional index map, and the normalized coordinates.
-pub(crate) struct Deltas<'a, 'c> {
+/// its optional index map, and the normalized coordinates rounded to
+/// F2DOT14.
+pub(crate) struct Deltas<'a> {
     store: Option<ItemVariationStore<'a>>,
     map: Option<DeltaSetIndexMap<'a>>,
-    coords: &'c [f32],
+    coords: Vec<f32>,
 }
 
-impl<'a, 'c> Deltas<'a, 'c> {
+impl<'a> Deltas<'a> {
     /// Reads the variation store and index map named by `colr`'s header.
     /// An offset that does not lead to a well-formed structure is
     /// treated as absent, which is what HarfBuzz's sanitizer does to it.
-    pub(crate) fn new(colr: &Colr<'a>, coords: &'c [f32]) -> Self {
+    pub(crate) fn new(colr: &Colr<'a>, coords: &[f32]) -> Self {
         let data = colr.data();
         let store = colr
             .var_store_offset()
@@ -47,7 +56,11 @@ impl<'a, 'c> Deltas<'a, 'c> {
         let map = colr
             .var_index_map_offset()
             .and_then(|off| DeltaSetIndexMap::parse(data, off as usize));
-        Self { store, map, coords }
+        Self {
+            store,
+            map,
+            coords: f2dot14_coords(coords),
+        }
     }
 
     /// The raw delta for field `field` of a record whose base index is
@@ -62,7 +75,7 @@ impl<'a, 'c> Deltas<'a, 'c> {
         };
         let index = base.wrapping_add(u32::from(field));
         let index = self.map.as_ref().map_or(index, |map| map.map(index));
-        store.delta((index >> 16) as u16, index as u16, self.coords)
+        store.delta((index >> 16) as u16, index as u16, &self.coords)
     }
 
     /// Delta for an F2DOT14 field, as a fraction: 8192 ticks is 0.5.
@@ -94,6 +107,40 @@ impl<'a, 'c> Deltas<'a, 'c> {
         }
         out
     }
+}
+
+/// `coords` rounded to F2DOT14 as HarfBuzz stores a font's coords: each
+/// a multiple of 1/16384, rounded halves up (`floor(x * 16384 + 0.5)`),
+/// with NaN read as zero. Empty when every coordinate rounds to zero,
+/// the default instance. The same rule as the core crate's shaping and
+/// outline paths.
+fn f2dot14_coords(coords: &[f32]) -> Vec<f32> {
+    let rounded: Vec<f32> = coords.iter().map(|&c| round_f2dot14(c)).collect();
+    if rounded.iter().all(|&c| c == 0.0) {
+        return Vec::new();
+    }
+    rounded
+}
+
+/// One coordinate rounded to a multiple of 1/16384, halves up. Written
+/// without `f32::floor`, which `core` lacks before Rust 1.85.
+fn round_f2dot14(c: f32) -> f32 {
+    if c.is_nan() {
+        return 0.0;
+    }
+    let x = c * 16384.0 + 0.5;
+    // Every f32 of magnitude 2^23 or more is a whole number already.
+    let floor = if (-8_388_608.0..8_388_608.0).contains(&x) {
+        let t = x as i32 as f32;
+        if t > x {
+            t - 1.0
+        } else {
+            t
+        }
+    } else {
+        x
+    };
+    floor / 16384.0
 }
 
 /// A borrowed `DeltaSetIndexMap` (format 0 or 1):
@@ -179,6 +226,23 @@ mod tests {
         }
         out.extend_from_slice(entries);
         out
+    }
+
+    #[test]
+    fn coords_round_to_f2dot14_halves_up() {
+        // A 16.16 coord `k / 65536` lands on `((k + 2) >> 2) / 16384`, as
+        // HarfBuzz rounds it.
+        for k in -70_000i32..=70_000 {
+            let got = f2dot14_coords(&[k as f32 / 65536.0, 1.0]);
+            assert_eq!(got[0], ((k + 2) >> 2) as f32 / 16384.0, "k = {k}");
+        }
+        assert!(f2dot14_coords(&[1.0 / 65536.0, -2.0 / 65536.0]).is_empty());
+        assert!(f2dot14_coords(&[f32::NAN, 0.0]).is_empty());
+        assert!(f2dot14_coords(&[]).is_empty());
+        assert_eq!(f2dot14_coords(&[f32::NAN, 0.5]), [0.0, 0.5]);
+        // Out-of-range and huge values keep their size.
+        assert_eq!(f2dot14_coords(&[3.0, -1e30]), [3.0, -1e30]);
+        assert_eq!(f2dot14_coords(&[f32::INFINITY]), [f32::INFINITY]);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use super::idct::idct;
 use super::*;
 
 mod adversarial;
+mod encode;
 mod progressive;
 
 /// Build a minimal baseline JPEG that encodes a single 8x8 block

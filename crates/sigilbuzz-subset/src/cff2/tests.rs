@@ -269,3 +269,220 @@ fn cff2_orchestration_rejects_kept_set_without_gid0() {
     let r = subset_non_identity(&cff, &[1u16]);
     assert!(r.is_err());
 }
+
+/// An ItemVariationStore body (no CFF2 length prefix) with one subtable
+/// per entry of `regions`, naming that many one-axis regions.
+fn store_with_region_counts(regions: &[u16]) -> Vec<u8> {
+    let region_count = regions.iter().copied().max().unwrap_or(0);
+    let header_len = 8 + 4 * regions.len();
+    let region_list_len = 4 + 6 * usize::from(region_count);
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&(header_len as u32).to_be_bytes());
+    out.extend_from_slice(&(regions.len() as u16).to_be_bytes());
+    let mut sub_off = header_len + region_list_len;
+    for &r in regions {
+        out.extend_from_slice(&(sub_off as u32).to_be_bytes());
+        sub_off += 6 + 2 * usize::from(r);
+    }
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&region_count.to_be_bytes());
+    for _ in 0..region_count {
+        for v in [0i16, 0x4000, 0x4000] {
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+    for &r in regions {
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&r.to_be_bytes());
+        for i in 0..r {
+            out.extend_from_slice(&i.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// Pushes of `values`.
+fn pushes(values: &[i32]) -> Vec<u8> {
+    values.iter().flat_map(|&v| encode_int_operand(v)).collect()
+}
+
+/// After a hint mask: a mask byte, then `5 hmoveto`. Read with a
+/// second mask byte, the shortint opcode is taken for it and the
+/// reserved opcode 0 follows.
+const ONE_BYTE_MASK_THEN_MOVE: [u8; 5] = [9, 28, 0, 5, 22];
+
+#[test]
+fn cff2_subset_reads_blended_stem_hints() {
+    // `10 20 1 2 3 4 2 blend hstemhm`: the store's two regions leave
+    // one stem, so the mask takes one byte. The subset failed with
+    // "CFF unknown charstring operator" when `blend` cleared the stack.
+    let ivs = store_with_region_counts(&[2]);
+    let mut cs1 = pushes(&[10, 20, 1, 2, 3, 4, 2]);
+    cs1.extend_from_slice(&[16, 18, 19]); // blend hstemhm hintmask
+    cs1.extend_from_slice(&ONE_BYTE_MASK_THEN_MOVE);
+    let cs0: &[u8] = &[];
+    let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], Some(&ivs));
+    let new_cff = subset_non_identity(&cff, &[0, 1]).unwrap();
+    let parsed = parse_cff2(&new_cff).unwrap();
+    assert_eq!(parsed.char_strings[1], cs1.as_slice());
+}
+
+#[test]
+fn cff2_subset_blends_with_the_private_dict_vsindex() {
+    // Seven stems, then `10 1 2 3 1 blend 20 hstem`. The Private DICT's
+    // `1 vsindex` picks the three-region subtable: one more stem, eight
+    // in all, and a one-byte mask. Without it the one-region subtable
+    // leaves nine stems and a two-byte mask, which misreads.
+    let ivs = store_with_region_counts(&[1, 3]);
+    let mut cs1 = pushes(&(0..14).collect::<Vec<_>>());
+    cs1.push(18); // hstemhm
+    cs1.extend_from_slice(&pushes(&[10, 1, 2, 3, 1]));
+    cs1.push(16); // blend
+    cs1.extend_from_slice(&pushes(&[20]));
+    cs1.extend_from_slice(&[1, 19]); // hstem hintmask
+    cs1.extend_from_slice(&ONE_BYTE_MASK_THEN_MOVE);
+    let cs0: &[u8] = &[];
+    let with_vsindex: &[u8] = &[140, 22]; // 1 vsindex
+    let cff = build_synthetic_cff2_sharing(&[cs0, &cs1], &[0, 0], Some(&ivs), Some(with_vsindex));
+    let new_cff = subset_non_identity(&cff, &[0, 1]).unwrap();
+    let parsed = parse_cff2(&new_cff).unwrap();
+    assert_eq!(parsed.char_strings[1], cs1.as_slice());
+    assert_eq!(parsed.per_fd_vsindex, [1]);
+
+    let without: &[u8] = &[139, 20]; // 0 defaultWidthX
+    let cff = build_synthetic_cff2_sharing(&[cs0, &cs1], &[0, 0], Some(&ivs), Some(without));
+    assert!(subset_non_identity(&cff, &[0, 1]).is_err());
+}
+
+#[test]
+fn cff2_subset_sizes_a_mask_in_a_subroutine_by_blended_stems() {
+    // Glyph 1 blends nine stems and calls local 0, whose mask takes
+    // two bytes before its call to local 2; local 1 goes.
+    let ivs = store_with_region_counts(&[2]);
+    let defaults: Vec<i32> = (0..18).collect();
+    let deltas: Vec<i32> = (0..36).map(|v| v % 7).collect();
+    let mut cs1 = pushes(&defaults);
+    cs1.extend_from_slice(&pushes(&deltas));
+    cs1.extend_from_slice(&pushes(&[18]));
+    cs1.extend_from_slice(&[16, 18]); // blend hstemhm
+    cs1.extend_from_slice(&pushes(&[-107]));
+    cs1.push(10); // callsubr local 0
+    let mut local_0 = alloc::vec![19, 9, 9]; // hintmask, two bytes
+    local_0.extend_from_slice(&pushes(&[2 - 107]));
+    local_0.push(10); // callsubr local 2
+    let local_1: &[u8] = &[11];
+    let local_2: &[u8] = &[139, 139, 21];
+    let cs0: &[u8] = &[];
+    let cff = partial::build_synthetic_cff2_with_local_subrs(
+        &[cs0, &cs1],
+        &[0, 0],
+        &[&local_0, local_1, local_2],
+        Some(&ivs),
+    );
+    let new_cff = subset_non_identity(&cff, &[0, 1]).unwrap();
+    let parsed = parse_cff2(&new_cff).unwrap();
+    assert_eq!(parsed.char_strings[1], cs1.as_slice());
+    let locals = &parsed.per_fd_local_subrs[0];
+    assert_eq!(locals.len(), 2);
+    let mut renumbered = local_0.clone();
+    renumbered[3..4].copy_from_slice(&pushes(&[1 - 107]));
+    assert_eq!(locals[0], renumbered.as_slice());
+    assert_eq!(locals[1], local_2);
+}
+
+#[test]
+fn bake_rounds_blends_halves_away_from_zero() {
+    // At 0.5 the one region scales its deltas by a half: `0 21 1 blend`
+    // is 10.5 and `0 -21 1 blend` -10.5, which round to 11 and -11, as
+    // HarfBuzz's instancer writes them. A 16.16 source operand keeps
+    // its fraction.
+    let ivs = store_with_region_counts(&[1]);
+    let mut cs1 = pushes(&[0, 21, 1]);
+    cs1.push(16); // blend
+    cs1.extend_from_slice(&pushes(&[0, -21, 1]));
+    cs1.extend_from_slice(&[16, 21]); // blend rmoveto
+    let fixed: [u8; 5] = [255, 0, 1, 0x80, 0]; // 1.5
+    cs1.extend_from_slice(&fixed);
+    cs1.extend_from_slice(&pushes(&[0]));
+    cs1.push(5); // rlineto
+    let cs0: &[u8] = &[];
+    let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], Some(&ivs));
+    let baked = bake_at_coords(&cff, &[0.5]).unwrap();
+    let parsed = parse_cff2(&baked).unwrap();
+    let mut want = pushes(&[11, -11]);
+    want.push(21);
+    want.extend_from_slice(&fixed);
+    want.extend_from_slice(&pushes(&[0]));
+    want.push(5);
+    assert_eq!(parsed.char_strings[1], want.as_slice());
+}
+
+#[test]
+fn bake_rounds_a_blend_without_regions() {
+    // A blend over a subtable with no regions keeps its defaults, whole.
+    let ivs = store_with_region_counts(&[0]);
+    let mut cs1 = pushes(&[3, 4, 2]);
+    cs1.extend_from_slice(&[16, 21]); // blend rmoveto
+    let cs0: &[u8] = &[];
+    let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], Some(&ivs));
+    let baked = bake_at_coords(&cff, &[0.5]).unwrap();
+    let parsed = parse_cff2(&baked).unwrap();
+    let mut want = pushes(&[3, 4]);
+    want.push(21);
+    assert_eq!(parsed.char_strings[1], want.as_slice());
+}
+
+#[test]
+fn bake_starts_at_the_private_dict_vsindex() {
+    // `1 vsindex` in the Private DICT picks the two-region subtable:
+    // `0 10 20 1 blend` is 0 + 5 + 10 at 0.5. Read with subtable 0's
+    // one region it would leave two operands.
+    let ivs = store_with_region_counts(&[1, 2]);
+    let mut cs1 = pushes(&[0, 10, 20, 1]);
+    cs1.push(16); // blend
+    cs1.extend_from_slice(&pushes(&[0]));
+    cs1.push(21); // rmoveto
+    let cs0: &[u8] = &[];
+    let with_vsindex: &[u8] = &[140, 22]; // 1 vsindex
+    let cff = build_synthetic_cff2_sharing(&[cs0, &cs1], &[0, 0], Some(&ivs), Some(with_vsindex));
+    let baked = bake_at_coords(&cff, &[0.5]).unwrap();
+    let parsed = parse_cff2(&baked).unwrap();
+    let mut want = pushes(&[15, 0]);
+    want.push(21);
+    assert_eq!(parsed.char_strings[1], want.as_slice());
+}
+
+#[test]
+fn bake_charges_each_blended_value() {
+    // A subtable without regions: `500 blend` leaves its 500 values, and
+    // 9,000 of them would round 4.5 million values for 18,000 tokens.
+    // Each value is charged, so the table-sized budget runs out.
+    let ivs = store_with_region_counts(&[0]);
+    let mut cs1 = pushes(&[0; 500]);
+    for _ in 0..9_000 {
+        cs1.extend_from_slice(&pushes(&[500]));
+        cs1.push(16); // blend
+    }
+    cs1.extend_from_slice(&pushes(&[0, 0]));
+    cs1.push(21); // rmoveto
+    let cs0: &[u8] = &[];
+    let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], Some(&ivs));
+    let r = bake_at_coords(&cff, &[0.5]);
+    assert_eq!(
+        r.unwrap_err(),
+        SubsetError::Unsupported("CFF2 bake: charstring work budget exceeded")
+    );
+}
+
+#[test]
+fn bake_stacks_at_most_513_operands() {
+    let cs0: &[u8] = &[];
+    for (count, ok) in [(513, true), (514, false)] {
+        let mut cs1 = pushes(&alloc::vec![0; count]);
+        cs1.push(5); // rlineto takes them
+        let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], None);
+        let r = bake_at_coords(&cff, &[]);
+        assert_eq!(r.is_ok(), ok, "{count} operands: {r:?}");
+    }
+}

@@ -171,3 +171,14 @@ Fonts used by the integration tests.
           --unicodes "U+ADC1,U+BE5B" --drop-layout
 
   `tests/cff2_closed_contours.rs` uses it.
+- `varc_parity.ttf`, `aat_morx_contextual.ttf` and `aat_morx_ligature.ttf`: synthetic
+  fonts written byte by byte from the VARC and `morx` specs by
+  `tests/tools/build_varc_morx_parity_fixtures.py` (fontTools reads the VARC table back
+  to check the encoding). `varc_parity.ttf` has three axes and 14 VARC glyphs that use
+  every component record field over two `gvar`-varied glyphs; the two `morx` fonts have
+  no GSUB, one with a contextual subtable and one with a ligature subtable.
+  `tests/varc_parity.rs` and `tests/aat_morx_parity.rs` check them against
+  `varc_parity.expected` and `aat_morx_parity.expected`, HarfBuzz 14.5.0's outlines at
+  eight locations and its AAT shaping of 25 strings. Regenerate those files with `uv run
+  --no-project --with uharfbuzz==0.56.2 --with fonttools python
+  tests/tools/varc_morx_parity_expected.py`.

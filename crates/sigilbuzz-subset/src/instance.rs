@@ -42,8 +42,10 @@
 //!
 //! Every value rounds to the nearest unit, halves up, as HarfBuzz and
 //! fontTools round: outlines, metrics, `cvt `, `BASE`, `MVAR`, and the
-//! `GPOS` and `GDEF` deltas. (CFF2 charstrings and their store keep
-//! their own rounding.)
+//! `GPOS` and `GDEF` deltas. A full CFF2 instance rounds each blended
+//! charstring value to a whole unit, halves away from zero, as
+//! HarfBuzz's instancer does; a partial one keeps the fractions its
+//! store projection gives.
 //!
 //! # Coordinates
 //!
@@ -70,6 +72,20 @@
 //! The two differ by one F2DOT14 step where the rounding lands on
 //! different sides, which moves a delta by a unit now and then.
 //!
+//! [`instance_user`] takes each axis' value in user units and
+//! normalizes it as HarfBuzz does ([`VariationAxis::normalize`]), then
+//! works out both sets from that, so a caller need not normalize.
+//!
+//! # OS/2 and post
+//!
+//! As HarfBuzz's instancer, an instance sets `OS/2.usWeightClass` from
+//! where it pins `wght` (rounded, clamped to 1 to 1000),
+//! `OS/2.usWidthClass` from `wdth` (through the spec's percentages),
+//! and `post.italicAngle` from `slnt` (clamped to -90 to 90), and
+//! `OS/2.xAvgCharWidth` to the mean of its advances that are not zero.
+//! [`instance()`] takes the pinned values as the user values of their
+//! normalized coordinates. An axis kept variable leaves its field.
+//!
 //! # What gets dropped (or kept verbatim)
 //!
 //! When [`InstanceInput::drop_var_tables`] is true (the recommended
@@ -91,12 +107,18 @@
 //!
 //! For CFF2 sources the [`crate::cff2::bake_at_coords`] helper walks
 //! every charstring, inlines `callsubr` / `callgsubr`, resolves every
-//! `blend` to its scalar value at `coords`, strips `vsindex`, and
-//! emits a fresh CFF2 table without a VariationStore. Output is still
-//! CFF2-tagged (the SFNT directory entry remains `CFF2`) but no
-//! variable-font opcodes survive. Consumers that ignore CFF2's
-//! variable surface see the same outline as a consumer that honors
-//! it at the chosen instance.
+//! `blend` to its value at `coords` rounded to a whole unit, strips
+//! `vsindex`, and emits a fresh CFF2 table without a VariationStore.
+//! Output is still CFF2-tagged (the SFNT directory entry remains
+//! `CFF2`) but no variable-font opcodes survive; the charstrings are
+//! the ones HarfBuzz's instancer writes.
+//!
+//! The outlines then set the metrics HarfBuzz's instancer takes from
+//! them (see the `cff2_metrics` submodule): each glyph's left side
+//! bearing is the left end of the box of its outline at `coords`,
+//! control points included, before the blends round; `head` takes the
+//! union of the boxes and `hhea` the extremes they give. A partial
+//! instance measures the new default outlines the same way.
 //!
 //! # VVAR-aware vmtx and VORG
 //!
@@ -183,9 +205,11 @@
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
+use sigilbuzz::tables::VariationAxis;
 use sigilbuzz::Face;
 
 mod axes;
+mod cff2_metrics;
 mod cvar;
 mod gdef_store;
 mod glyf;
@@ -195,6 +219,7 @@ mod metrics_var;
 mod partial;
 mod region;
 mod store_remap;
+mod style;
 
 use crate::base::BaseBake;
 use crate::sfnt;
@@ -205,9 +230,10 @@ use gdef_store::{gdef_deltas, prune_gdef_store, GdefBake};
 use glyf::{bake_glyf_loca, GlyfLocaBake, GlyphMetrics};
 use metrics::{
     bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, hmtx_from_metrics, patch_head_bounds,
-    patch_line_extremes, MvarBake, VmtxBake, VorgBake,
+    patch_line_extremes, write_head_box, write_line_extremes, MvarBake, VmtxBake, VorgBake,
 };
 use partial::{layout_variations, partial_instance, pinned_axes};
+use style::AxisLocations;
 
 pub(crate) use ivs::{bake_ivs_partial, project_ivs_with, Projection, RegionRemap};
 pub(crate) use region::project_region_onto_kept_axes;
@@ -223,6 +249,7 @@ pub(crate) use region::project_region_onto_kept_axes;
 /// F2DOT14 both before and after `avar` for the other variation tables.
 /// A value rounded before it gets here can land one F2DOT14 step away
 /// from HarfBuzz's and move outlines, advances or deltas by a unit.
+/// [`instance_user`] takes user values and normalizes them itself.
 pub type F2Dot14 = f32;
 
 /// Per-axis pin policy for partial instancing.
@@ -305,6 +332,292 @@ impl Default for InstanceInput {
     }
 }
 
+/// One axis' setting for [`instance_user`], in the axis' own units, the
+/// user space `fvar` describes (`wght` 100 to 900, say).
+///
+/// More settings may come, such as narrowing an axis, so a `match` on
+/// it needs a wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum AxisLimit {
+    /// Pins the axis at this value, clamped to the axis' range as
+    /// HarfBuzz's `hb_subset_input_pin_axis_location` clamps it. A NaN
+    /// pins the axis at its default.
+    Pin(f32),
+    /// Pins the axis at its default value.
+    Default,
+    /// Keeps the axis variable over its whole range.
+    Keep,
+    /// Limits the axis to `min..=max` with `default` its default, as
+    /// HarfBuzz's `hb_subset_input_set_axis_range` takes a range: each
+    /// end clamps to the axis' range and `default` to the new range,
+    /// and a NaN takes the axis' own value. A range that comes down to
+    /// one value pins the axis there, and one that keeps the axis'
+    /// whole range and default keeps the axis variable. Any other range
+    /// fails with [`SubsetError::Unsupported`]: the instancer cannot
+    /// narrow an axis or move its default.
+    Range {
+        /// The lowest value the axis keeps.
+        min: f32,
+        /// The axis' default value.
+        default: f32,
+        /// The highest value the axis keeps.
+        max: f32,
+    },
+}
+
+/// Inputs to [`instance_user`].
+///
+/// Build one with [`UserInstanceInput::new`] and the `with_` methods;
+/// fields may be added, so it cannot be written as a struct literal
+/// outside this crate.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct UserInstanceInput {
+    /// Axis settings by axis tag. A later setting for a tag wins over an
+    /// earlier one, and a setting applies to every axis with its tag. A
+    /// tag no axis of the font has fails with
+    /// [`SubsetError::Unsupported`].
+    pub axes: Vec<([u8; 4], AxisLimit)>,
+    /// What happens to the axes `axes` does not name. When false (the
+    /// default) they are pinned at their defaults, so naming only
+    /// `wght` gives a static font. When true they stay variable, as
+    /// HarfBuzz's and fontTools' instancers keep an axis they are not
+    /// given.
+    pub keep_unnamed_axes: bool,
+    /// As [`InstanceInput::drop_var_tables`].
+    pub drop_var_tables: bool,
+}
+
+impl Default for UserInstanceInput {
+    fn default() -> Self {
+        Self {
+            axes: Vec::new(),
+            keep_unnamed_axes: false,
+            drop_var_tables: true,
+        }
+    }
+}
+
+impl UserInstanceInput {
+    /// An input that names no axis: every axis is pinned at its
+    /// default, and the variation tables go.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The input with axis `tag` set to `limit`, after the settings it
+    /// already has.
+    #[must_use]
+    pub fn with_axis(mut self, tag: [u8; 4], limit: AxisLimit) -> Self {
+        self.axes.push((tag, limit));
+        self
+    }
+
+    /// The input with the axes it does not name kept variable (`true`)
+    /// or pinned at their defaults (`false`). See
+    /// [`UserInstanceInput::keep_unnamed_axes`].
+    #[must_use]
+    pub fn with_unnamed_axes_kept(mut self, keep: bool) -> Self {
+        self.keep_unnamed_axes = keep;
+        self
+    }
+
+    /// The input with the variable-font tables dropped (`true`) or kept.
+    /// See [`UserInstanceInput::drop_var_tables`].
+    #[must_use]
+    pub fn with_var_tables_dropped(mut self, drop: bool) -> Self {
+        self.drop_var_tables = drop;
+        self
+    }
+}
+
+/// Instances `face` at axis locations given in user units, as HarfBuzz's
+/// instancer takes them (`hb_subset_input_pin_axis_location`,
+/// `hb_subset_input_set_axis_range`).
+///
+/// Each pinned value is normalized as HarfBuzz normalizes it (see
+/// [`VariationAxis::normalize`]), and the instance takes both of
+/// HarfBuzz's coordinate sets from that (see the module docs,
+/// "Coordinates"), as [`instance()`] does from normalized coordinates:
+/// callers no longer normalize each axis themselves. The pinned `wght`,
+/// `wdth` and `slnt` values set `OS/2`'s `usWeightClass` and
+/// `usWidthClass` and `post`'s `italicAngle`; a `Range` sets them from
+/// its default, as HarfBuzz does.
+///
+/// # Errors
+///
+/// As [`instance()`], and [`SubsetError::Unsupported`] for a tag the
+/// font has no axis for, a range whose minimum is above its maximum, or
+/// a range that would narrow an axis or move its default.
+///
+/// ```no_run
+/// use sigilbuzz::Face;
+/// use sigilbuzz_subset::{instance_user, AxisLimit, UserInstanceInput};
+///
+/// let bytes = std::fs::read("./MyFont-VF.ttf").unwrap();
+/// let face = Face::parse_bytes(&bytes, 0).unwrap();
+/// let input = UserInstanceInput::new().with_axis(*b"wght", AxisLimit::Pin(700.0));
+/// let bold = instance_user(&face, &input).unwrap();
+/// std::fs::write("./MyFont-Bold.ttf", &bold.bytes).unwrap();
+/// ```
+pub fn instance_user(
+    face: &Face<'_>,
+    input: &UserInstanceInput,
+) -> Result<InstancedOutput, SubsetError> {
+    let axes: Vec<VariationAxis> = match face.fvar().map_err(SubsetError::from)? {
+        Some(fvar) => fvar.axes().to_vec(),
+        None => Vec::new(),
+    };
+    let unnamed = if input.keep_unnamed_axes {
+        AxisLimit::Keep
+    } else {
+        AxisLimit::Default
+    };
+    let mut limits = alloc::vec![unnamed; axes.len()];
+    for &(axis_tag, limit) in &input.axes {
+        let mut found = false;
+        for (axis, slot) in axes.iter().zip(limits.iter_mut()) {
+            if axis.tag == axis_tag {
+                *slot = limit;
+                found = true;
+            }
+        }
+        if !found {
+            return Err(SubsetError::Unsupported(
+                "instance: the font has no axis with this tag",
+            ));
+        }
+    }
+    let mut coords = Vec::with_capacity(axes.len());
+    let mut pins = Vec::with_capacity(axes.len());
+    let mut locations = Vec::with_capacity(axes.len());
+    for (axis, &limit) in axes.iter().zip(&limits) {
+        let (pin, location) = resolve_limit(axis, limit)?;
+        match pin {
+            Some(value) => {
+                coords.push(axis.normalize(value));
+                pins.push(AxisPin::Pin);
+            }
+            None => {
+                coords.push(0.0);
+                pins.push(AxisPin::Keep);
+            }
+        }
+        locations.push((axis.tag, location));
+    }
+    let axis_pins = if pins.contains(&AxisPin::Keep) {
+        pins
+    } else {
+        Vec::new()
+    };
+    let normalized = InstanceInput {
+        coords,
+        drop_var_tables: input.drop_var_tables,
+        axis_pins,
+    };
+    instance_at(face, &normalized, &locations)
+}
+
+/// What `limit` does to `axis`: the user value it pins the axis at
+/// (`None` to keep it variable), and the location HarfBuzz records for
+/// the axis, which sets the `OS/2` and `post` fields.
+fn resolve_limit(
+    axis: &VariationAxis,
+    limit: AxisLimit,
+) -> Result<(Option<f32>, Option<f32>), SubsetError> {
+    let default = axis.default_value;
+    match limit {
+        AxisLimit::Pin(value) => {
+            let value = clamp_to_axis(axis, value);
+            Ok((Some(value), Some(value)))
+        }
+        AxisLimit::Default => Ok((Some(default), Some(default))),
+        AxisLimit::Keep => Ok((None, None)),
+        AxisLimit::Range { min, default, max } => {
+            let or_axis = |v: f32, axis_value: f32| if v.is_nan() { axis_value } else { v };
+            let min = or_axis(min, axis.min_value);
+            let max = or_axis(max, axis.max_value);
+            let new_default = or_axis(default, axis.default_value);
+            if min > max {
+                return Err(SubsetError::Unsupported(
+                    "instance: an axis range's minimum is above its maximum",
+                ));
+            }
+            let lo = clamp_to_axis(axis, min);
+            let hi = clamp_to_axis(axis, max);
+            let middle = new_default.max(lo).min(hi);
+            if lo == hi {
+                return Ok((Some(lo), Some(lo)));
+            }
+            let (axis_lo, axis_hi) = axis_range(axis);
+            if lo == axis_lo && hi == axis_hi && middle == axis.default_value {
+                return Ok((None, Some(middle)));
+            }
+            Err(SubsetError::Unsupported(
+                "instance: an axis range narrower than the axis, or with another default, is not supported",
+            ))
+        }
+    }
+}
+
+/// `axis`' range, widened to take in its default as
+/// [`VariationAxis::normalize`] widens it.
+fn axis_range(axis: &VariationAxis) -> (f32, f32) {
+    let default = axis.default_value;
+    (axis.min_value.min(default), axis.max_value.max(default))
+}
+
+/// `value` clamped to `axis`' range; a NaN, or an axis with a bound that
+/// is not finite, gives the default.
+fn clamp_to_axis(axis: &VariationAxis, value: f32) -> f32 {
+    let (lo, hi) = axis_range(axis);
+    if value.is_nan() || !lo.is_finite() || !hi.is_finite() {
+        return axis.default_value;
+    }
+    value.max(lo).min(hi)
+}
+
+/// The user value of `axis` at its unrounded normalized coordinate
+/// `normalized`: the inverse of [`VariationAxis::normalize`].
+fn user_value(axis: &VariationAxis, normalized: f32) -> f32 {
+    let (lo, hi) = axis_range(axis);
+    let default = f64::from(axis.default_value);
+    if !normalized.is_finite() || !lo.is_finite() || !hi.is_finite() || !default.is_finite() {
+        return axis.default_value;
+    }
+    let v = f64::from(normalized.clamp(-1.0, 1.0));
+    let span = if v < 0.0 {
+        default - f64::from(lo)
+    } else {
+        f64::from(hi) - default
+    };
+    (default + v * span) as f32
+}
+
+/// The location HarfBuzz records for each axis of `face` that `input`
+/// pins: the user value of its normalized coordinate. Kept axes have
+/// none.
+fn pinned_locations(face: &Face<'_>, input: &InstanceInput) -> Vec<([u8; 4], Option<f32>)> {
+    let Ok(Some(fvar)) = face.fvar() else {
+        return Vec::new();
+    };
+    fvar.axes()
+        .iter()
+        .enumerate()
+        .map(|(i, axis)| {
+            let pinned = !matches!(input.axis_pins.get(i), Some(AxisPin::Keep));
+            let location = input
+                .coords
+                .get(i)
+                .filter(|_| pinned)
+                .map(|&c| user_value(axis, c));
+            (axis.tag, location)
+        })
+        .collect()
+}
+
 /// Result of [`instance`].
 #[derive(Debug, Clone)]
 pub struct InstancedOutput {
@@ -342,7 +655,22 @@ pub struct InstancedOutput {
 /// Closure walking is *not* performed: instancing keeps every glyph in
 /// the source font; it's not a subset operation. Every gid `0..num_glyphs`
 /// rides through with its outline / metric baked.
+///
+/// The pinned `wght`, `wdth` and `slnt` axes set `OS/2`'s
+/// `usWeightClass` and `usWidthClass` and `post`'s `italicAngle` from
+/// the user value of their coordinates. [`instance_user`] takes the
+/// user values themselves.
 pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutput, SubsetError> {
+    instance_at(face, input, &pinned_locations(face, input))
+}
+
+/// [`instance()`], with the location of each pinned axis in user units
+/// for the `OS/2` and `post` fields.
+fn instance_at(
+    face: &Face<'_>,
+    input: &InstanceInput,
+    locations: &AxisLocations,
+) -> Result<InstancedOutput, SubsetError> {
     if face.record(tag::CFF1).is_some() && face.record(tag::GLYF).is_none() {
         // Pure CFF1 source: there is no variable data to bake; just
         // copy through. We still drop the variable-font directory
@@ -378,7 +706,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         if input.axis_pins.contains(&AxisPin::Keep) {
             // partial_instance returns `Ok` with the reduced-axis VF;
             // its caller chain mirrors the full-instancing path.
-            return partial_instance(face, input);
+            return partial_instance(face, input, locations);
         }
     }
 
@@ -392,7 +720,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     let plan = plan_coords(face, &input.coords)?;
 
     if face.record(tag::CFF2).is_some() {
-        return cff2_bake(face, input, &coords, &plan);
+        return cff2_bake(face, input, &coords, &plan, locations);
     }
 
     let warnings = Warnings::default();
@@ -412,12 +740,13 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
-    if let Some(os2_bytes) = mvar_bake.os2.clone() {
-        tables.push((*b"OS/2", os2_bytes));
-    }
-    if let Some(post_bytes) = mvar_bake.post.clone() {
-        tables.push((tag::POST, post_bytes));
-    }
+    push_style_tables(
+        face,
+        &mvar_bake,
+        glyf_bake.avg_char_width,
+        locations,
+        &mut tables,
+    );
 
     // GPOS variation bake: when the source carries GPOS variations
     // (VariationIndex offsets on value records and anchors), fold
@@ -608,6 +937,39 @@ struct GlyfTablesBake {
     vmtx: VmtxBake,
     /// The font's glyph count.
     num_glyphs: u16,
+    /// `OS/2.xAvgCharWidth` of the baked advances.
+    avg_char_width: u16,
+}
+
+/// Appends `OS/2` and `post` (each MVAR-baked when `MVAR` varies it) with
+/// the fields an instance sets from `locations` and its advances (see
+/// [`style`]): `xAvgCharWidth` from `avg_char_width`, `usWeightClass`
+/// and `usWidthClass` from `wght` and `wdth`, and `italicAngle` from
+/// `slnt`, as HarfBuzz's instancer writes them. A font without either
+/// table gets none.
+fn push_style_tables(
+    face: &Face<'_>,
+    mvar_bake: &MvarBake,
+    avg_char_width: u16,
+    locations: &AxisLocations,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) {
+    let os2 = mvar_bake
+        .os2
+        .clone()
+        .or_else(|| face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec));
+    if let Some(mut os2) = os2 {
+        style::patch_os2(&mut os2, Some(avg_char_width), locations);
+        tables.push((*b"OS/2", os2));
+    }
+    let post = mvar_bake
+        .post
+        .clone()
+        .or_else(|| face.table_bytes(tag::POST).ok().map(<[u8]>::to_vec));
+    if let Some(mut post) = post {
+        style::patch_post(&mut post, locations);
+        tables.push((tag::POST, post));
+    }
 }
 
 /// Bakes the glyphs of a `glyf` font at the post-avar `coords` and
@@ -634,6 +996,7 @@ fn push_glyf_tables(
         Some(m) => hmtx_from_metrics(m),
         None => bake_hmtx(face, coords, num_glyphs, warnings)?,
     };
+    let avg_char_width = hmtx_out.avg_char_width();
     let vmtx = bake_vmtx(face, coords, num_glyphs, baked, warnings);
 
     // head: the loca format the bake chose, and the new bounding box.
@@ -672,25 +1035,39 @@ fn push_glyf_tables(
         glyf: glyf_loca,
         vmtx,
         num_glyphs,
+        avg_char_width,
     })
+}
+
+/// What [`push_metric_tables`] baked besides the tables it pushed.
+struct MetricTablesBake {
+    /// The vertical metrics bake, naming the tables it left out.
+    vmtx: VmtxBake,
+    /// `OS/2.xAvgCharWidth` of the baked advances.
+    avg_char_width: u16,
 }
 
 /// Appends `hmtx` and `hhea` (MVAR-baked when `MVAR` varies it, its
 /// long metrics count patched), with the advances and side bearings
 /// `HVAR` gives at `coords`, and the vertical metrics `VVAR` gives (see
-/// [`push_vertical_metrics`]). For a partial instance of a font whose
-/// outlines give no metrics to bake: a CFF2 font, or a `glyf` font
-/// without `gvar`. Returns the vertical bake, whose `left_out` tables
-/// the caller leaves out.
+/// [`push_vertical_metrics`]). For an instance of a font whose outlines
+/// give no metrics to bake: a CFF2 font, or a `glyf` font without
+/// `gvar` in a partial instance.
+///
+/// A CFF2 font's left side bearings, `head` box, and `hhea` extremes
+/// follow from its outlines at `coords` (see [`cff2_metrics`]), and
+/// `head` is appended too, unless the core cannot read the table. Its
+/// `CFF2` table must have been baked first: the outlines are drawn
+/// within the work the bake allowed.
 fn push_metric_tables(
     face: &Face<'_>,
     coords: &[f32],
     mvar_bake: &MvarBake,
     warnings: &Warnings,
     tables: &mut Vec<([u8; 4], Vec<u8>)>,
-) -> Result<VmtxBake, SubsetError> {
+) -> Result<MetricTablesBake, SubsetError> {
     let num_glyphs = face.maxp()?.num_glyphs;
-    let hmtx_out = bake_hmtx(face, coords, num_glyphs, warnings)?;
+    let mut hmtx_out = bake_hmtx(face, coords, num_glyphs, warnings)?;
     let mut hhea_out = match mvar_bake.hhea.clone() {
         Some(bytes) => bytes,
         None => face
@@ -698,12 +1075,34 @@ fn push_metric_tables(
             .map_err(SubsetError::from)?
             .to_vec(),
     };
+    let extents = if face.record(tag::CFF2).is_some() {
+        cff2_metrics::cff2_extents(face, coords, num_glyphs)
+    } else {
+        None
+    };
+    if let Some(extents) = extents {
+        let outlined = cff2_metrics::apply_extents(&hmtx_out, &extents);
+        let mut head_out = face
+            .table_bytes(tag::HEAD)
+            .map_err(SubsetError::from)?
+            .to_vec();
+        if let Some(bounds) = outlined.head_box {
+            write_head_box(&mut head_out, bounds);
+        }
+        tables.push((tag::HEAD, head_out));
+        write_line_extremes(&mut hhea_out, outlined.max_advance, outlined.extremes);
+        hmtx_out = outlined.hmtx;
+    }
     util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
+    let avg_char_width = hmtx_out.avg_char_width();
     tables.push((tag::HHEA, hhea_out));
     tables.push((tag::HMTX, hmtx_out.bytes));
     let vmtx = bake_vmtx(face, coords, num_glyphs, None, warnings);
     push_vertical_metrics(face, &vmtx, mvar_bake, None, tables)?;
-    Ok(vmtx)
+    Ok(MetricTablesBake {
+        vmtx,
+        avg_char_width,
+    })
 }
 
 /// Appends the rebuilt `vmtx` with `vhea` (MVAR-baked when `MVAR`
@@ -745,61 +1144,37 @@ fn push_vertical_metrics(
 /// CFF2 path: rebuild the CFF2 table with `blend` resolved at the outline
 /// `coords` (the MVAR, layout and BASE bakes take the `plan` ones),
 /// then assemble a fresh SFNT directory mirroring the glyf path's
-/// hmtx/vmtx/MVAR bakes and GDEF.IVS prune.
+/// hmtx/vmtx/MVAR bakes and GDEF.IVS prune. The side bearings, `head`
+/// box and `hhea` extremes follow from the outlines at `coords` (see
+/// [`push_metric_tables`]).
 fn cff2_bake(
     face: &Face<'_>,
     input: &InstanceInput,
     coords: &[f32],
     plan: &[f32],
+    locations: &AxisLocations,
 ) -> Result<InstancedOutput, SubsetError> {
-    let maxp = face.maxp()?;
-    let num_glyphs = maxp.num_glyphs;
+    let num_glyphs = face.maxp()?.num_glyphs;
 
     let warnings = Warnings::default();
     let cff2_bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
     let new_cff2 = crate::cff2::bake_at_coords(cff2_bytes, coords)?;
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![(tag::CFF2, new_cff2)];
 
-    let hmtx_out = bake_hmtx(face, coords, num_glyphs, &warnings)?;
-    let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, None, &warnings);
-    let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
     let mvar_bake = bake_mvar_metrics(face, plan)?;
-
-    let head_out = face
-        .table_bytes(tag::HEAD)
-        .map_err(SubsetError::from)?
-        .to_vec();
-
-    let mut hhea_out = match mvar_bake.hhea.clone() {
-        Some(bytes) => bytes,
-        None => face
-            .table_bytes(tag::HHEA)
-            .map_err(SubsetError::from)?
-            .to_vec(),
-    };
-    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
-
-    let maxp_out = face
-        .table_bytes(tag::MAXP)
-        .map_err(SubsetError::from)?
-        .to_vec();
-
-    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![
-        (tag::HEAD, head_out),
-        (tag::HHEA, hhea_out),
-        (tag::MAXP, maxp_out),
-        (tag::HMTX, hmtx_out.bytes),
-        (tag::CFF2, new_cff2),
-    ];
-    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, None, &mut tables)?;
+    let metrics = push_metric_tables(face, coords, &mvar_bake, &warnings, &mut tables)?;
+    let vmtx_bake_result = metrics.vmtx;
+    let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
-    if let Some(os2_bytes) = mvar_bake.os2.clone() {
-        tables.push((*b"OS/2", os2_bytes));
-    }
-    if let Some(post_bytes) = mvar_bake.post.clone() {
-        tables.push((tag::POST, post_bytes));
-    }
+    push_style_tables(
+        face,
+        &mvar_bake,
+        metrics.avg_char_width,
+        locations,
+        &mut tables,
+    );
 
     let gpos_baked = if input.drop_var_tables {
         bake_gpos_var(face, plan, &warnings)?

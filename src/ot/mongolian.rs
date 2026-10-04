@@ -28,9 +28,9 @@
 //!   initial" behavior.
 //! - **Vertical default**. Mongolian is written top-to-bottom by
 //!   default. While the caller has not chosen a direction, the
-//!   dispatcher in [`crate::shape`] lays a dominantly Mongolian run
-//!   out top to bottom: vertical metrics and the `vert` GSUB
-//!   feature. Consumers who want horizontal Mongolian set a
+//!   dispatcher in [`crate::shape`] lays text that starts with a
+//!   Mongolian character out top to bottom: vertical metrics and the
+//!   `vert` GSUB feature. Consumers who want horizontal Mongolian set a
 //!   direction explicitly with
 //!   [`crate::buffer::Buffer::set_direction`]: LTR keeps logical
 //!   order, RTL returns the run reversed like any RTL run.
@@ -109,8 +109,7 @@ pub fn assign_mongolian_forms_in_context(
 ///
 /// `codepoints` and `glyphs` start 1:1 (a glyph per codepoint, post
 /// cmap). After the call `glyphs` may have shrunk through ligature
-/// collapse. Clusters merge at the monotone characters level, the
-/// default of a Rust [`crate::Buffer`].
+/// collapse. Clusters merge at the monotone characters level.
 pub fn shape_mongolian(
     gsub: Option<&Gsub<'_>>,
     gdef: Option<&Gdef<'_>>,

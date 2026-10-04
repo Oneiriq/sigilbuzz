@@ -1,7 +1,12 @@
 //! Progressive (SOF2) decode tests built from synthetic two-scan
 //! streams.
 
+use super::encode::{
+    assemble_progressive, deep_script, encode_baseline, encode_progressive, libjpeg_script,
+    raw_data, scan, scan_data, spectral_script, Image, Scan,
+};
 use super::*;
+use alloc::format;
 
 /// Build a minimal **progressive** (SOF2) grayscale JPEG that
 /// encodes a single 8x8 block via two scans:
@@ -183,6 +188,7 @@ fn progressive_sos_rejects_dc_scan_with_se_nonzero() {
     bytes.push(0); // Ss
     bytes.push(5); // Se
     bytes.push(0);
+    bytes.push(0x00); // one byte of scan data
     bytes.push(0xFF);
     bytes.push(MARKER_EOI);
 
@@ -220,6 +226,7 @@ fn progressive_sos_rejects_ac_scan_with_ss_greater_than_se() {
     bytes.push(20); // Ss
     bytes.push(5); // Se (< Ss)
     bytes.push(0);
+    bytes.push(0x00); // one byte of scan data
     bytes.push(0xFF);
     bytes.push(MARKER_EOI);
 
@@ -231,10 +238,9 @@ fn progressive_sos_rejects_ac_scan_with_ss_greater_than_se() {
 }
 
 #[test]
-fn progressive_ac_refinement_scan_is_unsupported() {
-    // SOF2 + an AC scan with Ah=1 (refinement). The implementation
-    // surfaces this as BadJpeg explicitly because AC refinement
-    // is not implemented.
+fn progressive_ac_refinement_scan_without_a_table_is_an_error() {
+    // SOF2 + an AC scan with Ah=1 (refinement) and no DHT. A
+    // refinement scan codes its run/size symbols with the AC table.
     let mut bytes = vec![0xFF, MARKER_SOI];
     bytes.push(0xFF);
     bytes.push(MARKER_DQT);
@@ -261,12 +267,350 @@ fn progressive_ac_refinement_scan_is_unsupported() {
     bytes.push(1); // Ss
     bytes.push(63); // Se
     bytes.push(1 << 4); // Ah=1, Al=0
+    bytes.push(0x00); // one byte of scan data
     bytes.push(0xFF);
     bytes.push(MARKER_EOI);
 
     let err = decode_jpeg(&bytes).unwrap_err();
     assert!(matches!(
         err,
-        RenderError::BadJpeg("progressive AC refinement scans not supported")
+        RenderError::BadJpeg("missing AC Huffman table")
     ));
+}
+
+/// Sampling layouts the decoder accepts: grayscale, then YCbCr 4:4:4,
+/// 4:2:2, 4:2:0, and 4:4:0, then grayscale that declares 2x2 sampling,
+/// which a one-component frame ignores.
+const LAYOUTS: [&[(u8, u8)]; 6] = [
+    &[(1, 1)],
+    &[(1, 1), (1, 1), (1, 1)],
+    &[(2, 1), (1, 1), (1, 1)],
+    &[(2, 2), (1, 1), (1, 1)],
+    &[(1, 2), (1, 1), (1, 1)],
+    &[(2, 2)],
+];
+
+/// Frame sizes: whole blocks, whole MCUs, and sizes that end partway
+/// through a block or an MCU, where non-interleaved scans visit fewer
+/// blocks than the MCU grid holds.
+const SIZES: [(u16, u16); 6] = [(8, 8), (1, 1), (20, 12), (33, 17), (16, 16), (47, 9)];
+
+#[test]
+fn progressive_ac_coefficients_land_at_their_zigzag_index() {
+    // AC energy at zig-zag 1, 2, and 5: natural (0,1), (1,0), (0,2).
+    // A coefficient mapped through the zig-zag table twice lands at
+    // the wrong frequency, so the block no longer matches baseline.
+    let mut block = [0i16; 64];
+    block[0] = 40;
+    block[1] = 30;
+    block[2] = -20;
+    block[5] = 12;
+    block[63] = 3;
+    let img = Image {
+        width: 8,
+        height: 8,
+        sampling: vec![(1, 1)],
+        blocks: vec![vec![block]],
+    };
+    let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+    let progressive = decode_jpeg(&encode_progressive(&img, &spectral_script(1))).unwrap();
+    assert_same_pixels(&progressive, &baseline, "one block");
+    // The block is not flat, so the check has teeth.
+    assert_ne!(baseline.get(0, 0), baseline.get(7, 0));
+}
+
+#[test]
+fn progressive_spectral_selection_matches_baseline() {
+    // The same coefficients coded as one baseline scan and as a
+    // spectral-selection progressive script decode to the same pixels
+    // for every layout and size.
+    for (li, layout) in LAYOUTS.iter().enumerate() {
+        for (si, &(w, h)) in SIZES.iter().enumerate() {
+            let seed = 0x9E37_79B9 ^ ((li as u32) << 8) ^ si as u32;
+            let img = Image::random(w, h, layout, seed, 40, 3);
+            let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+            let script = spectral_script(layout.len());
+            let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+            assert_eq!(
+                (progressive.width, progressive.height),
+                (u32::from(w), u32::from(h))
+            );
+            assert_same_pixels(&progressive, &baseline, &format!("{layout:?} at {w}x{h}"));
+        }
+    }
+}
+
+#[test]
+fn progressive_eob_runs_and_zero_runs_match_baseline() {
+    // Sparse blocks: most AC bands are empty, so the AC scans code
+    // long EOB runs across blocks, and the few nonzero values sit
+    // behind runs of more than 16 zeros (ZRL).
+    for layout in [LAYOUTS[0], LAYOUTS[3]] {
+        let img = Image::random(64, 48, layout, 0x0BAD_5EED, 9, 40);
+        let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+        let script = spectral_script(layout.len());
+        let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+        assert_same_pixels(&progressive, &baseline, &format!("{layout:?}"));
+    }
+}
+
+#[test]
+fn progressive_single_component_dc_scans_visit_only_the_sample_blocks() {
+    // 4:2:0 at 20x12: the luma MCU grid is 4x2 blocks, but its samples
+    // fill only 3x2. A luma-only DC scan codes 6 blocks; reading 8
+    // would take the chroma scans' bits.
+    let img = Image::random(20, 12, LAYOUTS[3], 7, 30, 4);
+    let mut script = vec![scan(vec![0], 0, 0, 0, 0), scan(vec![1, 2], 0, 0, 0, 0)];
+    script.extend(spectral_script(3).into_iter().skip(1));
+    let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+    let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+    assert_same_pixels(&progressive, &baseline, "luma-only DC scan");
+}
+
+#[test]
+fn one_component_frames_ignore_their_sampling_factors() {
+    // A one-component scan is non-interleaved, so a grayscale frame
+    // that declares 2x2 sampling codes its blocks in the same order as
+    // one that declares 1x1. Both modes must read them that way.
+    let (w, h) = (20u16, 12u16);
+    let plain = Image::random(w, h, &[(1, 1)], 0x51DE, 40, 3);
+    let mut wide = Image::random(w, h, &[(2, 2)], 1, 0, 1);
+    // Copy each visible block to the same position of the 2x2 grid:
+    // 3x2 blocks of samples, 3 blocks per row in the 1x1 grid, 4 in
+    // the 2x2 grid.
+    for by in 0..2 {
+        for bx in 0..3 {
+            wide.blocks[0][by * 4 + bx] = plain.blocks[0][by * 3 + bx];
+        }
+    }
+    let expected = decode_jpeg(&encode_baseline(&plain)).unwrap();
+    let baseline = decode_jpeg(&encode_baseline(&wide)).unwrap();
+    assert_same_pixels(&baseline, &expected, "baseline");
+    let progressive = decode_jpeg(&encode_progressive(&wide, &spectral_script(1))).unwrap();
+    assert_same_pixels(&progressive, &expected, "progressive");
+}
+
+/// Panics at the first byte where two decodes differ.
+#[track_caller]
+pub(super) fn assert_same_pixels(got: &ColorPixmap, want: &ColorPixmap, what: &str) {
+    assert_eq!((got.width, got.height), (want.width, want.height), "{what}");
+    if let Some(i) = got.data.iter().zip(&want.data).position(|(a, b)| a != b) {
+        panic!(
+            "{what}: byte {i} is {} instead of {}",
+            got.data[i], want.data[i]
+        );
+    }
+}
+
+#[test]
+fn progressive_refinement_scripts_match_baseline() {
+    // libjpeg's default progression (what Pillow writes) and a script
+    // that refines every bit in its own pass rebuild the coefficients
+    // exactly, so they decode to the baseline pixels.
+    for (li, layout) in LAYOUTS.iter().enumerate() {
+        for (si, &(w, h)) in SIZES.iter().enumerate() {
+            let seed = 0x85EB_CA6B ^ ((li as u32) << 8) ^ si as u32;
+            let img = Image::random(w, h, layout, seed, 100, 3);
+            let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+            for (name, script) in [
+                ("libjpeg", libjpeg_script(layout.len())),
+                ("deep", deep_script(layout.len())),
+            ] {
+                let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+                let what = format!("{name} script, {layout:?} at {w}x{h}");
+                assert_same_pixels(&progressive, &baseline, &what);
+            }
+        }
+    }
+}
+
+#[test]
+fn progressive_refinement_eob_runs_match_baseline() {
+    // Sparse blocks: refinement scans code long EOB runs that carry
+    // the correction bits of every block they end, and ZRLs that the
+    // encoder can only fold into an EOB past the last new coefficient.
+    for layout in [LAYOUTS[0], LAYOUTS[3]] {
+        for amplitude in [1, 3, 70] {
+            let img = Image::random(96, 64, layout, 0xC2B2_AE35, amplitude, 30);
+            let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+            for script in [libjpeg_script(layout.len()), deep_script(layout.len())] {
+                let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+                let what = format!("{layout:?}, amplitude {amplitude}");
+                assert_same_pixels(&progressive, &baseline, &what);
+            }
+        }
+    }
+}
+
+/// An 8x16 grayscale frame (two blocks) whose AC coefficients are all
+/// zero, so a refinement scan over it has no correction bits to read,
+/// and the scans that code it at `Al = 1`.
+fn flat_two_blocks() -> (Image, Vec<(Scan, Vec<u8>)>) {
+    let mut img = Image::random(8, 16, &[(1, 1)], 3, 0, 1);
+    img.blocks[0][0][0] = 24;
+    img.blocks[0][1][0] = -40;
+    let parts = [scan(vec![0], 0, 0, 0, 0), scan(vec![0], 1, 63, 0, 1)]
+        .into_iter()
+        .map(|s| {
+            let data = scan_data(&img, &s);
+            (s, data)
+        })
+        .collect();
+    (img, parts)
+}
+
+#[test]
+fn refinement_eob_run_past_the_last_block_ends_with_the_scan() {
+    // EOB14 with every extra bit set ends 32,767 blocks, far more than
+    // the frame has. The run stops at the end of the scan, and the
+    // next scan still decodes.
+    let (img, parts) = flat_two_blocks();
+    let expected = decode_jpeg(&assemble_progressive(&img, &parts)).unwrap();
+    let mut long = parts.clone();
+    let refine = scan(vec![0], 1, 63, 1, 0);
+    long.push((refine.clone(), raw_data(&[(0xE0, 0x3FFF, 14)])));
+    long.push((refine, raw_data(&[(0x00, 0, 0)])));
+    let got = decode_jpeg(&assemble_progressive(&img, &long)).unwrap();
+    assert_same_pixels(&got, &expected, "EOB run past the frame");
+}
+
+#[test]
+fn refinement_value_past_the_band_is_dropped() {
+    // Three ZRLs and a run of 15 ask for a new coefficient 64 zeros
+    // in, past coefficient 63. The walk stops at the band's end and
+    // the value is dropped, so the block keeps its first-pass value.
+    let (img, parts) = flat_two_blocks();
+    let expected = decode_jpeg(&assemble_progressive(&img, &parts)).unwrap();
+    let mut over = parts.clone();
+    let data = raw_data(&[
+        (0xF0, 0, 0),
+        (0xF0, 0, 0),
+        (0xF0, 0, 0),
+        (0xF1, 1, 1),
+        (0x00, 0, 0),
+    ]);
+    over.push((scan(vec![0], 1, 63, 1, 0), data));
+    let got = decode_jpeg(&assemble_progressive(&img, &over)).unwrap();
+    assert_same_pixels(&got, &expected, "value past the band");
+}
+
+#[test]
+fn refinement_scan_cut_short_reads_zero_bits() {
+    // A refinement scan whose data stops after one symbol reads zero
+    // bits for the rest, like libjpeg, instead of failing or running
+    // on.
+    let img = Image::random(32, 32, &[(1, 1)], 11, 60, 3);
+    let script = libjpeg_script(1);
+    let mut parts: Vec<(Scan, Vec<u8>)> = script
+        .iter()
+        .map(|s| (s.clone(), scan_data(&img, s)))
+        .collect();
+    let (_, last) = parts.last_mut().unwrap();
+    last.truncate(1);
+    let pix = decode_jpeg(&assemble_progressive(&img, &parts)).unwrap();
+    assert_eq!((pix.width, pix.height), (32, 32));
+}
+
+#[test]
+fn repeated_scans_run_out_the_work_budget() {
+    // Each scan costs its band width per block it covers. A frame may
+    // spend 1024 coefficient visits per block, and every pass over AC
+    // 1..=63 costs 63 per block, so a stream that keeps repeating the last refinement scan stops
+    // with an error instead of walking the frame again and again.
+    let (img, mut parts) = flat_two_blocks();
+    let refine = scan(vec![0], 1, 63, 1, 0);
+    for _ in 0..40 {
+        parts.push((refine.clone(), raw_data(&[(0x10, 1, 1)])));
+    }
+    assert_eq!(
+        decode_jpeg(&assemble_progressive(&img, &parts)).unwrap_err(),
+        RenderError::BadJpeg("progressive scans exceed work budget")
+    );
+}
+
+#[test]
+fn dc_refinement_scans_need_no_dc_table() {
+    // A DC refinement scan reads one raw bit per block, so its DC
+    // table selector may name an empty slot, as libjpeg allows.
+    let img = Image::random(16, 16, LAYOUTS[1], 5, 50, 3);
+    let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+    let mut bytes = encode_progressive(&img, &libjpeg_script(3));
+    // The seventh scan is the interleaved DC refinement. Point its
+    // three DC selectors at slot 3, which holds no table.
+    let sos = bytes
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| *w == [0xFF, MARKER_SOS])
+        .map(|(i, _)| i)
+        .nth(6)
+        .unwrap();
+    for c in 0..3 {
+        bytes[sos + 6 + 2 * c] = 0x30;
+    }
+    let progressive = decode_jpeg(&bytes).unwrap();
+    assert_same_pixels(&progressive, &baseline, "DC refinement with table 3");
+}
+
+/// One Pillow (libjpeg-turbo) fixture: a progressive file written with
+/// libjpeg's default script, its baseline twin with the same quantized
+/// coefficients, and for layouts without chroma subsampling Pillow's
+/// own decode of the progressive file as raw RGB or gray samples.
+struct PillowCase {
+    name: &'static str,
+    progressive: &'static [u8],
+    baseline: &'static [u8],
+    pillow: Option<&'static [u8]>,
+}
+
+/// Built by `tests/tools/build_progressive_jpeg_fixtures.py`.
+const PILLOW: [PillowCase; 4] = [
+    PillowCase {
+        name: "4:4:4 20x12",
+        progressive: include_bytes!("fixtures/pillow_rgb444_20x12_prog.jpg"),
+        baseline: include_bytes!("fixtures/pillow_rgb444_20x12_base.jpg"),
+        pillow: Some(include_bytes!("fixtures/pillow_rgb444_20x12_prog.raw")),
+    },
+    PillowCase {
+        name: "4:2:2 33x17",
+        progressive: include_bytes!("fixtures/pillow_rgb422_33x17_prog.jpg"),
+        baseline: include_bytes!("fixtures/pillow_rgb422_33x17_base.jpg"),
+        pillow: None,
+    },
+    PillowCase {
+        name: "4:2:0 33x17",
+        progressive: include_bytes!("fixtures/pillow_rgb420_33x17_prog.jpg"),
+        baseline: include_bytes!("fixtures/pillow_rgb420_33x17_base.jpg"),
+        pillow: None,
+    },
+    PillowCase {
+        name: "gray 47x9",
+        progressive: include_bytes!("fixtures/pillow_gray_47x9_prog.jpg"),
+        baseline: include_bytes!("fixtures/pillow_gray_47x9_base.jpg"),
+        pillow: Some(include_bytes!("fixtures/pillow_gray_47x9_prog.raw")),
+    },
+];
+
+#[test]
+fn pillow_progressive_files_decode_like_their_baseline_twins() {
+    // libjpeg-turbo's progressive files: a DHT before each scan, DC
+    // and AC refinement, and frames that end partway through an MCU.
+    for case in &PILLOW {
+        let progressive = decode_jpeg(case.progressive).unwrap();
+        let baseline = decode_jpeg(case.baseline).unwrap();
+        assert_same_pixels(&progressive, &baseline, case.name);
+        let Some(pillow) = case.pillow else {
+            continue;
+        };
+        // Pillow's integer IDCT and color conversion land a few levels
+        // from the float IDCT here.
+        let pixels = (progressive.width * progressive.height) as usize;
+        let channels = pillow.len() / pixels;
+        let mut max = 0;
+        for (i, px) in progressive.data.chunks_exact(4).enumerate() {
+            for (c, &v) in px.iter().take(3).enumerate() {
+                max = max.max(v.abs_diff(pillow[i * channels + c.min(channels - 1)]));
+            }
+        }
+        assert!(max <= 4, "{}: {max} levels from Pillow", case.name);
+    }
 }

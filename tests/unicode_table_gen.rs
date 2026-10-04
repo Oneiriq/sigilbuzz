@@ -9,17 +9,18 @@
 //!   `BidiMirroring.txt`.
 //! - `src/unicode/script_table.rs`: the `Script` property as ISO
 //!   15924 codes, from `Scripts.txt` and the `sc` rows of
-//!   `PropertyValueAliases.txt`, for `script_of` (the buckets of
-//!   [`TABLE_SCRIPTS`]), for script segmentation (Common and
-//!   Inherited), and for the C API's
-//!   `hb_buffer_guess_segment_properties`. These two snapshots are
-//!   Unicode 18.0.0, the version HarfBuzz 14.5.0 reads.
+//!   `PropertyValueAliases.txt`, for `script_of` (each script's
+//!   `UnicodeScript` bucket, `Other` for Common, Inherited, Unknown,
+//!   and the scripts without a bucket), for script segmentation, and
+//!   for the C API's `hb_buffer_guess_segment_properties`. These two
+//!   snapshots are Unicode 18.0.0, the version HarfBuzz 14.5.0 reads.
 //! - `src/unicode/general_category_table.rs`: the letter (L*), mark
-//!   (Mn, Mc, Me), and decimal number (Nd) ranges of
-//!   `General_Category`, the nonspacing mark (Mn) ranges on their own,
-//!   and `Extended_Pictographic` from `emoji-data.txt`, for HarfBuzz's
-//!   grapheme and native-direction rules, its synthesized glyph
-//!   classes, and its fallback mark positioning.
+//!   (Mn, Mc, Me), decimal number (Nd), and symbol (Sc, Sk, Sm, So)
+//!   ranges of `General_Category`, the nonspacing mark (Mn) ranges on
+//!   their own, and `Extended_Pictographic` from `emoji-data.txt`, for
+//!   HarfBuzz's grapheme and native-direction rules, its synthesized
+//!   glyph classes, its fallback mark positioning, and the word an
+//!   Arabic `stch` stretch fills.
 //! - `src/unicode/normalize/decompose_table.rs`: the canonical
 //!   `Decomposition_Mapping` of every character, from
 //!   `UnicodeData.txt`.
@@ -50,7 +51,7 @@
 //!
 //! - `ArabicShaping.txt`: every data line.
 //! - `DerivedGeneralCategory.txt`: the Lu, Ll, Lt, Lm, Lo, Mn, Mc, Me,
-//!   Nd, and Cf lines.
+//!   Nd, Sc, Sk, Sm, So, and Cf lines.
 //! - `BidiMirroring.txt`: every data line (the commented-out list of
 //!   mirrored characters without a mirror glyph is dropped).
 //! - `Scripts.txt`: every data line.
@@ -114,21 +115,6 @@ const JOINING_RS: &str = "src/unicode/joining_table.rs";
 const MIRRORING_RS: &str = "src/unicode/mirroring_table.rs";
 const SCRIPT_RS: &str = "src/unicode/script_table.rs";
 
-/// The ISO 15924 codes of the scripts whose `script_of` bucket comes
-/// from the Script property: every script HarfBuzz 14.5.0 gives a
-/// shaper of its own (`hb_ot_shaper_categorize` in `hb-ot-shaper.hh`)
-/// that the hand-written block ranges of `script_of` do not cover.
-/// Syriac takes the Arabic shaper, the rest the Universal Shaping
-/// Engine.
-const TABLE_SCRIPTS: [&str; 76] = [
-    "Syrc", "Buhd", "Hano", "Tglg", "Tagb", "Tale", "Khar", "Sylo", "Tfng", "Phag", "Kali", "Rjng",
-    "Saur", "Egyp", "Java", "Kthi", "Mtei", "Tavt", "Batk", "Mand", "Cakm", "Plrd", "Takr", "Dupl",
-    "Gran", "Sind", "Mahj", "Mani", "Hmng", "Phlp", "Sidd", "Ahom", "Mult", "Adlm", "Bhks", "Marc",
-    "Newa", "Gonm", "Soyo", "Zanb", "Dogr", "Gong", "Rohg", "Maka", "Medf", "Sogo", "Sogd", "Elym",
-    "Nand", "Hmnp", "Wcho", "Chrs", "Diak", "Kits", "Yezi", "Cpmn", "Ougr", "Tnsa", "Toto", "Vith",
-    "Kawi", "Nagm", "Gara", "Gukh", "Krai", "Onao", "Sunu", "Todr", "Tutg", "Berf", "Sidt", "Tayo",
-    "Tols", "Jurc", "Pcun", "Seal",
-];
 const CATEGORY_RS: &str = "src/unicode/general_category_table.rs";
 const DECOMPOSE_RS: &str = "src/unicode/normalize/decompose_table.rs";
 const COMPOSE_RS: &str = "src/unicode/normalize/compose_table.rs";
@@ -137,7 +123,9 @@ const BIDI_CLASS_RS: &str = "src/unicode/bidi_class_table.rs";
 const BIDI_BRACKETS_RS: &str = "src/unicode/bidi_brackets_table.rs";
 
 /// The General_Category values the snapshot keeps.
-const KEPT_CATEGORIES: &[&str] = &["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Cf"];
+const KEPT_CATEGORIES: &[&str] = &[
+    "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Sc", "Sk", "Sm", "So", "Cf",
+];
 
 /// Maximum emitted line width, matching the crate's rustfmt setting.
 const MAX_WIDTH: usize = 100;
@@ -309,6 +297,16 @@ fn generate_mirroring() -> String {
 
 // --- Scripts -----------------------------------------------------------------
 
+/// The `UnicodeScript` bucket of the script with ISO 15924 code `tag`,
+/// as Rust source: the bucket `from_iso15924_tag` gives the code
+/// (Hiragana and Katakana fold into Han), and `Script::Other` for
+/// Common, Inherited, Unknown, and the scripts without a bucket.
+fn bucket_name(tag: &str) -> String {
+    let code: [u8; 4] = tag.as_bytes().try_into().expect("four-letter code");
+    sigilbuzz::UnicodeScript::from_iso15924_tag(code)
+        .map_or_else(|| "Script::Other".to_owned(), |b| format!("Script::{b:?}"))
+}
+
 fn generate_scripts() -> String {
     let scripts = load(SCRIPTS);
     let aliases = load(ALIASES);
@@ -361,21 +359,11 @@ fn generate_scripts() -> String {
          /// Index of `Zinh` (Inherited) in [`SCRIPT_TAGS`].\n\
          pub(super) const INHERITED: u8 = {inherited};\n"
     );
-    out.push_str("/// The `script_of` bucket of each script of [`SCRIPT_TAGS`] whose code\n");
-    out.push_str("/// points come from this table, and `Script::Other` for the others.\n");
+    out.push_str("/// The `script_of` bucket of each script of [`SCRIPT_TAGS`]:\n");
+    out.push_str("/// `Script::Other` for Common, Inherited, Unknown, and the scripts\n");
+    out.push_str("/// sigilbuzz has no bucket for.\n");
     out.push_str("pub(super) const BUCKETS: &[Script] = &[\n");
-    let items: Vec<String> = tags
-        .iter()
-        .map(|tag| {
-            if !TABLE_SCRIPTS.contains(tag) {
-                return "Script::Other".to_owned();
-            }
-            let code: [u8; 4] = tag.as_bytes().try_into().expect("four-letter code");
-            let bucket = sigilbuzz::UnicodeScript::from_iso15924_tag(code)
-                .unwrap_or_else(|| panic!("no bucket for {tag}"));
-            format!("Script::{bucket:?}")
-        })
-        .collect();
+    let items: Vec<String> = tags.iter().map(|tag| bucket_name(tag)).collect();
     emit_wrapped(&mut out, &items);
     out.push_str("];\n\n");
     out.push_str("/// `(first, last, script)` for every code point with a known script,\n");
@@ -408,6 +396,7 @@ fn generate_categories() -> String {
             "Lu" | "Ll" | "Lt" | "Lm" | "Lo" => 'L',
             "Mn" | "Mc" | "Me" => 'M',
             "Nd" => 'N',
+            "Sc" | "Sk" | "Sm" | "So" => 'S',
             _ => continue,
         };
         let (start, end) = parse_range(&row[0]);
@@ -428,9 +417,13 @@ fn generate_categories() -> String {
     file_header(&mut out, &[&categories, &emoji]);
     out.push_str("// Code point ranges read best in hex without digit separators.\n");
     out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
-    out.push_str("use super::general_category::GeneralCategoryClass::{self, DecimalNumber, Letter, Mark};\n\n");
-    out.push_str("/// Letters (Lu, Ll, Lt, Lm, Lo), marks (Mn, Mc, Me), and decimal\n");
-    out.push_str("/// numbers (Nd). Sorted, non-overlapping, inclusive.\n");
+    out.push_str(concat!(
+        "use super::general_category::GeneralCategoryClass::",
+        "{self, DecimalNumber, Letter, Mark, Symbol};\n\n",
+    ));
+    out.push_str("/// Letters (Lu, Ll, Lt, Lm, Lo), marks (Mn, Mc, Me), decimal numbers\n");
+    out.push_str("/// (Nd), and symbols (Sc, Sk, Sm, So). Sorted, non-overlapping,\n");
+    out.push_str("/// inclusive.\n");
     out.push_str("pub(super) static CLASSES: &[(u32, u32, GeneralCategoryClass)] = &[\n");
     let items: Vec<String> = runs(&classes, ' ')
         .iter()
@@ -438,7 +431,8 @@ fn generate_categories() -> String {
             let name = match c {
                 'L' => "Letter",
                 'M' => "Mark",
-                _ => "DecimalNumber",
+                'N' => "DecimalNumber",
+                _ => "Symbol",
             };
             format!("(0x{s:04X}, 0x{e:04X}, {name})")
         })
@@ -867,26 +861,35 @@ fn committed_unicode_tables_match_snapshots() {
 }
 
 #[test]
-fn table_scripts_cover_every_code_point_of_their_script() {
-    // `script_of` gives each code point of a script of
-    // `TABLE_SCRIPTS` its bucket, so no hand-written block range
-    // shadows one, and `script_code` reads the snapshot back.
+fn every_code_point_takes_the_bucket_of_its_script() {
+    // `script_of` gives each code point the bucket of its Script
+    // property, so no block range shadows the property, and
+    // `script_code` reads the snapshot back. Common, Inherited, and
+    // the scripts without a bucket are `Other`.
     let aliases = load(ALIASES);
     let codes: BTreeMap<&str, &str> = aliases
         .rows
         .iter()
         .map(|row| (row[2].as_str(), row[1].as_str()))
         .collect();
+    let other = sigilbuzz::UnicodeScript::Other;
+    let mut listed = vec![false; CODE_SPACE];
     for row in &load(SCRIPTS).rows {
         let code = codes[row[1].as_str()];
         let tag: [u8; 4] = code.as_bytes().try_into().expect("four letters");
-        let bucket = sigilbuzz::UnicodeScript::from_iso15924_tag(tag);
+        let bucket = sigilbuzz::UnicodeScript::from_iso15924_tag(tag).unwrap_or(other);
         let (start, end) = parse_range(&row[0]);
         for ch in (start..=end).filter_map(char::from_u32) {
+            listed[ch as usize] = true;
             assert_eq!(sigilbuzz::unicode::script_code(ch), tag, "{ch:?}");
-            if TABLE_SCRIPTS.contains(&code) {
-                assert_eq!(Some(sigilbuzz::script_of(ch)), bucket, "{ch:?}");
-            }
+            assert_eq!(sigilbuzz::script_of(ch), bucket, "{ch:?}");
+        }
+    }
+    // Unassigned and private-use code points are Unknown.
+    for ch in (0..CODE_SPACE as u32).filter_map(char::from_u32) {
+        if !listed[ch as usize] {
+            assert_eq!(sigilbuzz::unicode::script_code(ch), *b"Zzzz", "{ch:?}");
+            assert_eq!(sigilbuzz::script_of(ch), other, "{ch:?}");
         }
     }
 }
