@@ -188,6 +188,7 @@ fn progressive_sos_rejects_dc_scan_with_se_nonzero() {
     bytes.push(0); // Ss
     bytes.push(5); // Se
     bytes.push(0);
+    bytes.push(0x00); // one byte of scan data
     bytes.push(0xFF);
     bytes.push(MARKER_EOI);
 
@@ -225,6 +226,7 @@ fn progressive_sos_rejects_ac_scan_with_ss_greater_than_se() {
     bytes.push(20); // Ss
     bytes.push(5); // Se (< Ss)
     bytes.push(0);
+    bytes.push(0x00); // one byte of scan data
     bytes.push(0xFF);
     bytes.push(MARKER_EOI);
 
@@ -265,6 +267,7 @@ fn progressive_ac_refinement_scan_without_a_table_is_an_error() {
     bytes.push(1); // Ss
     bytes.push(63); // Se
     bytes.push(1 << 4); // Ah=1, Al=0
+    bytes.push(0x00); // one byte of scan data
     bytes.push(0xFF);
     bytes.push(MARKER_EOI);
 

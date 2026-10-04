@@ -23,8 +23,11 @@
 //!   [`RenderError::BadJpeg`].
 //! - **Size backed by data.** Every 8x8 block costs at least one bit
 //!   of entropy-coded data, so a frame header that declares more
-//!   blocks than eight per remaining input byte is rejected before
-//!   any sample buffer is allocated.
+//!   blocks than eight per byte of entropy-coded data in the scans
+//!   after it (COM, APPn and other segments do not count) is rejected
+//!   before any sample buffer is allocated.
+//! - **At most 2^24 pixels** (4096 x 4096) per frame, which keeps one
+//!   decode near 220 MB; see `MAX_JPEG_PIXELS`.
 //! - **Bounded scan work.** The scans of the stream's frame together
 //!   may visit at most 1024 coefficients per 8x8 block, which a valid
 //!   scan script never needs (each coefficient coded once and refined
@@ -93,6 +96,16 @@ const MARKER_COM: u8 = 0xFE;
 /// blow up `usize` math via a 65535x65535 SOF0.
 const MAX_JPEG_DIM: u32 = 16384;
 
+/// Most pixels a frame may hold: 2^24, 4096 x 4096. JPEG data in a
+/// font is an sbix glyph image, drawn for one strike's ppem, and a
+/// strike that large would be sixteen times the area of a 1024 ppem
+/// one. A decode holds at most 13 bytes per pixel at once (a
+/// progressive 4:4:4 frame keeps 6 bytes of coefficients, 3 of sample
+/// planes, and 4 of RGBA output), so the cap keeps one decode near
+/// 220 MB. Without it a stream with enough entropy-coded data could ask
+/// for 16384 x 16384, about 3.5 GB.
+const MAX_JPEG_PIXELS: u64 = 1 << 24;
+
 /// Hard cap on Huffman table count. JPEG allows 4 of each AC/DC class,
 /// so the worst legitimate case is 8 tables.
 const MAX_HUFF_TABLES: usize = 4;
@@ -108,7 +121,8 @@ const MAX_QT_TABLES: usize = 4;
 /// that repeats scans runs out. The cap keeps a few bytes per scan
 /// from making the decoder walk every block again and again; since a
 /// stream holds one frame, it bounds the whole stream at 1024 visits
-/// per block.
+/// per block, and with at most eight blocks per byte of scan data, at
+/// 8192 visits per byte.
 const SCAN_WORK_PER_BLOCK: u64 = 1024;
 
 // ---------------------------------------------------------------------------
@@ -123,7 +137,8 @@ const SCAN_WORK_PER_BLOCK: u64 = 1024;
 /// max h/v is `<= 2`. Both baseline (SOF0) and progressive (SOF2,
 /// spectral selection and successive approximation, refinement scans
 /// included) modes are handled. Arithmetic coding, 16-bit precision,
-/// hierarchical mode, restart markers, a second frame, and JPEG2000 /
+/// hierarchical mode, restart markers, a second frame, a frame past
+/// 2^24 pixels or larger than its scan data can back, and JPEG2000 /
 /// TIFF return [`RenderError::BadJpeg`].
 ///
 /// # Errors
@@ -438,10 +453,11 @@ impl<'a> Decoder<'a> {
 
         // Every block the scans will visit costs at least one bit of
         // entropy-coded data (a DC code in the first scan), and that
-        // data follows this segment. A header that claims more blocks
-        // than the rest of the stream can carry is malformed, and
-        // rejecting it here keeps a few header bytes from sizing
-        // gigabytes of coefficient and sample buffers.
+        // data follows this segment inside SOS segments. A header that
+        // claims more blocks than the scans after it carry is
+        // malformed, and rejecting it here keeps a few header bytes,
+        // or a header padded out with COM or APPn segments, from
+        // sizing gigabytes of coefficient and sample buffers.
         let (mcus_x, mcus_y) = self.mcu_grid();
         let total_blocks: u64 = self
             .components
@@ -453,9 +469,12 @@ impl<'a> Decoder<'a> {
                     * u64::from(c.v_sampling)
             })
             .sum();
-        let remaining = self.src.len().saturating_sub(self.cursor) as u64;
-        if total_blocks > remaining.saturating_mul(8) {
+        let entropy = entropy_bytes_after(self.src, self.cursor);
+        if total_blocks > entropy.saturating_mul(8) {
             return Err(RenderError::BadJpeg("frame larger than entropy data"));
+        }
+        if u64::from(self.width) * u64::from(self.height) > MAX_JPEG_PIXELS {
+            return Err(RenderError::BadJpeg("frame larger than pixel limit"));
         }
 
         if progressive {
@@ -512,6 +531,54 @@ impl<'a> Decoder<'a> {
 // ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
+
+/// Bytes of entropy-coded data in the SOS segments from `at` on. Marker
+/// segments are skipped by their lengths; after each SOS header the
+/// entropy-coded bytes run to the next marker (an `0xFF` not followed
+/// by a stuffed `0x00`). The walk stops at EOI, at a byte where a
+/// marker should start, or at the end of `src`, so COM, APPn, and
+/// other padding never count. Linear in the bytes it walks.
+fn entropy_bytes_after(src: &[u8], mut at: usize) -> u64 {
+    let mut total = 0u64;
+    loop {
+        if src.get(at) != Some(&0xFF) {
+            return total;
+        }
+        while src.get(at) == Some(&0xFF) {
+            at += 1;
+        }
+        let Some(&marker) = src.get(at) else {
+            return total;
+        };
+        at += 1;
+        match marker {
+            MARKER_EOI | 0x00 => return total,
+            // Markers without a length: RSTn and TEM.
+            0xD0..=0xD7 | 0x01 => continue,
+            _ => {
+                let Some(&[hi, lo]) = src.get(at..).and_then(|s| s.first_chunk::<2>()) else {
+                    return total;
+                };
+                let len = usize::from(u16::from_be_bytes([hi, lo]));
+                if len < 2 {
+                    return total;
+                }
+                at += len;
+                if marker != MARKER_SOS {
+                    continue;
+                }
+                let start = at.min(src.len());
+                while let Some(&b) = src.get(at) {
+                    if b == 0xFF && src.get(at + 1) != Some(&0x00) {
+                        break;
+                    }
+                    at += if b == 0xFF { 2 } else { 1 };
+                }
+                total += (at.min(src.len()) - start) as u64;
+            }
+        }
+    }
+}
 
 /// Table in slot `selector`, or `None` when the slot is empty or the
 /// selector points past the four slots the format defines. Scan
