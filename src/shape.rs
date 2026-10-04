@@ -56,7 +56,8 @@
 //! - AAT `morx` substitution for fonts without GSUB.
 //!
 //! Any default-on feature can be suppressed by a `Feature { tag,
-//! value: 0 }` entry.
+//! value: 0 }` entry. A list that names a tag more than once takes its
+//! last entry, as HarfBuzz does.
 //!
 //! # Direction and output order
 //!
@@ -334,16 +335,63 @@ pub struct Feature {
     pub value: u32,
 }
 
-/// Returns `true` when the feature is explicitly disabled via
-/// `Feature { tag, value: 0 }` in the override list.
+/// Returns `true` when the override list turns the feature off: its
+/// last entry for `tag` has value 0.
 fn feature_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
-    features.iter().any(|f| f.tag == tag && f.value == 0)
+    last_value(features, tag) == Some(0)
 }
 
-/// Returns `true` when the override list turns the feature on and does
-/// not also turn it off.
+/// Returns `true` when the override list turns the feature on: its
+/// last entry for `tag` has a non-zero value.
 fn feature_enabled(features: &[Feature], tag: [u8; 4]) -> bool {
-    features.iter().any(|f| f.tag == tag && f.value != 0) && !feature_disabled(features, tag)
+    last_value(features, tag).is_some_and(|v| v != 0)
+}
+
+/// The value of the last entry for `tag` in `features`, the one that
+/// counts when a list repeats a tag.
+pub(crate) fn last_value(features: &[Feature], tag: [u8; 4]) -> Option<u32> {
+    features
+        .iter()
+        .rev()
+        .find(|f| f.tag == tag)
+        .map(|f| f.value)
+}
+
+/// `features` with every tag the list repeats kept only at its last
+/// entry, the other entries in their order. HarfBuzz's map builder
+/// merges the entries of a tag the same way: a later global feature
+/// replaces the value of an earlier one (`hb_ot_map_builder_t::compile`),
+/// so `liga=0,liga=1` turns `liga` on. Borrows `features` when no tag
+/// repeats.
+fn last_values(features: &[Feature]) -> alloc::borrow::Cow<'_, [Feature]> {
+    use alloc::borrow::Cow;
+    use alloc::collections::BTreeMap;
+    // Small lists, the usual case, need no map to find a repeat.
+    let repeats = if features.len() <= 16 {
+        features
+            .iter()
+            .enumerate()
+            .any(|(i, f)| features[i + 1..].iter().any(|g| g.tag == f.tag))
+    } else {
+        let mut seen = alloc::collections::BTreeSet::new();
+        features.iter().any(|f| !seen.insert(f.tag))
+    };
+    if !repeats {
+        return Cow::Borrowed(features);
+    }
+    let last: BTreeMap<[u8; 4], usize> = features
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.tag, i))
+        .collect();
+    Cow::Owned(
+        features
+            .iter()
+            .enumerate()
+            .filter(|&(i, f)| last.get(&f.tag) == Some(&i))
+            .map(|(_, f)| *f)
+            .collect(),
+    )
 }
 
 /// Resolves a GPOS/GSUB type-9 Extension subtable to its inner

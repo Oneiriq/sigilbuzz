@@ -30,7 +30,9 @@ use crate::unicode::{script_of, Script};
 /// Feature tags with `value: 0` disable the corresponding feature
 /// for this call. Non-zero values enable a feature if the font
 /// supports it. Unknown tags are accepted and ignored rather than
-/// returning an error.
+/// returning an error. When the list names a tag more than once, the
+/// last entry wins, as in HarfBuzz: `liga=0` then `liga=1` turns
+/// ligatures on.
 ///
 /// # Output order
 ///
@@ -48,6 +50,10 @@ use crate::unicode::{script_of, Script};
 // The pipeline is a straight-line sequence of passes so the order is
 // visible in one place.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
+    // A tag the list repeats takes its last value, as in HarfBuzz, so
+    // every pass below sees each tag once.
+    let features = super::last_values(features);
+    let features: &[Feature] = &features;
     // Vertical layout: explicit when the buffer direction is TTB/BTT,
     // *implicit* when the run is dominantly Mongolian and the caller
     // never chose a direction. Mongolian's traditional writing axis is

@@ -117,9 +117,10 @@ impl StageFeature {
     }
 }
 
-/// True when the caller turned `tag` off with a zero-valued feature.
+/// True when the caller turned `tag` off: the last entry for it in the
+/// feature list has value 0.
 pub(crate) fn user_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
-    features.iter().any(|f| f.tag == tag && f.value == 0)
+    crate::shape::last_value(features, tag) == Some(0)
 }
 
 /// The lookups of `tag` in the font, for a run of candidate script

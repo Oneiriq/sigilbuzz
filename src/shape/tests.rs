@@ -265,3 +265,36 @@ fn resolve_extension_rejects_offset_past_end() {
     bytes.extend_from_slice(&9999u32.to_be_bytes());
     assert!(resolve_extension(&bytes).is_none());
 }
+
+#[test]
+fn a_repeated_tag_keeps_its_last_entry_in_place() {
+    let f = |tag: &[u8; 4], value: u32| Feature { tag: *tag, value };
+    let list = [f(b"liga", 0), f(b"kern", 1), f(b"liga", 1), f(b"salt", 2)];
+    assert_eq!(
+        &*last_values(&list),
+        &[f(b"kern", 1), f(b"liga", 1), f(b"salt", 2)]
+    );
+    assert!(feature_enabled(&list, *b"liga"));
+    assert!(!feature_disabled(&list, *b"liga"));
+    let list = [f(b"kern", 1), f(b"kern", 0)];
+    assert_eq!(&*last_values(&list), &[f(b"kern", 0)]);
+    assert!(feature_disabled(&list, *b"kern"));
+    assert!(!feature_enabled(&list, *b"kern"));
+    // A list without repeats is borrowed as it is, long or short.
+    let short = [f(b"liga", 0), f(b"kern", 0)];
+    assert!(matches!(
+        last_values(&short),
+        alloc::borrow::Cow::Borrowed(_)
+    ));
+    let long: Vec<Feature> = (0..40u8).map(|i| f(&[b'a', b'b', b'c', i], 1)).collect();
+    assert!(matches!(
+        last_values(&long),
+        alloc::borrow::Cow::Borrowed(_)
+    ));
+    let mut repeated = long.clone();
+    repeated.push(f(&[b'a', b'b', b'c', 3], 0));
+    let kept = last_values(&repeated);
+    assert_eq!(kept.len(), 40);
+    assert_eq!(kept.last(), Some(&f(&[b'a', b'b', b'c', 3], 0)));
+    assert!(!kept.contains(&f(&[b'a', b'b', b'c', 3], 1)));
+}
