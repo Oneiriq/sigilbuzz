@@ -50,7 +50,10 @@
 //! empty one, as in HarfBuzz. A table that cannot be read is dropped
 //! whole and reported.
 
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use sigilbuzz::Error;
 
@@ -87,11 +90,12 @@ pub(crate) struct Substitution {
     pub lookups: Vec<u16>,
 }
 
-/// One FeatureVariationRecord.
+/// One FeatureVariationRecord. Records that name one ConditionSet or
+/// FeatureTableSubstitution share its parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Record {
-    pub conditions: Vec<Condition>,
-    pub substitutions: Vec<Substitution>,
+    pub conditions: Rc<[Condition]>,
+    pub substitutions: Rc<[Substitution]>,
     /// The record's featureTableSubstitutionOffset as stored, measured
     /// from the FeatureVariations table (0 for none).
     substitution_offset: u32,
@@ -142,31 +146,45 @@ pub(crate) fn read(table: &[u8]) -> Result<Option<FeatureVariations>, Error> {
             })
         }
     };
+    // Each ConditionSet and FeatureTableSubstitution is parsed once and
+    // shared by the records that name it, so memory follows the table's
+    // size; each record still charges what it names.
+    let sets = Shared::default();
+    let substitutions = Shared::default();
     let mut records = Vec::new();
     for i in 0..count {
         let slot = at + 8 + i * 8;
         charge(1)?;
         records.push(Record {
-            conditions: read_condition_set(table, at, slot, &charge)?,
-            substitutions: read_substitutions(table, at, slot + 4, &charge)?,
+            conditions: read_condition_set(table, at, slot, &charge, &sets)?,
+            substitutions: read_substitutions(table, at, slot + 4, &charge, &substitutions)?,
             substitution_offset: u32_at(table, slot + 4, CTX)?,
         });
     }
     Ok(Some(FeatureVariations { at, records }))
 }
 
+/// Parsed pieces by where they start in the table, with the work units
+/// reading each one charged.
+type Shared<T> = RefCell<BTreeMap<usize, (Rc<[T]>, usize)>>;
+
 /// Reads the ConditionSet named by the Offset32 at `slot`, measured
-/// from the FeatureVariations at `fv`.
+/// from the FeatureVariations at `fv`; one read before is shared.
 fn read_condition_set(
     table: &[u8],
     fv: usize,
     slot: usize,
     charge: &dyn Fn(usize) -> Result<(), Error>,
-) -> Result<Vec<Condition>, Error> {
+    sets: &Shared<Condition>,
+) -> Result<Rc<[Condition]>, Error> {
     if u32_at(table, slot, CTX)? == 0 {
-        return Ok(Vec::new());
+        return Ok(Rc::from([]));
     }
     let set = offset32_at(table, slot, fv, OFFSET)?;
+    if let Some((conditions, units)) = sets.borrow().get(&set) {
+        charge(*units)?;
+        return Ok(Rc::clone(conditions));
+    }
     let count = usize::from(u16_at(table, set, CTX)?);
     array_at(table, set + 2, count, 4, CTX)?;
     charge(count)?;
@@ -185,21 +203,30 @@ fn read_condition_set(
             format => Condition::Unknown { format, at },
         });
     }
+    let conditions: Rc<[Condition]> = Rc::from(conditions);
+    sets.borrow_mut()
+        .insert(set, (Rc::clone(&conditions), count));
     Ok(conditions)
 }
 
 /// Reads the FeatureTableSubstitution named by the Offset32 at `slot`,
-/// measured from the FeatureVariations at `fv`.
+/// measured from the FeatureVariations at `fv`; one read before is
+/// shared.
 fn read_substitutions(
     table: &[u8],
     fv: usize,
     slot: usize,
     charge: &dyn Fn(usize) -> Result<(), Error>,
-) -> Result<Vec<Substitution>, Error> {
+    lists: &Shared<Substitution>,
+) -> Result<Rc<[Substitution]>, Error> {
     if u32_at(table, slot, CTX)? == 0 {
-        return Ok(Vec::new());
+        return Ok(Rc::from([]));
     }
     let fts = offset32_at(table, slot, fv, OFFSET)?;
+    if let Some((substitutions, units)) = lists.borrow().get(&fts) {
+        charge(*units)?;
+        return Ok(Rc::clone(substitutions));
+    }
     if u16_at(table, fts, CTX)? != 1 {
         return Err(Error::Malformed {
             offset: fts,
@@ -209,6 +236,7 @@ fn read_substitutions(
     let count = usize::from(u16_at(table, fts + 4, CTX)?);
     array_at(table, fts + 6, count, 6, CTX)?;
     charge(count)?;
+    let mut units = count;
     let mut substitutions = Vec::with_capacity(count);
     for i in 0..count {
         let rec = fts + 6 + i * 6;
@@ -216,6 +244,7 @@ fn read_substitutions(
         let params = u16_at(table, alternate, CTX)?;
         let lookup_count = usize::from(u16_at(table, alternate + 2, CTX)?);
         charge(lookup_count)?;
+        units = units.saturating_add(lookup_count);
         let lookups = array_at(table, alternate + 4, lookup_count, 2, CTX)?
             .chunks_exact(2)
             .map(|b| u16::from_be_bytes([b[0], b[1]]))
@@ -227,6 +256,10 @@ fn read_substitutions(
             lookups,
         });
     }
+    let substitutions: Rc<[Substitution]> = Rc::from(substitutions);
+    lists
+        .borrow_mut()
+        .insert(fts, (Rc::clone(&substitutions), units));
     Ok(substitutions)
 }
 
@@ -262,7 +295,7 @@ impl FeatureVariations {
     ) -> Vec<bool> {
         let mut live = alloc::vec![false; feature_count];
         let readable = self.records.iter().filter(|r| r.readable());
-        for sub in readable.flat_map(|r| &r.substitutions) {
+        for sub in readable.flat_map(|r| r.substitutions.iter()) {
             let survives = sub.lookups.iter().any(|&l| {
                 lookup_renumber
                     .get(usize::from(l))
@@ -280,7 +313,7 @@ impl FeatureVariations {
 
 /// A record rebuilt for the output: its conditions and, per
 /// substituted feature, the alternate's lookup indices.
-type OutRecord = (Vec<Condition>, Vec<(u16, Vec<u16>)>);
+type OutRecord = (Rc<[Condition]>, Vec<(u16, Vec<u16>)>);
 
 /// Rebuilds `fv` for a subset: every substitution's feature index goes
 /// through `feature_renumber` (a substitution of a dropped feature
@@ -463,7 +496,7 @@ fn settle(
     let budget = WorkBudget::new(WORK_LIMIT);
     'records: for (index, record) in fv.records.iter().enumerate() {
         let mut left = Vec::new();
-        for &condition in &record.conditions {
+        for &condition in record.conditions.iter() {
             let (axis, min, max) = match condition {
                 Condition::AxisRange { axis, min, max } => (axis, min, max),
                 Condition::Unknown { at, .. } => {

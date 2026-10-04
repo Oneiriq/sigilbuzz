@@ -28,7 +28,10 @@ For TrueType fonts:
 
 CFF and CFF2 fonts are supported too, including CID-keyed CFF. When glyphs are dropped,
 the `CFF ` or `CFF2` table is rebuilt around the kept ones, and every other table follows
-the same rules as above. A `CFF2` table keeps its own variation data.
+the same rules as above. A `CFF2` table keeps its own variation data. A kept `CFF ` glyph
+drawn by `seac` (an accented character) keeps its base and accent glyphs. `hb-subset`
+does the same for a seac in the glyph's own charstring; this subsetter also follows one
+that a subroutine ends, which sigilbuzz draws.
 
 When every glyph is kept, a CFF or CFF2 font passes through instead, and only the table
 directory is rebuilt. Every table is copied unchanged except `kern`, `kerx` and `morx`,
@@ -38,15 +41,19 @@ such as `COLR`, `CPAL`, `MVAR` and `DSIG`, stay, since no glyph ID changes, but 
 `DSIG` signature no longer matches the file. Nothing is read, so no warnings come back.
 
 `instance` handles variable fonts. It bakes a set of axis coordinates into a static
-font, or pins some axes and leaves the rest variable.
+font, or pins some axes and leaves the rest variable. It moves `glyf` outlines (inferred
+points and composite offsets included), the advances and side bearings their phantom
+points give, the `cvt ` values `cvar` varies, and the `BASE` coordinates the store
+varies, the way HarfBuzz's instancer does. Glyph instructions stay, as they do in
+HarfBuzz unless it is asked to drop hinting.
 
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
 a Device table, an anchor), or a malformed vertical metrics table (`vhea`, `vmtx`,
 `VORG`, `VVAR`), `BASE` or `STAT`, is left out of a subset instead of failing the whole
 run, the way HarfBuzz handles it. `instance` does the same for the vertical metrics
-tables and for the GDEF and FeatureVariations data it rebuilds. Every piece left out is
-reported in `SubsetOutput::warnings` (or `InstancedOutput::warnings`) with its table,
-byte offset, and reason.
+tables, for `BASE`, and for the GDEF and FeatureVariations data it rebuilds. Every piece
+left out is reported in `SubsetOutput::warnings` (or `InstancedOutput::warnings`) with
+its table, byte offset, and reason.
 
 The output is deterministic: the same face and glyph set always give the same bytes.
 

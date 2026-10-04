@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::ivs::{offset32, project_ivs, shifted, RegionRemap};
+use super::ivs::{offset32, project_ivs_with, shifted, PinnedOnly, Projection, RegionRemap};
 use super::AxisPin;
 use crate::read;
 use crate::SubsetError;
@@ -122,7 +122,7 @@ pub(super) fn rewrite_delta_set_index_map(
 /// Re-emits a HVAR or VVAR table: `header_len` bytes of header (the
 /// version, the Offset32 to the store at byte 4, then one Offset32 per
 /// DeltaSetIndexMap), the store partial-projected through `pins` /
-/// `coords`, and every map rewritten through the remap.
+/// `coords` as `how` says, and every map rewritten through the remap.
 ///
 /// # Errors
 ///
@@ -135,6 +135,7 @@ fn bake_metrics_var_partial(
     header_len: usize,
     coords: &[f32],
     pins: &[AxisPin],
+    how: Projection,
     too_big: &'static str,
 ) -> Result<Vec<u8>, SubsetError> {
     const CTX: &str = "metrics variations header truncated";
@@ -147,8 +148,15 @@ fn bake_metrics_var_partial(
         .into());
     }
     let ivs_off = read::offset32_at(table, 4, 0, "metrics variations store offset past the end")?;
+    // Without an advance map, advances read outer 0 by glyph id, so
+    // outer 0 has to stay the first subtable.
+    let how = Projection {
+        keep_outer_zero: read::u32_at(table, 8, CTX)? == 0,
+        keep_itemless: false,
+        ..how
+    };
     let (new_ivs, remap) =
-        project_ivs(&table[ivs_off..], coords, pins).map_err(|e| shifted(e, ivs_off))?;
+        project_ivs_with(&table[ivs_off..], coords, pins, how).map_err(|e| shifted(e, ivs_off))?;
     // The subtable count of the store just emitted.
     let new_subtable_count = read::u16_at(&new_ivs, 6, "ItemVariationStore truncated")?;
 
@@ -187,24 +195,47 @@ fn bake_metrics_var_partial(
     Ok(out)
 }
 
+/// [`bake_hvar_partial_with`] keeping the regions on the pinned axes
+/// only.
+#[cfg(test)]
+pub(super) fn bake_hvar_partial(
+    hvar_bytes: &[u8],
+    coords: &[f32],
+    pins: &[AxisPin],
+) -> Result<Vec<u8>, SubsetError> {
+    bake_hvar_partial_with(hvar_bytes, coords, pins, PinnedOnly::Keep)
+}
+
 /// Re-emits HVAR with its embedded IVS partial-projected through
 /// `pins` / `coords`, every DeltaSetIndexMap rewritten through the
 /// remap, and the table header offsets adjusted to match. HVAR's
 /// header is 20 bytes: the version, then Offset32s to the store and to
 /// the advance, LSB and RSB maps.
 ///
+/// `pinned_only` says what becomes of a region on the pinned axes
+/// only: kept when `hmtx` stays at the source's default, dropped when
+/// it moved to the pinned location. Regions that project alike merge,
+/// as in HarfBuzz's instancer.
+///
 /// A malformed HVAR is a parse error; the caller drops the table (no
 /// advance variation, safe but slightly degraded) and reports it.
-pub(super) fn bake_hvar_partial(
+pub(super) fn bake_hvar_partial_with(
     hvar_bytes: &[u8],
     coords: &[f32],
     pins: &[AxisPin],
+    pinned_only: PinnedOnly,
 ) -> Result<Vec<u8>, SubsetError> {
     bake_metrics_var_partial(
         hvar_bytes,
         20,
         coords,
         pins,
+        Projection {
+            pinned_only,
+            merge: true,
+            keep_outer_zero: false,
+            keep_itemless: false,
+        },
         "partial instancing: HVAR exceeds 4 GiB",
     )
 }
@@ -213,17 +244,25 @@ pub(super) fn bake_hvar_partial(
 /// DeltaSetIndexMap rewritten. VVAR's header is 24 bytes (4 ver + 5
 /// x o32: ivs / advance-height / tsb / bsb / vorg). The vorg map
 /// shares the IVS rows with the others; we rewrite it through the
-/// same remap.
-pub(super) fn bake_vvar_partial(
+/// same remap. `pinned_only` works as in [`bake_hvar_partial_with`],
+/// for `vmtx` and `VORG`.
+pub(super) fn bake_vvar_partial_with(
     vvar_bytes: &[u8],
     coords: &[f32],
     pins: &[AxisPin],
+    pinned_only: PinnedOnly,
 ) -> Result<Vec<u8>, SubsetError> {
     bake_metrics_var_partial(
         vvar_bytes,
         24,
         coords,
         pins,
+        Projection {
+            pinned_only,
+            merge: true,
+            keep_outer_zero: false,
+            keep_itemless: false,
+        },
         "partial instancing: VVAR exceeds 4 GiB",
     )
 }
@@ -284,7 +323,8 @@ pub(super) fn bake_mvar_partial(
         }
         .into());
     };
-    let (new_ivs, remap) = project_ivs(store, coords, pins).map_err(|e| shifted(e, store_off))?;
+    let (new_ivs, remap) = project_ivs_with(store, coords, pins, Projection::KEEP_MERGED)
+        .map_err(|e| shifted(e, store_off))?;
     let new_subtable_count = read::u16_at(&new_ivs, 6, "ItemVariationStore truncated")?;
 
     // Layout: 12-byte header + records + IVS. Preserve record_size.

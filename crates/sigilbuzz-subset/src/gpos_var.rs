@@ -58,14 +58,11 @@
 //! # Determinism
 //!
 //! The bake patches a writable copy of the source GPOS bytes in place.
-//! Every `VariationIndex` resolution rounds the delta half away from
-//! zero (`add-0.5/subtract-0.5`, see [`round_delta`]). That is not the
-//! rule the core shaper applies to the same deltas, which rounds halves
-//! up as HarfBuzz's `roundf` (`floor(x + 0.5)`) does, nor fontTools'
-//! instancer's (`otRound`, also `floor(x + 0.5)`): a delta of exactly
-//! -n.5 bakes one unit below the value shaping the variable font gives.
-//! Saturating addition guards against ValueRecord field overflow on
-//! extreme coords.
+//! Every `VariationIndex` resolution rounds the delta halves up (see
+//! [`round_delta`]), as HarfBuzz's and fontTools' instancers and the
+//! HVAR, MVAR and BASE bakes do; the instancer passes the coordinates
+//! HarfBuzz's instancer resolves the store at. Saturating addition
+//! guards against ValueRecord field overflow on extreme coords.
 //!
 //! # Work limit
 //!
@@ -79,9 +76,7 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use sigilbuzz::tables::variation_store::ItemVariationStore;
-
-use crate::util::{WorkBudget, WORK_LIMIT};
+use crate::util::{StoreDeltas, WorkBudget, WORK_LIMIT};
 
 mod anchors;
 mod value_records;
@@ -97,18 +92,13 @@ use value_records::{walk_pair_pos, walk_single_pos};
 pub(crate) const VARIATION_INDEX_DELTA_FORMAT: u16 = 0x8000;
 
 /// Rounds the variation store's float delta to the nearest design-unit
-/// integer, halves away from zero. The core shaper's value records and
-/// anchors round the same deltas halves up, as HarfBuzz does, so the
-/// two differ on a delta of exactly -n.5 (see the module docs).
+/// integer, halves up, as HarfBuzz's instancer (`roundf`, which it
+/// defines as `floor (x + 0.5)`) and fontTools' (`otRound`) round the
+/// deltas they fold into GPOS values, anchors and GDEF carets.
 #[must_use]
 #[inline]
 fn round_delta(delta: f32) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
-    if delta >= 0.0 {
-        (delta + 0.5) as i32
-    } else {
-        (delta - 0.5) as i32
-    }
+    crate::util::round_half_up(delta)
 }
 
 fn read_u16(buf: &[u8], pos: usize) -> Option<u16> {
@@ -184,8 +174,7 @@ pub(crate) type SlotVisitor<'v> = dyn FnMut(&mut [u8], DeviceSlot) + 'v;
 pub(crate) fn fold_one_field(
     buf: &mut [u8],
     slot: DeviceSlot,
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
+    store: Option<&StoreDeltas<'_, '_>>,
 ) {
     let Some(target) = slot.target(buf) else {
         // Null slot: nothing to fold or sever.
@@ -208,7 +197,7 @@ pub(crate) fn fold_one_field(
     let Some(store) = store else {
         return;
     };
-    let scaled = round_delta(store.delta(outer, inner, coords));
+    let scaled = round_delta(store.get(outer, inner));
     let Some(field) = slot.field else {
         return;
     };
@@ -338,8 +327,9 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
 }
 
 /// Folds every supported `VariationIndex` in the source GPOS into the
-/// static field it adjusts at `coords` and zeros the offset slot.
-/// Lookup types we do not understand ride through verbatim.
+/// static field it adjusts, by the store `deltas` (at the instance's
+/// coordinates), and zeros the offset slot. Lookup types we do not
+/// understand ride through verbatim.
 ///
 /// Returns `Some(new_gpos_bytes)` when the source carries a parseable
 /// GPOS header, else `None` (caller passes through). The returned
@@ -348,12 +338,11 @@ pub(crate) fn walk_gpos_device_slots(gpos: &mut [u8], visit: &mut SlotVisitor<'_
 /// we zeroed change.
 pub(crate) fn bake_gpos_at_coords(
     gpos_bytes: &[u8],
-    store: Option<&ItemVariationStore<'_>>,
-    coords: &[f32],
+    deltas: Option<&StoreDeltas<'_, '_>>,
 ) -> Option<Vec<u8>> {
     let mut buf = gpos_bytes.to_vec();
     let walked = walk_gpos_device_slots(&mut buf, &mut |b, slot| {
-        fold_one_field(b, slot, store, coords);
+        fold_one_field(b, slot, deltas);
     });
     walked.then_some(buf)
 }

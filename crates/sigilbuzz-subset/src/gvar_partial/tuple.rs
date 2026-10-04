@@ -1,5 +1,6 @@
 //! Tuple variation header parsing plus the packed point number and
-//! packed delta codecs used by the partial `gvar` rewrite.
+//! packed delta codecs used by the partial `gvar` rewrite and the
+//! `cvar` bake.
 
 use alloc::vec::Vec;
 
@@ -10,16 +11,16 @@ use super::{
 use crate::SubsetError;
 
 #[derive(Debug, Clone)]
-pub(super) struct ParsedTupleHeader {
-    pub(super) variation_data_size: u16,
-    pub(super) tuple_index: u16,
-    pub(super) embedded_peak: Option<Vec<f32>>,
-    pub(super) intermediate_start: Option<Vec<f32>>,
-    pub(super) intermediate_end: Option<Vec<f32>>,
-    pub(super) private_point_numbers: bool,
+pub(crate) struct ParsedTupleHeader {
+    pub(crate) variation_data_size: u16,
+    pub(crate) tuple_index: u16,
+    pub(crate) embedded_peak: Option<Vec<f32>>,
+    pub(crate) intermediate_start: Option<Vec<f32>>,
+    pub(crate) intermediate_end: Option<Vec<f32>>,
+    pub(crate) private_point_numbers: bool,
 }
 
-pub(super) fn parse_tuple_header(
+pub(crate) fn parse_tuple_header(
     data: &[u8],
     axis_count: u16,
 ) -> Result<(ParsedTupleHeader, usize), SubsetError> {
@@ -82,11 +83,15 @@ pub(super) fn parse_tuple_header(
     ))
 }
 
-pub(super) fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
-    let raw = (v * 16384.0)
+pub(crate) fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
+    out.extend_from_slice(&f2dot14_raw(v).to_be_bytes());
+}
+
+/// The F2DOT14 bits [`write_f2dot14`] writes for `v`.
+pub(crate) fn f2dot14_raw(v: f32) -> i16 {
+    (v * 16384.0)
         .round()
-        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
-    out.extend_from_slice(&raw.to_be_bytes());
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +99,7 @@ pub(super) fn write_f2dot14(out: &mut Vec<u8>, v: f32) {
 // verbatim).
 // ---------------------------------------------------------------------------
 
-pub(super) fn packed_point_numbers_byte_len(data: &[u8]) -> Result<usize, SubsetError> {
+pub(crate) fn packed_point_numbers_byte_len(data: &[u8]) -> Result<usize, SubsetError> {
     if data.is_empty() {
         return Err(SubsetError::Unsupported("gvar partial: empty point block"));
     }
@@ -140,7 +145,7 @@ pub(super) fn packed_point_numbers_byte_len(data: &[u8]) -> Result<usize, Subset
     Ok(cursor)
 }
 
-pub(super) fn parse_packed_point_numbers(data: &[u8]) -> Result<Vec<u16>, SubsetError> {
+pub(crate) fn parse_packed_point_numbers(data: &[u8]) -> Result<Vec<u16>, SubsetError> {
     if data.is_empty() {
         return Err(SubsetError::Unsupported("gvar partial: empty point block"));
     }
@@ -200,7 +205,7 @@ pub(super) fn parse_packed_point_numbers(data: &[u8]) -> Result<Vec<u16>, Subset
 // Packed deltas (parser + emitter).
 // ---------------------------------------------------------------------------
 
-pub(super) fn read_packed_deltas_n(
+pub(crate) fn read_packed_deltas_n(
     data: &[u8],
     n: usize,
 ) -> Result<(Vec<i32>, usize), SubsetError> {
@@ -261,7 +266,7 @@ pub(super) fn read_packed_deltas_n(
 /// Counts how many packed deltas live in `data` (consumes the whole
 /// stream). Used to recover `n` for the all-points shortcut where
 /// the count comes from the outline rather than a point list.
-pub(super) fn count_packed_deltas(data: &[u8]) -> Result<usize, SubsetError> {
+pub(crate) fn count_packed_deltas(data: &[u8]) -> Result<usize, SubsetError> {
     let mut total = 0usize;
     let mut cursor = 0usize;
     // The all-points stream covers x then y deltas concatenated;
@@ -304,7 +309,7 @@ pub(super) fn count_packed_deltas(data: &[u8]) -> Result<usize, SubsetError> {
 /// smallest run encoding per chunk: ALL_ZERO for runs of zeros,
 /// i8 when every value fits in `[-128, 127]`, i16 otherwise. Each
 /// run covers up to 64 values (the spec's `DELTA_COUNT_MASK + 1`).
-pub(super) fn encode_packed_deltas(values: &[i32], out: &mut Vec<u8>) {
+pub(crate) fn encode_packed_deltas(values: &[i32], out: &mut Vec<u8>) {
     let mut i = 0usize;
     while i < values.len() {
         let v = values[i];

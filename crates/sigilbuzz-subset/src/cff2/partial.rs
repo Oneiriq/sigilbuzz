@@ -26,13 +26,13 @@ use crate::SubsetError;
 
 /// Per-source-subtable surviving slot info for the CFF2 partial-bake
 /// charstring rewrite.
-struct CffSubtableSurvivors {
+pub(super) struct CffSubtableSurvivors {
     /// New outer index in the trimmed VarStore.
-    new_outer: u16,
+    pub(super) new_outer: u16,
     /// Surviving slots in source-slot order: `(source_slot, scalar)`.
     /// Source delta at `source_slot` becomes `scalar * delta` in the
     /// rewritten blend.
-    surviving: alloc::vec::Vec<(u16, f32)>,
+    pub(super) surviving: alloc::vec::Vec<(u16, f32)>,
 }
 
 /// Re-emits a CFF2 table with its `VariationStore` partially trimmed
@@ -119,7 +119,7 @@ pub(crate) fn bake_cff2_partial(
         let local_subrs = parsed
             .per_fd_local_subrs
             .get(fd as usize)
-            .map(Vec::as_slice)
+            .map(|locals| locals.as_slice())
             .unwrap_or(&[]);
         let baked = rewriter.bake_charstring(cs, local_subrs)?;
         new_charstrings.push(baked);
@@ -132,21 +132,30 @@ pub(crate) fn bake_cff2_partial(
         font_dict_body: Vec<u8>,
         font_dict_private_slot: Option<(usize, usize)>,
         new_private_body: Vec<u8>,
+        /// An earlier Font DICT whose Private DICT this one shares.
+        shares: Option<usize>,
     }
     let mut fd_emits: Vec<FdEmit> = Vec::with_capacity(parsed.fd_array.len());
     for (i, fd_bytes) in parsed.fd_array.iter().enumerate() {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
-        let priv_entries = if parsed.per_fd_private[i].is_empty() {
+        // Its blends keep the regions the projected store keeps.
+        let shares = parsed.private_of.get(i).copied().filter(|&j| j != i);
+        let priv_entries = if parsed.per_fd_private[i].is_empty() || shares.is_some() {
             Vec::new()
         } else {
-            walk_dict(parsed.per_fd_private[i])?
+            super::private::project_private(
+                walk_dict(parsed.per_fd_private[i])?,
+                &src_ivs,
+                &survivors,
+            )?
         };
         let (new_private_body, _) = serialise_private_dict(&priv_entries, false);
         fd_emits.push(FdEmit {
             font_dict_body,
             font_dict_private_slot,
             new_private_body,
+            shares,
         });
     }
 
@@ -217,9 +226,20 @@ pub(crate) fn bake_cff2_partial(
     let mut per_fd_private_abs: Vec<usize> = Vec::with_capacity(fd_count);
     let mut per_fd_private_size: Vec<usize> = Vec::with_capacity(fd_count);
     for f in &fd_emits {
-        per_fd_private_abs.push(out.len());
-        per_fd_private_size.push(f.new_private_body.len());
-        out.extend_from_slice(&f.new_private_body);
+        // A shared Private DICT is written once, where its first Font
+        // DICT put it.
+        let earlier = f.shares.and_then(|j| {
+            per_fd_private_abs
+                .get(j)
+                .copied()
+                .zip(per_fd_private_size.get(j).copied())
+        });
+        let (abs, size) = earlier.unwrap_or((out.len(), f.new_private_body.len()));
+        if earlier.is_none() {
+            out.extend_from_slice(&f.new_private_body);
+        }
+        per_fd_private_abs.push(abs);
+        per_fd_private_size.push(size);
     }
 
     // VariationStore: 2-byte length prefix + new IVS body.
@@ -333,7 +353,9 @@ fn compute_subtable_survivors(
     let mut per_subtable: Vec<Option<CffSubtableSurvivors>> = Vec::with_capacity(subtable_count);
     let mut new_outer: u16 = 0;
     for &sub_off in &subtable_offsets {
-        let item_count = read_u16_at(ivs_bytes, sub_off)?;
+        // The subtable's header must be readable; its item count does
+        // not matter (see below).
+        read_u16_at(ivs_bytes, sub_off)?;
         let region_index_count = usize::from(read_u16_at(ivs_bytes, sub_off.checked_add(4)?)?);
         // The read above put `sub_off + 6` inside the data.
         let region_indexes = ivs_bytes
@@ -346,7 +368,9 @@ fn compute_subtable_survivors(
                 surviving.push((slot as u16, *scalar));
             }
         }
-        if item_count == 0 || surviving.is_empty() {
+        // A CFF2 subtable holds no rows: the charstrings carry its
+        // deltas. It survives while any of its regions does.
+        if surviving.is_empty() {
             per_subtable.push(None);
         } else {
             per_subtable.push(Some(CffSubtableSurvivors {

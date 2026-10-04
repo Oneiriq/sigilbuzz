@@ -98,7 +98,15 @@ fn has(bytes: &[u8], table: [u8; 4]) -> bool {
 /// `avar` (the shaper's space).
 fn wght_700() -> (Vec<f32>, Vec<f32>) {
     let face = Face::parse_bytes(NOTO_KR, 0).unwrap();
-    let normalized = face.fvar().unwrap().unwrap().normalize_coords(&[700.0]);
+    let normalized = face
+        .fvar()
+        .unwrap()
+        .unwrap()
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize([700.0].get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let shaper = face.avar().unwrap().unwrap().remap_all(&normalized);
     (normalized, shaper)
 }

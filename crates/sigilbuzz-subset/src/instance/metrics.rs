@@ -1,17 +1,18 @@
-//! The metric bakes of a full instance: hmtx through HVAR, vmtx and
-//! VORG through VVAR, and the OS/2, hhea, vhea and post fields MVAR
-//! varies.
+//! The metric bakes of an instance: hmtx and vmtx from the baked
+//! glyphs' phantom points (or, without `gvar`, through HVAR and VVAR),
+//! VORG through VVAR, the head bounding box and the hhea and vhea
+//! extremes, and the OS/2, hhea, vhea and post fields MVAR varies.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::tag;
-use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::Face;
 
-use super::glyf::clamp_i16;
+use super::glyf::{clamp_i16, GlyphMetrics};
 use crate::hmtx::emit_long_metrics;
 use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
+use crate::util::{round_half_up, StoreDeltas};
 use crate::warnings::Warnings;
 use crate::SubsetError;
 
@@ -24,27 +25,160 @@ pub(super) struct HmtxBake {
     pub(super) number_of_h_metrics: u16,
 }
 
+/// Builds `hmtx` from the metrics of the baked glyphs.
+pub(super) fn hmtx_from_metrics(metrics: &[GlyphMetrics]) -> HmtxBake {
+    let advances: Vec<u16> = metrics.iter().map(|m| m.advance).collect();
+    let lsbs: Vec<i16> = metrics.iter().map(|m| m.lsb).collect();
+    let (bytes, number_of_h_metrics) = emit_long_metrics(&advances, &lsbs);
+    HmtxBake {
+        bytes,
+        number_of_h_metrics,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// head bounding box and hhea / vhea extremes
+// ---------------------------------------------------------------------------
+
+/// Writes the union of the baked glyphs' bounding boxes into the `head`
+/// bytes (`xMin`, `yMin`, `xMax`, `yMax` at bytes 36 to 43). Glyphs
+/// with no outline do not count; when none has one, `head` keeps its
+/// box.
+pub(super) fn patch_head_bounds(head: &mut [u8], metrics: &[GlyphMetrics]) {
+    let mut boxes = metrics.iter().filter_map(|m| m.bounds);
+    let Some(first) = boxes.next() else {
+        return;
+    };
+    let union = boxes.fold(first, |u, b| {
+        [
+            u[0].min(b[0]),
+            u[1].min(b[1]),
+            u[2].max(b[2]),
+            u[3].max(b[3]),
+        ]
+    });
+    for (i, v) in union.iter().enumerate() {
+        write_i16(head, 36 + 2 * i, *v);
+    }
+}
+
+/// Writes the extremes of the baked metrics into `hhea` (`vertical`
+/// false) or `vhea` (`vertical` true), as HarfBuzz's instancer does:
+/// the largest advance (byte 10), then, over the glyphs with an
+/// outline, the smallest leading bearing (12), the smallest trailing
+/// bearing (14), and the largest extent, the leading bearing plus the
+/// outline's size (16). Without a glyph with an outline only the
+/// largest advance changes.
+pub(super) fn patch_line_extremes(table: &mut [u8], metrics: &[GlyphMetrics], vertical: bool) {
+    let advance = |m: &GlyphMetrics| if vertical { m.v_advance } else { m.advance };
+    let max_advance = metrics.iter().map(advance).max().unwrap_or(0);
+    write_u16(table, 10, max_advance);
+    let mut extremes: Option<(i32, i32, i32)> = None;
+    for m in metrics {
+        let Some([x_min, y_min, x_max, y_max]) = m.bounds else {
+            continue;
+        };
+        let (lead, size) = if vertical {
+            (i32::from(m.tsb), i32::from(y_max) - i32::from(y_min))
+        } else {
+            (i32::from(m.lsb), i32::from(x_max) - i32::from(x_min))
+        };
+        let trail = i32::from(advance(m)) - lead - size;
+        let extent = lead + size;
+        let e = extremes.get_or_insert((lead, trail, extent));
+        *e = (e.0.min(lead), e.1.min(trail), e.2.max(extent));
+    }
+    if let Some((lead, trail, extent)) = extremes {
+        write_i16(table, 12, clamp_i16(lead));
+        write_i16(table, 14, clamp_i16(trail));
+        write_i16(table, 16, clamp_i16(extent));
+    }
+}
+
+/// Writes a big-endian `i16` at `off` when the table is long enough.
+fn write_i16(buf: &mut [u8], off: usize, v: i16) {
+    if let Some(field) = buf.get_mut(off..).and_then(<[u8]>::first_chunk_mut::<2>) {
+        *field = v.to_be_bytes();
+    }
+}
+
+/// Writes a big-endian `u16` at `off` when the table is long enough.
+fn write_u16(buf: &mut [u8], off: usize, v: u16) {
+    if let Some(field) = buf.get_mut(off..).and_then(<[u8]>::first_chunk_mut::<2>) {
+        *field = v.to_be_bytes();
+    }
+}
+
+/// The deltas at `coords` of the store of the HVAR or VVAR `table` (the
+/// store offset sits at byte 4 of both), reporting a spent budget
+/// against `tag`; `None` when the store cannot be read.
+fn metrics_deltas<'s, 'a>(
+    table: &'a [u8],
+    coords: &'s [f32],
+    warnings: &'s Warnings,
+    tag: [u8; 4],
+) -> Option<StoreDeltas<'s, 'a>> {
+    let off = table.get(STORE_SLOT..).and_then(<[u8]>::first_chunk::<4>)?;
+    let store = table.get(u32::from_be_bytes(*off) as usize..)?;
+    StoreDeltas::new(store, coords).map(|d| d.reporting(warnings, tag))
+}
+
+/// The offset of the index map whose slot is at byte `slot` of `table`;
+/// 0 when there is none.
+fn map_offset(table: &[u8], slot: usize) -> usize {
+    table
+        .get(slot..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .map_or(0, |b| u32::from_be_bytes(*b) as usize)
+}
+
+/// The delta `deltas` gives glyph `gid` through the index map at
+/// `map_off` of `table`, as the core `HVAR` and `VVAR` readers give it:
+/// without a map, an advance reads row `(0, gid)` (`implicit`) and other
+/// metrics have none; a glyph the map does not name has none.
+fn glyph_delta(
+    deltas: &StoreDeltas<'_, '_>,
+    table: &[u8],
+    map_off: usize,
+    gid: u16,
+    implicit: bool,
+) -> f32 {
+    if map_off == 0 {
+        return if implicit { deltas.get(0, gid) } else { 0.0 };
+    }
+    read_index_map(table, map_off, gid).map_or(0.0, |(outer, inner)| deltas.get(outer, inner))
+}
+
 pub(super) fn bake_hmtx(
     face: &Face<'_>,
     coords: &[f32],
     num_glyphs: u16,
+    warnings: &Warnings,
 ) -> Result<HmtxBake, SubsetError> {
     let hmtx = face.hmtx().map_err(SubsetError::from)?;
     let hvar = face.hvar().map_err(SubsetError::from)?;
+    // Many glyphs can map to one row; each row is resolved once.
+    let hvar_bytes = hvar
+        .as_ref()
+        .and_then(|_| face.table_bytes(tag::HVAR).ok())
+        .filter(|_| !coords.is_empty());
+    let deltas = hvar_bytes.and_then(|b| metrics_deltas(b, coords, warnings, tag::HVAR));
+    let advance_map = hvar_bytes.map_or(0, |b| map_offset(b, 8));
 
     let mut advances: Vec<u16> = Vec::with_capacity(num_glyphs as usize);
     let mut lsbs: Vec<i16> = Vec::with_capacity(num_glyphs as usize);
     for gid in 0..num_glyphs {
         let base_adv = hmtx.advance(gid).unwrap_or(0);
         let base_lsb = hmtx.lsb(gid).unwrap_or(0);
-        let adv_delta = match hvar.as_ref() {
-            Some(h) if !coords.is_empty() => h.advance_delta(gid, coords),
+        let adv_delta = match (&deltas, hvar_bytes) {
+            (Some(d), Some(b)) => glyph_delta(d, b, advance_map, gid, true),
             _ => 0.0,
         };
         // hmtx advances are unsigned; clamp at 0 if a delta would
         // underflow. In practice this only happens with malformed
         // HVAR data.
-        let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
+        // The delta rounds halves up before it is added, as in HarfBuzz.
+        let new_adv = i32::from(base_adv).saturating_add(round_half_up(adv_delta));
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
         lsbs.push(base_lsb);
     }
@@ -90,7 +224,8 @@ impl VmtxBake {
 }
 
 /// Rebuilds `vmtx` with the `VVAR` advance height and top side bearing
-/// deltas at `coords` folded in.
+/// deltas at `coords` folded in, or, when `baked` holds the metrics of
+/// the baked glyphs, from their vertical phantom points instead.
 ///
 /// A malformed `vhea` or `vmtx` is left out with its partner, and a
 /// malformed `VVAR` is left out and its deltas not applied, as the
@@ -101,6 +236,7 @@ pub(super) fn bake_vmtx(
     face: &Face<'_>,
     coords: &[f32],
     num_glyphs: u16,
+    baked: Option<&[GlyphMetrics]>,
     warnings: &Warnings,
 ) -> VmtxBake {
     // Parse `vhea` on its own first, so a problem there is reported
@@ -120,6 +256,18 @@ pub(super) fn bake_vmtx(
         }
     };
 
+    // The baked glyphs' phantom points give the metrics directly.
+    if let Some(baked) = baked {
+        let advances: Vec<u16> = baked.iter().map(|m| m.v_advance).collect();
+        let tsbs: Vec<i16> = baked.iter().map(|m| m.tsb).collect();
+        let (out, long_count) = emit_long_metrics(&advances, &tsbs);
+        return VmtxBake {
+            vmtx_bytes: Some(out),
+            number_of_long_ver_metrics: long_count,
+            left_out: Vec::new(),
+        };
+    }
+
     let mut left_out = Vec::new();
     let vvar = face.vvar().unwrap_or_else(|e| {
         warnings.parse_error(tag::VVAR, 0, &e, "the whole table");
@@ -135,20 +283,27 @@ pub(super) fn bake_vmtx(
     // shared one extends the long range below.
     let mut advances: Vec<u16> = Vec::with_capacity(num_glyphs as usize);
     let mut tsbs: Vec<i16> = Vec::with_capacity(num_glyphs as usize);
+    // Many glyphs can map to one row; each row is resolved once.
+    let vvar_bytes = vvar
+        .as_ref()
+        .and_then(|_| face.table_bytes(tag::VVAR).ok())
+        .filter(|_| !coords.is_empty());
+    let deltas = vvar_bytes.and_then(|b| metrics_deltas(b, coords, warnings, tag::VVAR));
+    let (advance_map, tsb_map) =
+        vvar_bytes.map_or((0, 0), |b| (map_offset(b, 8), map_offset(b, 12)));
     for gid in 0..num_glyphs {
         let base_adv = vmtx.advance(gid).unwrap_or(0);
         let base_tsb = vmtx.tsb(gid).unwrap_or(0);
-        let adv_delta = match vvar.as_ref() {
-            Some(v) if !coords.is_empty() => v.advance_height_delta(gid, coords),
-            _ => 0.0,
+        let (adv_delta, tsb_delta) = match (&deltas, vvar_bytes) {
+            (Some(d), Some(b)) => (
+                glyph_delta(d, b, advance_map, gid, true),
+                glyph_delta(d, b, tsb_map, gid, false),
+            ),
+            _ => (0.0, 0.0),
         };
-        let tsb_delta = match vvar.as_ref() {
-            Some(v) if !coords.is_empty() => v.top_side_bearing_delta(gid, coords).unwrap_or(0.0),
-            _ => 0.0,
-        };
-        let new_adv = (f32::from(base_adv) + adv_delta).round().max(0.0) as i32;
+        let new_adv = i32::from(base_adv).saturating_add(round_half_up(adv_delta));
         advances.push(new_adv.clamp(0, i32::from(u16::MAX)) as u16);
-        let new_tsb = (f32::from(base_tsb) + tsb_delta).round() as i32;
+        let new_tsb = i32::from(base_tsb).saturating_add(round_half_up(tsb_delta));
         tsbs.push(clamp_i16(new_tsb));
     }
 
@@ -214,7 +369,10 @@ pub(super) fn bake_vorg(
         return VorgBake::Unchanged;
     }
     let store_off = offset_at(STORE_SLOT);
-    let store = match vvar_bytes.get(store_off..).map(ItemVariationStore::parse) {
+    let store = match vvar_bytes
+        .get(store_off..)
+        .map(|b| sigilbuzz::tables::variation_store::ItemVariationStore::parse(b).map(|_| b))
+    {
         Some(Ok(store)) => store,
         Some(Err(e)) => {
             warnings.parse_error(tag::VVAR, store_off, &e, "the vertical origin deltas");
@@ -230,10 +388,11 @@ pub(super) fn bake_vorg(
             return VorgBake::Unchanged;
         }
     };
-    let delta = |gid: u16| {
-        read_index_map(vvar_bytes, map_off, gid)
-            .map_or(0.0, |(outer, inner)| store.delta(outer, inner, coords))
+    let Some(deltas) = StoreDeltas::new(store, coords).map(|d| d.reporting(warnings, tag::VORG))
+    else {
+        return VorgBake::Unchanged;
     };
+    let delta = |gid: u16| glyph_delta(&deltas, vvar_bytes, map_off, gid, false);
     match crate::vorg::bake_vorg(vorg_bytes, num_glyphs, delta) {
         Ok(bytes) => VorgBake::Rebuilt(bytes),
         Err(e) => {
@@ -371,7 +530,7 @@ pub(super) fn apply_mvar_records(
         if !seen.insert(rec_tag) {
             continue;
         }
-        let delta = store.delta(outer, inner, coords).round() as i32;
+        let delta = round_half_up(store.delta(outer, inner, coords));
         if delta == 0 {
             continue;
         }

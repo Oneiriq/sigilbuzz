@@ -201,3 +201,66 @@ pub(super) fn bake_avar_partial(avar_bytes: &[u8], pins: &[AxisPin]) -> Option<V
     }
     Some(out)
 }
+
+// ---------------------------------------------------------------------------
+// avar in F2DOT14 units
+// ---------------------------------------------------------------------------
+
+/// The segment maps of an `avar` version 1 table, each axis' pairs in
+/// F2DOT14 units; `None` when the table cannot be read.
+pub(super) fn avar_segment_maps(avar_bytes: &[u8]) -> Option<Vec<Vec<(i32, i32)>>> {
+    let u16_at = |at: usize| {
+        avar_bytes
+            .get(at..at.checked_add(2)?)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    };
+    if u16_at(0)? != 1 {
+        return None;
+    }
+    let axis_count = usize::from(u16_at(6)?);
+    let mut cursor = 8usize;
+    let mut maps = Vec::with_capacity(axis_count.min(avar_bytes.len() / 2));
+    for _ in 0..axis_count {
+        let count = usize::from(u16_at(cursor)?);
+        cursor += 2;
+        let mut map = Vec::with_capacity(count.min(avar_bytes.len() / 4));
+        for _ in 0..count {
+            let from = i32::from(u16_at(cursor)? as i16);
+            let to = i32::from(u16_at(cursor + 2)? as i16);
+            map.push((from, to));
+            cursor += 4;
+        }
+        maps.push(map);
+    }
+    Some(maps)
+}
+
+/// `value` (F2DOT14 units) through one axis' segment `map`, as
+/// HarfBuzz maps its instancer's axis locations: outside the map and on
+/// its points by the nearest pair's shift, between two points by
+/// linear interpolation in single precision, rounded halves up.
+pub(super) fn map_f2dot14(map: &[(i32, i32)], value: i32) -> i32 {
+    let Some(&first) = map.first() else {
+        return value;
+    };
+    if map.len() < 2 {
+        return value - first.0 + first.1;
+    }
+    if value <= first.0 {
+        return value - first.0 + first.1;
+    }
+    let mut i = 1;
+    while i < map.len() - 1 && value > map[i].0 {
+        i += 1;
+    }
+    let (prev, next) = (map[i - 1], map[i]);
+    if value >= next.0 {
+        return value - next.0 + next.1;
+    }
+    if prev.0 == next.0 {
+        return prev.1;
+    }
+    let denom = (next.0 - prev.0) as f32;
+    let mapped = prev.1 as f32 + ((next.1 - prev.1) as f32 * (value - prev.0) as f32) / denom;
+    crate::util::round_half_up(mapped)
+}

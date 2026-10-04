@@ -533,3 +533,42 @@ fn bake_at_coords_rejects_callsubr_operand_past_i32() {
     let r = bake_at_coords(&cff, &[1.0]);
     assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
 }
+
+#[test]
+fn bakes_write_a_shared_private_dict_once() {
+    // 255 Font DICTs name one Private DICT of 1,001 bytes. Both bakes
+    // read it once and write it once, and every Font DICT points at
+    // that copy, so the output stays the size of the input rather than
+    // holding 255 copies.
+    let mut private: Vec<u8> = alloc::vec![139u8; 1000];
+    private.push(6); // BlueValues
+    let cs: &[u8] = &[139, 139, 21];
+    let charstrings: Vec<&[u8]> = alloc::vec![cs; 255];
+    let fd_select: Vec<u8> = (0..=254).collect();
+    let ivs = build_ivs2_for_cff2(
+        &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
+        &[(alloc::vec![0], alloc::vec![])],
+    );
+    let cff = build_synthetic_cff2_sharing(&charstrings, &fd_select, Some(&ivs), Some(&private));
+    let parsed = parse_cff2(&cff).expect("source parses");
+    assert!(parsed.private_of.iter().all(|&j| j == 0));
+    assert!(parsed
+        .per_fd_local_subrs
+        .iter()
+        .all(|l| alloc::rc::Rc::ptr_eq(l, &parsed.per_fd_local_subrs[0])));
+    let full = bake_at_coords(&cff, &[0.5, 0.5]).expect("full bake");
+    let partial =
+        bake_cff2_partial(&cff, &[1.0, 0.0], &[AxisPin::Pin, AxisPin::Keep]).expect("partial bake");
+    for out in [&full, &partial] {
+        let baked = parse_cff2(out).expect("bake parses");
+        assert_eq!(baked.fd_array.len(), 255);
+        assert!(baked.private_of.iter().all(|&j| j == 0), "one Private DICT");
+        assert_eq!(baked.per_fd_private[254].len(), private.len());
+        assert!(
+            out.len() < cff.len() + 64,
+            "{} bytes from {}",
+            out.len(),
+            cff.len()
+        );
+    }
+}

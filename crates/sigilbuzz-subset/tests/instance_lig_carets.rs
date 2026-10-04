@@ -51,7 +51,14 @@ fn instanced_carets_absorb_their_variation_deltas() {
     let store = gdef.item_variation_store().expect("Rubik has a store");
     let mut moved = false;
     for wght in [650.0f32, 900.0] {
-        let coords = face.fvar().unwrap().unwrap().normalize_coords(&[wght]);
+        let coords: Vec<f32> = face
+            .fvar()
+            .unwrap()
+            .unwrap()
+            .axes()
+            .iter()
+            .map(|a| a.normalize(wght))
+            .collect();
         let input = InstanceInput {
             coords: coords.clone(),
             drop_var_tables: true,
@@ -60,18 +67,28 @@ fn instanced_carets_absorb_their_variation_deltas() {
         let out = instance(&face, &input).expect("instance succeeds");
         let baked_face = Face::parse_bytes(&out.bytes, 0).unwrap();
         let baked = carets(baked_face.table_bytes(tag::GDEF).unwrap());
-        // The store is evaluated in the post-avar space.
-        let coords = match face.avar().unwrap() {
+        // As in HarfBuzz's instancer, the store is evaluated at the
+        // coordinates put on the F2DOT14 grid, mapped through avar and
+        // put on the grid again, and deltas round halves up.
+        let coords: Vec<f32> = coords
+            .iter()
+            .map(|c| (c * 16384.0 + 0.5).floor() / 16384.0)
+            .collect();
+        let coords: Vec<f32> = match face.avar().unwrap() {
             Some(avar) => avar.remap_all(&coords),
             None => coords,
-        };
+        }
+        .iter()
+        .map(|c| (c * 16384.0 + 0.5).floor() / 16384.0)
+        .collect();
         let expected: Vec<Vec<Caret>> = source
             .iter()
             .map(|lig| {
                 lig.iter()
                     .map(|&(format, coord, device)| {
-                        let delta =
-                            device.map(|(outer, inner)| store.delta(outer, inner, &coords).round());
+                        let delta = device.map(|(outer, inner)| {
+                            (store.delta(outer, inner, &coords) + 0.5).floor()
+                        });
                         let shift = delta.unwrap_or(0.0) as i16;
                         moved |= shift != 0;
                         (format, coord + shift, None)
@@ -82,4 +99,39 @@ fn instanced_carets_absorb_their_variation_deltas() {
         assert_eq!(baked, expected, "wght={wght}");
     }
     assert!(moved, "expected some caret to move with weight");
+}
+
+#[test]
+fn carets_match_harfbuzz_where_the_rounded_coordinate_would_tie() {
+    // At wght 350 and 850 Rubik's avar maps the coordinates between
+    // F2DOT14 steps. Mapped and then rounded once, the `fi` caret's
+    // delta is 13.5 at 350 and the `uniFEF9` caret's is -14.5 at 850.
+    // HarfBuzz 14.5's instancer also rounds to the grid before avar,
+    // which lands one step lower at 350 and one higher at 850, just
+    // under and just past those halves, and gives these carets.
+    let face = Face::parse_bytes(RUBIK, 0).unwrap();
+    // LigCaretList coverage indexes: 3 is `fi`, 11 is `uniFEF9`.
+    for (wght, fi, lam_alef) in [(350.0f32, 261, 333), (850.0, 379, 319)] {
+        let coords: Vec<f32> = face
+            .fvar()
+            .unwrap()
+            .unwrap()
+            .axes()
+            .iter()
+            .map(|a| a.normalize(wght))
+            .collect();
+        let input = InstanceInput {
+            coords,
+            drop_var_tables: true,
+            axis_pins: Vec::new(),
+        };
+        let out = instance(&face, &input).expect("instance succeeds");
+        let baked_face = Face::parse_bytes(&out.bytes, 0).unwrap();
+        let baked = carets(baked_face.table_bytes(tag::GDEF).unwrap());
+        assert_eq!(
+            (baked[3][0].1, baked[11][0].1),
+            (fi, lam_alef),
+            "wght={wght}"
+        );
+    }
 }

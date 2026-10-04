@@ -3,6 +3,7 @@
 
 use super::*;
 
+mod glyph_bake;
 mod gpos_bake;
 
 const RUBIK: &[u8] = include_bytes!("../../../../tests/fixtures/rubik_vf.ttf");
@@ -75,7 +76,12 @@ fn instance_at_extreme_coords_matches_outline_at_coords() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -108,7 +114,12 @@ fn instance_advances_match_hvar_eval_at_coords() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -221,7 +232,12 @@ fn source_sans_round_trip_at_extreme_coord_matches_source_outline() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -336,7 +352,12 @@ fn rubik_mvar_bake_applies_undo_delta_to_post_underline_position() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
 
     let mvar = face.mvar().unwrap().expect("rubik has MVAR");
     let undo_delta = mvar
@@ -402,4 +423,37 @@ fn rubik_vmtx_passthrough_when_source_has_none() {
     let baked = Face::parse_bytes(&out.bytes, 0).expect("baked face parses");
     assert!(baked.vmtx().unwrap().is_none(), "vmtx not synthesised");
     assert!(baked.vvar().unwrap().is_none(), "VVAR not synthesised");
+}
+
+#[test]
+fn outline_and_plan_coordinates_round_the_way_harfbuzz_does() {
+    // -0.9 is -14745.6 F2DOT14 steps. A HarfBuzz font rounds it to 16.16
+    // first (-58982, which is -14745.5 steps) and then up to -14745; the
+    // instancer's plan rounds it straight to -14746.
+    assert_eq!(
+        super::snap_f2dot14(super::round_16_16(-0.9)) * 16384.0,
+        -14745.0
+    );
+    assert_eq!(super::f2dot14_grid(-0.9), -14746);
+    // Values on the grid stay put either way.
+    assert_eq!(super::snap_f2dot14(super::round_16_16(0.5)), 0.5);
+    assert_eq!(super::f2dot14_grid(0.5), 8192);
+}
+
+#[test]
+fn avar_maps_f2dot14_units_rounding_halves_up() {
+    use super::axes::map_f2dot14;
+    let map = [(-16384, -16384), (-2, -1), (0, 0), (2, 1), (16384, 16384)];
+    // Halfway between map points rounds up, either side of zero.
+    assert_eq!(map_f2dot14(&map, 1), 1);
+    assert_eq!(map_f2dot14(&map, -1), 0);
+    // On a map point, its value.
+    assert_eq!(map_f2dot14(&map, 2), 1);
+    // Past the ends, shifted by the nearest pair.
+    let short = [(-8192, -4096), (8192, 4096)];
+    assert_eq!(map_f2dot14(&short, 9000), 4904);
+    assert_eq!(map_f2dot14(&short, -9000), -4904);
+    // No map, or a single pair, shifts.
+    assert_eq!(map_f2dot14(&[], 77), 77);
+    assert_eq!(map_f2dot14(&[(10, 20)], 77), 87);
 }

@@ -7,31 +7,76 @@
 //! legacy print pipelines, test feeds that expect static fonts) can use as
 //! though the source had been designed at the chosen instance.
 //!
+//! # Coordinates
+//!
+//! The normalized coordinates go through `avar` and land on the
+//! F2DOT14 grid, as HarfBuzz and fontTools place them: the instance is
+//! baked where a renderer draws the variable font.
+//!
 //! # What lands on the static side
 //!
-//! - `glyf` simple-glyph outlines have their contour points shifted by
-//!   the gvar deltas at the requested coords. The simple-glyph header,
-//!   contour count, endPtsOfContours, and on-curve flag stream are
-//!   rebuilt from the absolute, baked points; the per-point coordinate
-//!   stream is re-encoded with the spec's flag-driven SHORT / SAME
-//!   compression.
-//! - `glyf` composite components are passed through with their gids
-//!   remapped through the identity (instancing keeps every glyph) and
-//!   their per-component translations preserved verbatim. Composite
-//!   variation (`WE_HAVE_VARIATION` / point-anchor deltas) is not
-//!   resynthesized on this pass: gvar's composite-glyph contribution
-//!   is conservatively dropped.
-//! - `hmtx` is rebuilt with each gid's advance + lsb adjusted by the
-//!   HVAR deltas at the requested coords (rounded to the nearest
-//!   integer per the OpenType spec for design-unit metrics).
+//! The `glyf` bake follows HarfBuzz's instancer (see the `glyf`
+//! submodule):
+//!
+//! - A simple glyph's points move by their gvar deltas at the
+//!   coordinates, the points a tuple skips inferred from those it lists
+//!   (IUP). The coordinate streams are re-encoded with the spec's
+//!   flag-driven SHORT / SAME compression. Hinting instructions ride
+//!   through unchanged, with the `cvt `, `fpgm` and `prep` they use, as
+//!   HarfBuzz keeps them unless asked to drop hinting.
+//! - The `cvar` deltas at the coordinates are added to `cvt `, which
+//!   those instructions read (see the `cvar` submodule).
+//! - A composite glyph's components placed by offset move by their
+//!   deltas, and their arguments widen to words when the moved offset
+//!   no longer fits a byte. Components placed by matching points keep
+//!   their records.
+//! - The bounding box in each glyph header is recomputed.
+//! - `hmtx` (and `vmtx` when the source has one) takes each glyph's
+//!   advance and side bearing from its four phantom points moved by
+//!   their deltas, and `head`'s bounding box and the extremes in `hhea`
+//!   (and `vhea`) follow from the baked glyphs. A font without `gvar`
+//!   keeps its outlines and folds the `HVAR` (and `VVAR`) deltas into
+//!   the advances instead.
+//! - `BASE` coordinates varied through its store move by their deltas
+//!   and the store goes (see [`crate::base::instance_base`]).
+//!
+//! Every value rounds to the nearest unit, halves up, as HarfBuzz and
+//! fontTools round: outlines, metrics, `cvt `, `BASE`, `MVAR`, and the
+//! `GPOS` and `GDEF` deltas. (CFF2 charstrings and their store keep
+//! their own rounding.)
+//!
+//! # Coordinates
+//!
+//! HarfBuzz's instancer reaches the post-`avar` coordinates two ways,
+//! and the bake takes each table's from the way HarfBuzz does (see
+//! [`F2Dot14`]):
+//!
+//! - The outline coordinates: each normalized value rounded to 16.16,
+//!   mapped through `avar`, rounded to 16.16 again and then to F2DOT14,
+//!   as a HarfBuzz font set to the instance places them. The outlines
+//!   and the metrics their phantom points give (`glyf`, `hmtx`, `vmtx`,
+//!   `VORG`, `head`, `hhea`, `vhea`), the `HVAR` and `VVAR` advances of
+//!   a font without `gvar`, and CFF2 charstrings take these. A partial
+//!   instance bakes its new default outlines and metrics at them too.
+//! - The plan coordinates: each normalized value rounded to F2DOT14,
+//!   mapped through `avar` in F2DOT14 units, then rounded again, as
+//!   HarfBuzz's instancer plans its axis locations. The `GDEF` store
+//!   (and so the `GPOS` values, anchors and ligature carets that vary
+//!   through it), `cvar`, `BASE`, `MVAR` and the FeatureVariations
+//!   choice take these, and a partial instance projects every variation
+//!   table (`gvar`, `HVAR`, `VVAR`, `MVAR`, `GDEF`, `BASE`, `cvar`,
+//!   `CFF2`) onto its kept axes at them.
+//!
+//! The two differ by one F2DOT14 step where the rounding lands on
+//! different sides, which moves a delta by a unit now and then.
 //!
 //! # What gets dropped (or kept verbatim)
 //!
 //! When [`InstanceInput::drop_var_tables`] is true (the recommended
 //! default for the "ship as static" workflow):
 //!
-//! - `fvar`, `avar`, `gvar`, `HVAR`, `VVAR`, `MVAR` are dropped from
-//!   the directory.
+//! - `fvar`, `avar`, `gvar`, `cvar`, `HVAR`, `VVAR`, `MVAR` are
+//!   dropped from the directory.
 //! - `GDEF` keeps every subtable but its `ItemVariationStore`, which is
 //!   pruned once the GPOS bake (see below) and the LigCaretList caret
 //!   fold have resolved every `VariationIndex` that pointed into it.
@@ -110,16 +155,21 @@
 //! # Partial instancing
 //!
 //! When [`InstanceInput::axis_pins`] keeps some axes variable, the
-//! bake emits a reduced-axis variable font instead. `gvar` goes through
-//! [`crate::gvar_partial::bake_gvar_partial`] and the CFF2 VarStore
-//! through [`crate::cff2::bake_cff2_partial`].
+//! bake emits a reduced-axis variable font instead. As in HarfBuzz's
+//! instancer, the default of a `glyf` font moves to the pinned location
+//! (the kept axes at their defaults): `glyf`, `hmtx`, `vmtx` and `VORG`
+//! are baked there, and the gvar tuples and `HVAR` / `VVAR` regions
+//! left on the pinned axes only go. `gvar` goes through
+//! [`crate::gvar_partial::bake_gvar_partial_with`], which merges tuples
+//! that land on the same region, and the CFF2 VarStore through
+//! [`crate::cff2::bake_cff2_partial`].
 //!
 //! # Determinism
 //!
 //! Output is byte-deterministic for a given input face + coord vector.
 //! No `HashMap` iteration touches the output; gids walk in order, the
 //! SFNT directory is sorted by tag at emission, and every floating-
-//! point round happens through `f32::round()` so the same inputs always
+//! point value rounds through a fixed rule, so the same inputs always
 //! hit the same integer.
 
 use alloc::vec::Vec;
@@ -128,6 +178,7 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 mod axes;
+mod cvar;
 mod gdef_store;
 mod glyf;
 mod ivs;
@@ -137,23 +188,33 @@ mod partial;
 mod region;
 mod store_remap;
 
+use crate::base::BaseBake;
 use crate::sfnt;
 use crate::util;
 use crate::warnings::Warnings;
 use crate::{SubsetError, SubsetWarning};
-use gdef_store::{prune_gdef_store, GdefBake};
-use glyf::bake_glyf_loca;
-use metrics::{bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, VorgBake};
+use gdef_store::{gdef_deltas, prune_gdef_store, GdefBake};
+use glyf::{bake_glyf_loca, GlyfLocaBake, GlyphMetrics};
+use metrics::{
+    bake_hmtx, bake_mvar_metrics, bake_vmtx, bake_vorg, hmtx_from_metrics, patch_head_bounds,
+    patch_line_extremes, MvarBake, VmtxBake, VorgBake,
+};
 use partial::{layout_variations, partial_instance, pinned_axes};
 
-pub(crate) use ivs::bake_ivs_partial;
+pub(crate) use ivs::{bake_ivs_partial, project_ivs_with, PinnedOnly, Projection, RegionRemap};
 pub(crate) use region::project_region_onto_kept_axes;
 
-/// F2DOT14 normalized axis coordinate. Matches the on-disk encoding the
-/// VF spec uses: a signed 2.14 fixed-point in the range `[-1.0, 1.0]`,
-/// where `0` is the axis default and `±1` is the extreme. Callers
-/// usually obtain the vector by feeding user-space coords through
-/// [`sigilbuzz::tables::Fvar::normalize_coords`].
+/// A normalized axis coordinate in `[-1.0, 1.0]`, where `0` is the axis
+/// default and `-1` and `1` its extremes, before `avar`.
+///
+/// Pass each axis' unrounded normalized value, as
+/// [`sigilbuzz::tables::VariationAxis::normalize`] gives it. The
+/// instancer rounds it itself, the two ways HarfBuzz's instancer does
+/// for different tables (see the module docs): to 16.16 before `avar`
+/// and to F2DOT14 after it for the outlines and glyph metrics, and to
+/// F2DOT14 both before and after `avar` for the other variation tables.
+/// A value rounded before it gets here can land one F2DOT14 step away
+/// from HarfBuzz's and move outlines, advances or deltas by a unit.
 pub type F2Dot14 = f32;
 
 /// Per-axis pin policy for partial instancing.
@@ -182,8 +243,8 @@ pub enum AxisPin {
 /// Inputs to [`instance`].
 #[derive(Debug, Clone)]
 pub struct InstanceInput {
-    /// Per-axis normalized F2DOT14 coords. Length must match
-    /// `face.fvar()`'s axis count.
+    /// Per-axis normalized coords, unrounded, before `avar` (see
+    /// [`F2Dot14`]). Length must match `face.fvar()`'s axis count.
     pub coords: Vec<F2Dot14>,
     /// If true (the recommended setting), drop `fvar` / `avar` /
     /// `HVAR` / `gvar` from the output. The font becomes static:
@@ -295,72 +356,30 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // Apply avar's piecewise-linear remap if the source ships one. The
     // shaper's coord-space is post-avar, so the deltas we apply must
     // come from the same space.
-    let coords: Vec<f32> = match face.avar().map_err(SubsetError::from)? {
-        Some(av) => av.remap_all(&input.coords),
-        None => input.coords.clone(),
-    };
+    let coords = post_avar(face, &input.coords)?;
+    // The GPOS, GDEF, cvt, BASE and MVAR bakes and the FeatureVariations
+    // choice take the plan coordinates (see `plan_coords`); the outlines
+    // and glyph metrics take `coords`.
+    let plan = plan_coords(face, &input.coords)?;
 
     if face.record(tag::CFF2).is_some() {
-        return cff2_bake(face, input, &coords);
+        return cff2_bake(face, input, &coords, &plan);
     }
-
-    let maxp = face.maxp()?;
-    let num_glyphs = maxp.num_glyphs;
 
     let warnings = Warnings::default();
 
-    // glyf + loca bake.
-    let glyf_loca = bake_glyf_loca(face, &coords, num_glyphs)?;
-
-    // hmtx + hhea bake. HVAR deltas fold in here; gids without HVAR
-    // entries carry their default-instance metrics through unchanged.
-    let hmtx_out = bake_hmtx(face, &coords, num_glyphs)?;
-
-    // vmtx bake (when the source carries vmtx). VVAR deltas fold in
-    // here; vmtx-without-VVAR rides through unchanged. The VVAR
-    // vertical origin deltas fold into VORG.
-    let vmtx_bake_result = bake_vmtx(face, &coords, num_glyphs, &warnings);
-    let vorg_bake = bake_vorg(face, &coords, num_glyphs, &warnings);
-
     // MVAR-aware bake of OS/2, hhea, post, vhea (when MVAR is present).
-    let mvar_bake = bake_mvar_metrics(face, &coords)?;
+    let mvar_bake = bake_mvar_metrics(face, &plan)?;
 
-    // head: pass through, only patching indexToLocFormat to match the
-    // bake's chosen loca format.
-    let head_bytes = face.table_bytes(tag::HEAD).map_err(SubsetError::from)?;
-    let mut head_out = head_bytes.to_vec();
-    util::write_index_to_loc_format(&mut head_out, glyf_loca.long_loca);
+    // glyf, loca, and the metrics their phantom points give: hmtx,
+    // vmtx, and the head, hhea and vhea fields that follow from them.
+    // maxp passes through verbatim (instancing keeps every gid).
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+    let glyf_bake = push_glyf_tables(face, &coords, &mvar_bake, &warnings, &mut tables)?;
+    let vmtx_bake_result = glyf_bake.vmtx;
 
-    // hhea: start from MVAR-baked bytes (when MVAR carries vlgp etc.,
-    // those ride through MVAR; for hhea-relevant tags the bake patches
-    // OS/2 not hhea: hhea gets the metrics-count patch unconditionally
-    // via util::write_hhea_metrics_count below).
-    let mut hhea_out = match mvar_bake.hhea.clone() {
-        Some(bytes) => bytes,
-        None => face
-            .table_bytes(tag::HHEA)
-            .map_err(SubsetError::from)?
-            .to_vec(),
-    };
-    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
-
-    // maxp: pass through verbatim (glyph count is unchanged: instancing
-    // keeps every gid).
-    let maxp_out = face
-        .table_bytes(tag::MAXP)
-        .map_err(SubsetError::from)?
-        .to_vec();
-
-    // Assemble the directory.
-    let mut tables: Vec<([u8; 4], Vec<u8>)> = alloc::vec![
-        (tag::HEAD, head_out),
-        (tag::HHEA, hhea_out),
-        (tag::MAXP, maxp_out),
-        (tag::HMTX, hmtx_out.bytes),
-        (tag::LOCA, glyf_loca.loca),
-        (tag::GLYF, glyf_loca.glyf),
-    ];
-    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, &mut tables)?;
+    // The VVAR vertical origin deltas fold into VORG.
+    let vorg_bake = bake_vorg(face, &coords, glyf_bake.num_glyphs, &warnings);
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
@@ -374,17 +393,17 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // GPOS variation bake: when the source carries GPOS variations
     // (VariationIndex offsets on value records and anchors), fold
     // every resolvable variation into the static field it adjusts at
-    // `coords` and zero the offset slot. Runs *before* the
+    // the plan coordinates and zero the offset slot. Runs *before* the
     // GDEF.IVS prune below. The prune severs the only path back to
     // the IVS bytes, so any remaining VariationIndex would be orphan.
     let gpos_baked = if input.drop_var_tables {
-        bake_gpos_var(face, &coords)?
+        bake_gpos_var(face, &plan, &warnings)?
     } else {
         None
     };
     // FeatureVariations: the record that matches at `coords` becomes
     // the default features, and the table goes.
-    let pinned = pinned_axes(&coords, &[]);
+    let pinned = pinned_axes(&plan, &[]);
     let gpos_baked = layout_variations(face, tag::GPOS, gpos_baked, &pinned, &[], &warnings)?;
     if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &[], &warnings)? {
         tables.push((tag::GSUB, b));
@@ -397,12 +416,25 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     // caller wants the static "ship as static" output, prune it. See
     // module header for the GPOS-bake-then-IVS-prune ordering.
     let gdef_bake = if input.drop_var_tables {
-        prune_gdef_store(face, &coords, &warnings)?
+        prune_gdef_store(face, &plan, &warnings)?
     } else {
         GdefBake::Unchanged
     };
     if let GdefBake::Rebuilt(b) = &gdef_bake {
         tables.push((tag::GDEF, b.clone()));
+    }
+
+    // BASE: the coordinates its store varies move to the instance.
+    let base_bake = if input.drop_var_tables {
+        push_base(face, &plan, &[], &warnings, &mut tables)
+    } else {
+        BaseBake::Unchanged
+    };
+
+    // cvt: the cvar deltas at the instance, which the glyph
+    // instructions read.
+    if let Some(cvt) = cvar::bake_cvt(face, &plan, &[], &warnings).and_then(|b| b.cvt) {
+        tables.push((cvar::CVT, cvt));
     }
 
     // Carry every other table through verbatim, with a drop list for
@@ -414,7 +446,7 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         if input.drop_var_tables
             && matches!(
                 rec.tag,
-                tag::FVAR | tag::AVAR | tag::GVAR | tag::HVAR | tag::VVAR | tag::MVAR
+                tag::FVAR | tag::AVAR | tag::GVAR | cvar::CVAR | tag::HVAR | tag::VVAR | tag::MVAR
             )
         {
             continue;
@@ -422,6 +454,9 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
         // GDEF was handled above (either pruned or dropped from the
         // pruning path).
         if rec.tag == tag::GDEF && !matches!(gdef_bake, GdefBake::Unchanged) {
+            continue;
+        }
+        if rec.tag == tag::BASE && base_bake == BaseBake::Dropped {
             continue;
         }
         // GPOS was handled above when the variation bake produced a
@@ -447,16 +482,182 @@ pub fn instance(face: &Face<'_>, input: &InstanceInput) -> Result<InstancedOutpu
     })
 }
 
+/// The outline coordinates of the normalized `coords`: rounded to 16.16,
+/// mapped through `avar`, rounded to 16.16 again, then put on the
+/// F2DOT14 grid, as a HarfBuzz font set to the instance places them
+/// (`hb_ot_var_normalize_coords`). HarfBuzz's instancer bakes the
+/// outlines, and the advances `HVAR` and `VVAR` give, at these.
+fn post_avar(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
+    let fixed: Vec<f32> = coords.iter().map(|&v| round_16_16(v)).collect();
+    let mapped = match face.avar().map_err(SubsetError::from)? {
+        Some(av) => av.remap_all(&fixed),
+        None => fixed,
+    };
+    Ok(mapped
+        .into_iter()
+        .map(|v| snap_f2dot14(round_16_16(v)))
+        .collect())
+}
+
+/// `v` rounded to 16.16, halves up, after clamping to the normalized
+/// range. A non-finite value becomes zero.
+fn round_16_16(v: f32) -> f32 {
+    if !v.is_finite() {
+        return 0.0;
+    }
+    util::round_half_up(v.clamp(-1.0, 1.0) * 65536.0) as f32 / 65536.0
+}
+
+/// The plan coordinates of the normalized `coords`: put on the F2DOT14
+/// grid, mapped through `avar` in F2DOT14 units, and rounded again, as
+/// HarfBuzz's instancer normalizes its axis locations. It resolves the
+/// `GDEF` store (which `GPOS` values, anchors and ligature carets vary
+/// through), `cvar`, `BASE` and `MVAR`, and pins the axes of a partial
+/// instance, at these rather than at the [`post_avar`] ones. They differ
+/// by a step where `avar` maps a coordinate between grid points.
+fn plan_coords(face: &Face<'_>, coords: &[f32]) -> Result<Vec<f32>, SubsetError> {
+    // A malformed avar fails here as it fails `post_avar`.
+    let has_avar = face.avar().map_err(SubsetError::from)?.is_some();
+    let maps = if has_avar {
+        face.table_bytes(tag::AVAR)
+            .ok()
+            .and_then(axes::avar_segment_maps)
+    } else {
+        None
+    };
+    Ok(coords
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let on_grid = i32::from(f2dot14_grid(v));
+            let mapped = maps
+                .as_ref()
+                .and_then(|m| m.get(i))
+                .map_or(on_grid, |map| axes::map_f2dot14(map, on_grid));
+            f32::from(glyf::clamp_i16(mapped.clamp(-16384, 16384))) / 16384.0
+        })
+        .collect())
+}
+
+/// `v` in F2DOT14 units, rounded halves up, after clamping to the
+/// normalized range. A non-finite value becomes zero.
+fn f2dot14_grid(v: f32) -> i16 {
+    if !v.is_finite() {
+        return 0;
+    }
+    glyf::clamp_i16(util::round_half_up(v.clamp(-1.0, 1.0) * 16384.0))
+}
+
+/// `v` on the F2DOT14 grid, rounded to nearest (halves up) and clamped to
+/// the normalized range. A non-finite value becomes zero.
+fn snap_f2dot14(v: f32) -> f32 {
+    f32::from(f2dot14_grid(v)) / 16384.0
+}
+
+/// Applies the `BASE` variations at the post-avar `coords` (see
+/// [`crate::base::instance_base`]; `pins` as there) and pushes the
+/// rebuilt table onto `tables`.
+fn push_base(
+    face: &Face<'_>,
+    coords: &[f32],
+    pins: &[AxisPin],
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) -> BaseBake {
+    let bake = crate::base::instance_base(face, coords, pins, warnings);
+    if let BaseBake::Rebuilt(b) = &bake {
+        tables.push((tag::BASE, b.clone()));
+    }
+    bake
+}
+
+/// What [`push_glyf_tables`] baked besides the tables it pushed.
+struct GlyfTablesBake {
+    /// The glyf bake, for the partial instance's `gvar` rewrite.
+    glyf: GlyfLocaBake,
+    /// The vertical metrics bake, naming the tables it left out.
+    vmtx: VmtxBake,
+    /// The font's glyph count.
+    num_glyphs: u16,
+}
+
+/// Bakes the glyphs of a `glyf` font at the post-avar `coords` and
+/// pushes `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf`, and the
+/// vertical metrics onto `tables`.
+///
+/// With `gvar`, the advances and side bearings come from the baked
+/// glyphs' phantom points and bounds, and so do the `head` bounding box
+/// and the `hhea` and `vhea` extremes. Without it, the outlines stay,
+/// `HVAR` and `VVAR` deltas fold into the advances, and `head` keeps
+/// its box. `hhea` and `vhea` start from `mvar_bake`'s copies when
+/// `MVAR` varies them.
+fn push_glyf_tables(
+    face: &Face<'_>,
+    coords: &[f32],
+    mvar_bake: &MvarBake,
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) -> Result<GlyfTablesBake, SubsetError> {
+    let num_glyphs = face.maxp()?.num_glyphs;
+    let glyf_loca = bake_glyf_loca(face, coords, num_glyphs, warnings)?;
+    let baked = glyf_loca.metrics.as_deref();
+    let hmtx_out = match baked {
+        Some(m) => hmtx_from_metrics(m),
+        None => bake_hmtx(face, coords, num_glyphs, warnings)?,
+    };
+    let vmtx = bake_vmtx(face, coords, num_glyphs, baked, warnings);
+
+    // head: the loca format the bake chose, and the new bounding box.
+    let mut head_out = face
+        .table_bytes(tag::HEAD)
+        .map_err(SubsetError::from)?
+        .to_vec();
+    util::write_index_to_loc_format(&mut head_out, glyf_loca.long_loca);
+    // hhea: the long metrics count the new hmtx needs, and its extremes.
+    let mut hhea_out = match mvar_bake.hhea.clone() {
+        Some(bytes) => bytes,
+        None => face
+            .table_bytes(tag::HHEA)
+            .map_err(SubsetError::from)?
+            .to_vec(),
+    };
+    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
+    if let Some(m) = baked {
+        patch_head_bounds(&mut head_out, m);
+        patch_line_extremes(&mut hhea_out, m, false);
+    }
+    let maxp_out = face
+        .table_bytes(tag::MAXP)
+        .map_err(SubsetError::from)?
+        .to_vec();
+    tables.extend([
+        (tag::HEAD, head_out),
+        (tag::HHEA, hhea_out),
+        (tag::MAXP, maxp_out),
+        (tag::HMTX, hmtx_out.bytes),
+        (tag::LOCA, glyf_loca.loca.clone()),
+        (tag::GLYF, glyf_loca.glyf.clone()),
+    ]);
+    push_vertical_metrics(face, &vmtx, mvar_bake, baked, tables)?;
+    Ok(GlyfTablesBake {
+        glyf: glyf_loca,
+        vmtx,
+        num_glyphs,
+    })
+}
+
 /// Appends the rebuilt `vmtx` with `vhea` (MVAR-baked when `MVAR`
 /// varies it) patched to its `numberOfLongVerMetrics`, which may
 /// extend the long range to cover VVAR-induced trailing-advance
-/// differences. Without a rebuilt `vmtx`, appends an MVAR-baked `vhea`
-/// unless the bake left `vhea` out; an unbaked one rides through with
-/// the other tables.
+/// differences, and, when `baked` holds the baked glyphs' metrics, to
+/// their extremes. Without a rebuilt `vmtx`, appends an MVAR-baked
+/// `vhea` unless the bake left `vhea` out; an unbaked one rides through
+/// with the other tables.
 fn push_vertical_metrics(
     face: &Face<'_>,
-    vmtx_bake: &metrics::VmtxBake,
-    mvar_bake: &metrics::MvarBake,
+    vmtx_bake: &VmtxBake,
+    mvar_bake: &MvarBake,
+    baked: Option<&[GlyphMetrics]>,
     tables: &mut Vec<([u8; 4], Vec<u8>)>,
 ) -> Result<(), SubsetError> {
     if let Some(vmtx_bytes) = vmtx_bake.vmtx_bytes.clone() {
@@ -469,6 +670,9 @@ fn push_vertical_metrics(
                 .to_vec(),
         };
         util::write_vhea_metrics_count(&mut vhea_out, vmtx_bake.number_of_long_ver_metrics)?;
+        if let Some(m) = baked {
+            patch_line_extremes(&mut vhea_out, m, true);
+        }
         tables.push((tag::VHEA, vhea_out));
     } else if !vmtx_bake.left_out.contains(&tag::VHEA) {
         if let Some(vhea_bytes) = mvar_bake.vhea.clone() {
@@ -478,13 +682,15 @@ fn push_vertical_metrics(
     Ok(())
 }
 
-/// CFF2 path: rebuild the CFF2 table with `blend` resolved at `coords`,
+/// CFF2 path: rebuild the CFF2 table with `blend` resolved at the outline
+/// `coords` (the MVAR, layout and BASE bakes take the `plan` ones),
 /// then assemble a fresh SFNT directory mirroring the glyf path's
 /// hmtx/vmtx/MVAR bakes and GDEF.IVS prune.
 fn cff2_bake(
     face: &Face<'_>,
     input: &InstanceInput,
     coords: &[f32],
+    plan: &[f32],
 ) -> Result<InstancedOutput, SubsetError> {
     let maxp = face.maxp()?;
     let num_glyphs = maxp.num_glyphs;
@@ -493,10 +699,10 @@ fn cff2_bake(
     let cff2_bytes = face.table_bytes(tag::CFF2).map_err(SubsetError::from)?;
     let new_cff2 = crate::cff2::bake_at_coords(cff2_bytes, coords)?;
 
-    let hmtx_out = bake_hmtx(face, coords, num_glyphs)?;
-    let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, &warnings);
+    let hmtx_out = bake_hmtx(face, coords, num_glyphs, &warnings)?;
+    let vmtx_bake_result = bake_vmtx(face, coords, num_glyphs, None, &warnings);
     let vorg_bake = bake_vorg(face, coords, num_glyphs, &warnings);
-    let mvar_bake = bake_mvar_metrics(face, coords)?;
+    let mvar_bake = bake_mvar_metrics(face, plan)?;
 
     let head_out = face
         .table_bytes(tag::HEAD)
@@ -524,7 +730,7 @@ fn cff2_bake(
         (tag::HMTX, hmtx_out.bytes),
         (tag::CFF2, new_cff2),
     ];
-    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, &mut tables)?;
+    push_vertical_metrics(face, &vmtx_bake_result, &mvar_bake, None, &mut tables)?;
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
@@ -536,11 +742,11 @@ fn cff2_bake(
     }
 
     let gpos_baked = if input.drop_var_tables {
-        bake_gpos_var(face, coords)?
+        bake_gpos_var(face, plan, &warnings)?
     } else {
         None
     };
-    let pinned = pinned_axes(coords, &[]);
+    let pinned = pinned_axes(plan, &[]);
     let gpos_baked = layout_variations(face, tag::GPOS, gpos_baked, &pinned, &[], &warnings)?;
     if let Some(b) = layout_variations(face, tag::GSUB, None, &pinned, &[], &warnings)? {
         tables.push((tag::GSUB, b));
@@ -550,13 +756,19 @@ fn cff2_bake(
     }
 
     let gdef_bake = if input.drop_var_tables {
-        prune_gdef_store(face, coords, &warnings)?
+        prune_gdef_store(face, plan, &warnings)?
     } else {
         GdefBake::Unchanged
     };
     if let GdefBake::Rebuilt(b) = &gdef_bake {
         tables.push((tag::GDEF, b.clone()));
     }
+
+    let base_bake = if input.drop_var_tables {
+        push_base(face, plan, &[], &warnings, &mut tables)
+    } else {
+        BaseBake::Unchanged
+    };
 
     for rec in face.records() {
         if tables.iter().any(|(t, _)| *t == rec.tag) {
@@ -571,6 +783,9 @@ fn cff2_bake(
             continue;
         }
         if rec.tag == tag::GDEF && !matches!(gdef_bake, GdefBake::Unchanged) {
+            continue;
+        }
+        if rec.tag == tag::BASE && base_bake == BaseBake::Dropped {
             continue;
         }
         if rec.tag == tag::GPOS && gpos_baked.is_some() {
@@ -637,15 +852,21 @@ fn cff1_passthrough(
 /// The bake reads its `ItemVariationStore` from the *source* GDEF, not
 /// from a re-parsed copy, so it sees every region the source uses
 /// before the prune sever the path.
-fn bake_gpos_var(face: &Face<'_>, coords: &[f32]) -> Result<Option<Vec<u8>>, SubsetError> {
+fn bake_gpos_var(
+    face: &Face<'_>,
+    coords: &[f32],
+    warnings: &Warnings,
+) -> Result<Option<Vec<u8>>, SubsetError> {
     let gpos_bytes = match face.table_bytes(tag::GPOS) {
         Ok(b) => b,
         Err(_) => return Ok(None),
     };
-    let gdef = face.gdef().map_err(SubsetError::from)?;
-    let store = gdef.as_ref().and_then(|g| g.item_variation_store());
+    // Many value records and anchors can name one row; each row is
+    // resolved once.
+    let deltas = gdef_deltas(face, coords, warnings, tag::GPOS)?;
     Ok(crate::gpos_var::bake_gpos_at_coords(
-        gpos_bytes, store, coords,
+        gpos_bytes,
+        deltas.as_ref(),
     ))
 }
 

@@ -92,6 +92,31 @@ fn mvar_long_word_delta_saturates_the_patched_field() {
 }
 
 #[test]
+fn mvar_half_deltas_round_up() {
+    // Halfway along the region, a delta of -5 is -2.5. It rounds up,
+    // as HarfBuzz and fontTools round it: 800 - 2.5 is 798, where
+    // rounding away from zero would give 797.
+    let ivs = one_region_ivs(1, &[-5], false);
+    let mut mvar: Vec<u8> = Vec::new();
+    mvar.extend_from_slice(&1u16.to_be_bytes()); // major
+    mvar.extend_from_slice(&0u16.to_be_bytes()); // minor
+    mvar.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    mvar.extend_from_slice(&8u16.to_be_bytes()); // valueRecordSize
+    mvar.extend_from_slice(&1u16.to_be_bytes()); // valueRecordCount
+    mvar.extend_from_slice(&20u16.to_be_bytes()); // itemVariationStoreOffset
+    mvar.extend_from_slice(b"hasc");
+    mvar.extend_from_slice(&0u16.to_be_bytes()); // outer
+    mvar.extend_from_slice(&0u16.to_be_bytes()); // inner
+    mvar.extend_from_slice(&ivs);
+    let mvar = sigilbuzz::tables::Mvar::parse(&mvar).expect("MVAR");
+    let mut os2 = alloc::vec![0u8; 96];
+    os2[68..70].copy_from_slice(&800i16.to_be_bytes());
+    let baked = apply_mvar_records(&mvar, &[0.5], Some(os2), None, None, None).unwrap();
+    let out = baked.os2.unwrap();
+    assert_eq!(i16::from_be_bytes([out[68], out[69]]), 798);
+}
+
+#[test]
 fn mvar_with_many_records_is_walked_in_linear_time() {
     // 65535 distinct unrecognized tags and no variation store. A
     // per-record scan of every earlier record is quadratic.
@@ -116,8 +141,8 @@ fn mvar_with_many_records_is_walked_in_linear_time() {
 #[test]
 fn simple_glyph_with_many_points_bakes_in_linear_time() {
     // One contour of 65535 points, every flag repeated, every
-    // coordinate "same as previous", and one delta per point. A
-    // per-point scan of the delta list is quadratic.
+    // coordinate "same as previous", and one delta per point. A bake
+    // that rescans the deltas per point is quadratic.
     let last_point: u16 = u16::MAX - 1;
     let total = usize::from(last_point) + 1;
     let mut body: Vec<u8> = Vec::new();
@@ -133,13 +158,7 @@ fn simple_glyph_with_many_points_bakes_in_linear_time() {
         body.push((run - 1) as u8);
         remaining -= run;
     }
-    let deltas: Vec<sigilbuzz::tables::PointDelta> = (0..=last_point)
-        .map(|point| sigilbuzz::tables::PointDelta {
-            point,
-            dx: 1.0,
-            dy: 0.0,
-        })
-        .collect();
+    let deltas: Vec<(f32, f32)> = alloc::vec![(1.0, 0.0); total];
     let baked = bake_simple_glyph(&body, &deltas).expect("bake");
     // Every point moved by +1 on x: the new bbox is (1, 0, 1, 0).
     assert_eq!(&baked[2..10], &[0, 1, 0, 0, 0, 1, 0, 0]);

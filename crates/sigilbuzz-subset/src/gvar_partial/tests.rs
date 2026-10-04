@@ -332,15 +332,35 @@ fn shared_tuple_projection_is_not_repeated_per_tuple() {
 
 #[test]
 fn tuple_headers_past_the_u16_data_offset_are_rejected() {
-    // 4095 tuples point at one shared tuple, so their headers take
-    // 16 KB. Each survives with 16 Keep axes, and the rewrite embeds
-    // its peak, which needs 147 KB of headers: past what the u16
-    // dataOffset can address. The offset used to be truncated,
-    // which corrupted the glyph.
+    // 4095 tuples each point at a shared tuple of their own, so their
+    // headers take 16 KB. Each survives with 16 Keep axes and a region
+    // of its own, so none merge, and the rewrite embeds the peaks,
+    // which needs 147 KB of headers: past what the u16 dataOffset can
+    // address. The offset used to be truncated, which corrupted the
+    // glyph.
     const AXES: usize = 17;
-    let shared: Vec<u8> = 0x4000i16.to_be_bytes().repeat(AXES); // every peak 1.0
-                                                                // All-points deltas: one zero for x, one for y.
-    let body = body_of_shared_tuples(0x0FFF, &[DELTA_ALL_ZERO, DELTA_ALL_ZERO]);
+    const TUPLES: u16 = 0x0FFF;
+    // Shared tuple `i` peaks at 1.0 on every axis but axis 1, where it
+    // peaks at its own `(i + 1) / 16384`.
+    let mut shared: Vec<u8> = Vec::new();
+    for i in 0..TUPLES {
+        for axis in 0..AXES {
+            let peak: i16 = if axis == 1 { i as i16 + 1 } else { 0x4000 };
+            shared.extend_from_slice(&peak.to_be_bytes());
+        }
+    }
+    // All-points deltas for a glyph of one point: x 1, y 1.
+    let tuple_data = [0x00, 1, 0x00, 1];
+    let mut body = Vec::new();
+    body.extend_from_slice(&TUPLES.to_be_bytes());
+    body.extend_from_slice(&(4 + 4 * TUPLES).to_be_bytes()); // dataOffset
+    for i in 0..TUPLES {
+        body.extend_from_slice(&(tuple_data.len() as u16).to_be_bytes());
+        body.extend_from_slice(&i.to_be_bytes()); // shared tuple i
+    }
+    for _ in 0..TUPLES {
+        body.extend_from_slice(&tuple_data);
+    }
     let gvar = gvar_with_offsets(AXES as u16, &shared, &[0, body.len() as u32], &body);
     let mut pins = alloc::vec![AxisPin::Keep; AXES];
     pins[0] = AxisPin::Pin;
@@ -376,4 +396,103 @@ fn glyphs_sharing_one_data_range_are_rejected() {
     let pins = [AxisPin::Pin, AxisPin::Keep];
     let r = bake_gvar_partial(&gvar, &[1.0, 0.0], &pins, 1);
     assert!(matches!(r, Err(SubsetError::Unsupported(_))), "{r:?}");
+}
+
+#[test]
+fn drifting_sparse_tuples_are_rewritten_within_the_work_budget() {
+    // One glyph of 2,000 collinear points whose default points move
+    // unevenly, and 600 sparse tuples on the kept axis, each listing
+    // the two end points. Every tuple drifts, and writing one with
+    // every point costs 3 x 2,004 units of work: the budget covers
+    // some of them, and the rest keep their two points.
+    const POINTS: u16 = 2000;
+    const TUPLES: u16 = 600;
+    let mut tuple = vec![2, 0x81];
+    tuple.extend_from_slice(&0u16.to_be_bytes());
+    tuple.extend_from_slice(&(POINTS - 1).to_be_bytes());
+    tuple.extend_from_slice(&[0x01, 0, 90, 0x01, 0, 60]);
+    let mut body = Vec::new();
+    body.extend_from_slice(&TUPLES.to_be_bytes());
+    body.extend_from_slice(&(4 + 8 * TUPLES).to_be_bytes());
+    for k in 0..TUPLES {
+        body.extend_from_slice(&(tuple.len() as u16).to_be_bytes());
+        body.extend_from_slice(&0xA000u16.to_be_bytes()); // peak, private points
+        body.extend_from_slice(&0i16.to_be_bytes()); // wght
+        body.extend_from_slice(&(16384 - k as i16).to_be_bytes()); // opsz
+    }
+    for _ in 0..TUPLES {
+        body.extend_from_slice(&tuple);
+    }
+    let gvar = gvar_with_offsets(2, &[], &[0, body.len() as u32], &body);
+    let before: Vec<(i32, i32)> = (0..i32::from(POINTS)).map(|i| (i, 0)).collect();
+    let after: Vec<(i32, i32)> = before
+        .iter()
+        .map(|&(x, y)| (x + if x % 2 == 0 { 40 } else { -40 }, y))
+        .collect();
+    let points = |_| {
+        Some(GlyphPoints {
+            end_pts: vec![POINTS - 1],
+            before: before.clone(),
+            after: Some(after.clone()),
+        })
+    };
+    let warnings = Warnings::default();
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let out =
+        bake_gvar_partial_with(&gvar, &[1.0, 0.0], &pins, 1, &points, &warnings).expect("bake");
+    // Read back each tuple's data size: the dense ones are large.
+    let data_off = u32::from_be_bytes([out[16], out[17], out[18], out[19]]) as usize;
+    let glyph = &out[data_off..];
+    let count = usize::from(u16::from_be_bytes([glyph[0], glyph[1]]) & 0x0FFF);
+    let sizes: Vec<usize> = (0..count)
+        .map(|i| usize::from(u16::from_be_bytes([glyph[4 + 6 * i], glyph[5 + 6 * i]])))
+        .collect();
+    let dense = sizes.iter().filter(|&&s| s > 100).count();
+    let budget = gvar.len() as u64 * WORK_PER_BYTE + MIN_WORK;
+    let per_dense = 3 * u64::from(POINTS + 4);
+    assert_eq!(count, usize::from(TUPLES));
+    assert_eq!(dense as u64, budget / per_dense);
+    assert!(dense < usize::from(TUPLES));
+    let warnings = warnings.into_sorted();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.context.contains("tuples keep their points")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn a_glyph_past_the_decoding_budget_loses_its_variations() {
+    // 40 tuples on the kept axis, each covering every point with 500
+    // bytes of zero runs per stream: 32,000 deltas a stream, 64 per
+    // byte. Decoding them all takes more than the 40 KB table may
+    // decode, so the glyph keeps no variations, and says so.
+    const TUPLES: u16 = 40;
+    let mut tuple = vec![0xBFu8; 500]; // x: 500 runs of 64 zeros
+    tuple.extend(vec![0xBFu8; 500]); // y
+    let mut body = Vec::new();
+    body.extend_from_slice(&TUPLES.to_be_bytes());
+    body.extend_from_slice(&(4 + 8 * TUPLES).to_be_bytes());
+    for _ in 0..TUPLES {
+        body.extend_from_slice(&(tuple.len() as u16).to_be_bytes());
+        body.extend_from_slice(&0x8000u16.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&16384i16.to_be_bytes());
+    }
+    for _ in 0..TUPLES {
+        body.extend_from_slice(&tuple);
+    }
+    let gvar = gvar_with_offsets(2, &[], &[0, body.len() as u32], &body);
+    let decoding = u64::from(TUPLES) * (2 * 32_000 + 1);
+    assert!(decoding > gvar.len() as u64 * DECODE_PER_BYTE + MIN_DECODE);
+    let warnings = Warnings::default();
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let out =
+        bake_gvar_partial_with(&gvar, &[1.0, 0.0], &pins, 1, &|_| None, &warnings).expect("bake");
+    let parsed = ParsedGvar::parse(&out).expect("parses");
+    assert!(parsed.glyph_deltas(0, &[1.0], 32_004).is_empty());
+    let warnings = warnings.into_sorted();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].context, OVER_BUDGET);
 }

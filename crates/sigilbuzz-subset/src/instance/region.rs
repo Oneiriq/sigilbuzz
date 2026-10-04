@@ -39,8 +39,10 @@ use super::AxisPin;
 /// trivially small.
 ///
 /// Returns `1.0` when the axis does not participate in the tuple
-/// (peak == 0 with the spec's "axis ignored" convention) and `0.0`
-/// when `coord` falls outside `[start, end]`.
+/// (peak == 0 with the spec's "axis ignored" convention), or when its
+/// region is invalid (start past the peak, the peak past the end, or a
+/// region that crosses zero), which the spec and HarfBuzz ignore too;
+/// and `0.0` when `coord` falls outside `[start, end]`.
 #[must_use]
 pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
     // Hardening (#185): any non-finite input returns 0. The axis is
@@ -52,6 +54,9 @@ pub(crate) fn axis_support_scalar(start: f32, peak: f32, end: f32, coord: f32) -
     }
     // Spec: peak of zero means the axis does not participate.
     if peak == 0.0 {
+        return 1.0;
+    }
+    if start > peak || peak > end || (start < 0.0 && end > 0.0) {
         return 1.0;
     }
     if (coord - peak).abs() < f32::EPSILON {
