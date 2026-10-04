@@ -65,12 +65,19 @@ impl<'a> LookupList<'a> {
     /// Returns the lookup at `index`, or `None` when out of range.
     #[must_use]
     pub fn get(&self, index: u16) -> Option<Lookup<'a>> {
+        Lookup::parse_at(self.data, self.lookup_offset(index)?).ok()
+    }
+
+    /// The offset of lookup `index` from the start of the list, or
+    /// `None` when out of range. Lookup indices with the same offset
+    /// name the same lookup.
+    #[must_use]
+    pub(crate) fn lookup_offset(&self, index: u16) -> Option<u16> {
         if index >= self.lookup_count {
             return None;
         }
         let off = self.offsets_off + index as usize * 2;
-        let lookup_off = u16::from_be_bytes([self.data[off], self.data[off + 1]]);
-        Lookup::parse_at(self.data, lookup_off).ok()
+        Some(u16::from_be_bytes([self.data[off], self.data[off + 1]]))
     }
 }
 

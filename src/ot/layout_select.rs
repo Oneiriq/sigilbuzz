@@ -1197,28 +1197,18 @@ mod tests {
         for data in fonts {
             let face = Face::parse_bytes(data, 0).unwrap();
             for gsub in [true, false] {
-                let (script_list, list, variations, count) = if gsub {
+                let (script_list, list, variations, lookups) = if gsub {
                     let Some(t) = face.gsub().unwrap() else {
                         continue;
                     };
                     let v = t.feature_variations().ok().flatten();
-                    (
-                        *t.script_list(),
-                        *t.feature_list(),
-                        v,
-                        t.lookup_list().len(),
-                    )
+                    (*t.script_list(), *t.feature_list(), v, *t.lookup_list())
                 } else {
                     let Some(t) = face.gpos().unwrap() else {
                         continue;
                     };
                     let v = t.feature_variations().ok().flatten();
-                    (
-                        *t.script_list(),
-                        *t.feature_list(),
-                        v,
-                        t.lookup_list().len(),
-                    )
+                    (*t.script_list(), *t.feature_list(), v, *t.lookup_list())
                 };
                 let table = if gsub {
                     LayoutTable::Gsub
@@ -1236,7 +1226,7 @@ mod tests {
                 tags.extend(unknown);
                 for record in records {
                     let features = ActiveFeatures::new(list, record);
-                    let cache = LayoutCache::new(table, count, 1 << 20);
+                    let cache = LayoutCache::new(table, &lookups, 1 << 20);
                     for languages in languages {
                         let walk = LayoutView {
                             script_list,
