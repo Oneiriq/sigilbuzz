@@ -19,7 +19,7 @@
 //! `NotoSansKR-Calt-Subset.ttf` adds a `calt` lookup that turns `a` into
 //! `c` and U+1100 into U+1101 (see `tests/fonts/README.md`).
 
-use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Direction, Face, Font, UnicodeScript};
+use sigilbuzz::{shape, Blob, Buffer, ClusterLevel, Direction, Face, Feature, Font, UnicodeScript};
 
 const CALT: &[u8] = include_bytes!("fonts/NotoSansKR-Calt-Subset.ttf");
 const TONE: &[u8] = include_bytes!("fonts/NotoSansKR-HangulTone-Subset.ttf");
@@ -401,6 +401,87 @@ fn hangul_mixed_with_other_scripts_shapes_as_in_harfbuzz() {
                 "{:?} ({:?}) at {level:?}",
                 case.text,
                 case.script
+            );
+        }
+    }
+}
+
+/// Glyph id, cluster, y advance, x offset, y offset.
+type VerticalRow = (u32, u32, i32, i32, i32);
+
+/// The [`VerticalRow`]s of `text` in vertical text with `features`.
+/// With `guess`, the buffer guesses its script; without, sigilbuzz
+/// splits the text into script runs.
+fn vertical_rows(text: &str, guess: bool, features: &[Feature]) -> Vec<VerticalRow> {
+    let blob = Blob::new(CALT);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let mut buffer = Buffer::new();
+    buffer.push_str(text);
+    if guess {
+        buffer.guess_segment_properties();
+    }
+    buffer.set_direction(Direction::Ttb);
+    buffer.set_cluster_level(ClusterLevel::MonotoneGraphemes);
+    shape(&font, &buffer, features)
+        .expect("shape")
+        .glyphs
+        .iter()
+        .map(|g| (g.glyph_id, g.cluster, g.y_advance, g.x_offset, g.y_offset))
+        .collect()
+}
+
+#[test]
+fn vertical_hangul_applies_calt_when_the_caller_turns_it_on() {
+    // In vertical text HarfBuzz's Hangul shaper has only the `calt` of
+    // `override_features_hangul`, which has no value: it applies to no
+    // glyph, unless the caller turns `calt` on. Then it applies to every
+    // glyph but jamo, as in horizontal text, so `a` turns into `c`
+    // (glyph 4) and U+1100 stays as it is. sigilbuzz used to ignore the
+    // caller's `calt` there.
+    let on = [Feature {
+        tag: *b"calt",
+        value: 1,
+    }];
+    let cases: [(&str, &[Feature], [VerticalRow; 2]); 6] = [
+        (
+            "\u{AC00}a",
+            &[],
+            [(14, 0, -1448, -460, -1099), (2, 3, -1448, -281, -996)],
+        ),
+        (
+            "\u{AC00}a",
+            &on,
+            [(14, 0, -1448, -460, -1099), (4, 3, -1448, -255, -996)],
+        ),
+        (
+            "\u{1100}a",
+            &[],
+            [(7, 0, -1448, -460, -1299), (2, 3, -1448, -281, -996)],
+        ),
+        (
+            "\u{1100}a",
+            &on,
+            [(7, 0, -1448, -460, -1299), (4, 3, -1448, -255, -996)],
+        ),
+        // A Latin buffer applies the caller's `calt` too.
+        (
+            "a\u{AC00}",
+            &[],
+            [(2, 0, -1448, -281, -996), (14, 1, -1448, -460, -1099)],
+        ),
+        (
+            "a\u{AC00}",
+            &on,
+            [(4, 0, -1448, -255, -996), (14, 1, -1448, -460, -1099)],
+        ),
+    ];
+    for (text, features, expected) in cases {
+        for guess in [true, false] {
+            assert_eq!(
+                vertical_rows(text, guess, features),
+                expected,
+                "{text:?} {features:?} guess={guess}"
             );
         }
     }

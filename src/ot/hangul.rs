@@ -7,7 +7,8 @@
 //! `calt` applies to every glyph but jamo (`override_features_hangul`
 //! gives it a mask and `setup_masks_hangul` clears it on jamo, because
 //! some fonts put all their jamo lookups in `calt`). Vertical text gets
-//! `vert` instead of the horizontal defaults, and no `calt`.
+//! `vert` instead of the horizontal defaults, and `calt` only when the
+//! caller turns it on, still off jamo.
 //!
 //! The preprocessing itself (composition, decomposition, and the tone
 //! marks) runs on the characters, before normalization, in
@@ -16,8 +17,8 @@
 use alloc::vec::Vec;
 
 use super::syllabic::stage::{
-    add_user_features, apply_alternate_feature, apply_stage, FeatureFlags as F, MapFeature,
-    StageFeature, GLOBAL_MASK,
+    add_user_features, apply_alternate_feature, apply_stage, user_disabled, FeatureFlags as F,
+    MapFeature, StageFeature, GLOBAL_MASK,
 };
 use super::syllabic::GlyphInfo;
 use crate::buffer::Glyph;
@@ -173,8 +174,18 @@ pub(crate) fn shape(
             StageFeature::of(f, bit)
         }))
         .collect();
-    // In vertical text `calt` has a mask bit no glyph gets, so the
-    // caller cannot turn it on either.
+    // In vertical text HarfBuzz's map only has the `calt` of
+    // `override_features_hangul`, which has no value, so no glyph gets
+    // its mask bit unless the caller turns `calt` on. Then every glyph
+    // but the jamo gets it, as in horizontal text.
+    let calt_on = run
+        .features
+        .iter()
+        .any(|f| f.tag == *b"calt" && f.value != 0)
+        && !user_disabled(run.features, *b"calt");
+    if run.vertical && calt_on {
+        stage.push(StageFeature::of(MapFeature::new(b"calt", F::NONE), CALT));
+    }
     let excluded = if run.vertical {
         |tag: [u8; 4]| tag == *b"calt"
     } else {

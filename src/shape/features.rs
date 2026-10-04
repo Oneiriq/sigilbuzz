@@ -43,13 +43,6 @@ pub(super) struct DefaultGsub<'a> {
     /// The joiner handling of the segment's shaper (Arabic runs its
     /// ligating features with manual ZWJ).
     pub(super) table: JoinerTable,
-    /// Whether `calt` applies. It is off for vertical text of a buffer
-    /// HarfBuzz shapes with its Hangul shaper, whose vertical features
-    /// leave it out whatever the caller asks. In horizontal text the
-    /// Hangul shaper keeps `calt` off jamo only
-    /// (`override_features_hangul` and `setup_masks_hangul`), and no
-    /// jamo reach these stages.
-    pub(super) calt: bool,
     /// The shaper whose stages run.
     pub(super) shaper: DefaultShaper<'a>,
 }
@@ -116,7 +109,12 @@ pub(super) fn run_default_gsub(
     }
     if arabic {
         stage.push(feature(*b"mset", false));
-    } else if d.calt && default_on(*b"calt", horizontal) {
+    } else if default_on(*b"calt", horizontal) {
+        // In a buffer HarfBuzz shapes with its Hangul shaper, `calt`
+        // only stays off jamo (`override_features_hangul` and
+        // `setup_masks_hangul`), and no jamo reach these stages. The
+        // `calt` that override adds has no value of its own, so in
+        // vertical text it still runs only when the caller turns it on.
         stage.push(feature(*b"calt", false));
     }
     if default_on(*b"rclt", horizontal) {

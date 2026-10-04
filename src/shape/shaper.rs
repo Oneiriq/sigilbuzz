@@ -9,12 +9,13 @@
 //! when the font cannot position them. The values here follow the
 //! shaper descriptors of HarfBuzz 14.5.0 (`hb-ot-shaper-*.cc`).
 //!
-//! HarfBuzz sends the Indic scripts to the default shaper when the font
-//! only has `DFLT` or `latn` lookups, and Myanmar also when it only has
-//! the pre-spec `mymr` tag; sigilbuzz runs its Indic and Myanmar shapers
-//! regardless, so those scripts always map to their own shaper here.
-//! The scripts of the Universal Shaping Engine go to the default shaper
-//! in such a font, as in HarfBuzz ([`Shaper::for_run`]).
+//! HarfBuzz sends the Indic scripts and the scripts of the Universal
+//! Shaping Engine to the default shaper when the script tag the font's
+//! GSUB picks is `DFLT` or `latn`, and Myanmar also when it is the
+//! pre-spec `mymr` tag. A font whose GSUB only has the misspelled `dflt`
+//! script, which HarfBuzz also picks, keeps the script's own shaper.
+//! [`Shaper::for_script`] maps a script to its own shaper, and
+//! [`Shaper::for_run`] makes that choice for a font.
 
 use crate::tables::Gsub;
 use crate::unicode::Script;
@@ -113,8 +114,11 @@ impl Shaper {
     /// `script_priority` in the font's `gsub`, as HarfBuzz's
     /// `hb_ot_shaper_categorize` decides it: the Indic scripts and the
     /// scripts of the Universal Shaping Engine take the default shaper
-    /// when the script tag GSUB picks is `DFLT` (or `dflt`) or `latn`,
-    /// since the font was not made for the script's shaper. An Indic
+    /// when the script tag GSUB picks is `DFLT` or `latn`, since the
+    /// font was not made for the script's shaper. GSUB can also pick
+    /// `dflt` (`hb_ot_layout_table_select_script`), but
+    /// `hb_ot_shaper_categorize` does not test for it, so such a font
+    /// keeps the script's shaper. An Indic
     /// script whose chosen tag ends in `3` (`dev3`, `bng3`, ...) takes
     /// the Universal Shaping Engine. Myanmar takes the default shaper
     /// for those generic tags and for `mymr`, the tag of fonts made
@@ -131,7 +135,7 @@ impl Shaper {
         let chosen = gsub.and_then(|g| {
             crate::ot::layout_select::chosen_script(g.script_list(), script_priority)
         });
-        let generic = chosen.is_some_and(|tag| matches!(&tag, b"DFLT" | b"dflt" | b"latn"));
+        let generic = chosen.is_some_and(|tag| matches!(&tag, b"DFLT" | b"latn"));
         let indic3 = chosen.is_some_and(|tag| tag[3] == b'3');
         match shaper {
             Self::Use | Self::Indic if generic => Self::Default,

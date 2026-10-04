@@ -95,3 +95,30 @@ fn feature_table_keeps_harfbuzz_flags() {
         ]
     );
 }
+
+#[test]
+fn the_caller_changes_neither_clig_nor_liga() {
+    // `override_features_khmer` enables `clig` and disables `liga` after
+    // the caller's features.
+    let feature = |tag: &[u8; 4], value| Feature { tag: *tag, value };
+    let features = [
+        feature(b"clig", 0),
+        feature(b"liga", 1),
+        feature(b"kern", 0),
+        feature(b"clig", 3),
+        feature(b"ss01", 2),
+    ];
+    assert_eq!(
+        override_features(&features),
+        vec![feature(b"kern", 0), feature(b"ss01", 2)]
+    );
+    // `clig` runs in the last stage in either direction, `liga` in none.
+    for defaults in [&DEFAULT_HORIZONTAL[..], &DEFAULT_VERTICAL[..]] {
+        assert!(defaults.iter().any(|f| f.tag == *b"clig"));
+        assert!(!defaults.iter().any(|f| f.tag == *b"liga"));
+    }
+    assert!(early(*b"cfar"));
+    assert!(early(*b"locl"));
+    assert!(!early(*b"liga"));
+    assert!(!early(*b"pres"));
+}
