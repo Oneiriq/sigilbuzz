@@ -23,6 +23,7 @@ use crate::ot::syllabic::cat::{
     ZWNJ,
 };
 use crate::ot::syllabic::machine::{alt, one, opt, seq, star, Machine, Pat, Syllable};
+use crate::sync::OnceBox;
 
 fn c() -> Pat {
     one(&[C, RA, V])
@@ -78,14 +79,18 @@ fn consonant_syllable() -> Pat {
 }
 
 /// Splits Khmer categories into syllables (`find_syllables_khmer`).
+/// The grammar is compiled once.
 pub(super) fn find_syllables(cats: &[u8]) -> Vec<Syllable> {
-    let machine = Machine::new(
-        vec![
-            (consonant_syllable(), syllable::CONSONANT),
-            (broken_cluster(), syllable::BROKEN),
-        ],
-        syllable::NON_KHMER,
-    );
+    static MACHINE: OnceBox<Machine> = OnceBox::new();
+    let machine = MACHINE.get_or_init(|| {
+        Machine::new(
+            vec![
+                (consonant_syllable(), syllable::CONSONANT),
+                (broken_cluster(), syllable::BROKEN),
+            ],
+            syllable::NON_KHMER,
+        )
+    });
     machine.scan(cats)
 }
 

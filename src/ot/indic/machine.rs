@@ -33,6 +33,7 @@ use crate::ot::syllabic::cat::{
     VD, ZWJ, ZWNJ,
 };
 use crate::ot::syllabic::machine::{alt, one, opt, seq, star, Machine, Pat, Syllable};
+use crate::sync::OnceBox;
 
 /// Indic syllable types (`indic_syllable_type_t`).
 pub(crate) mod syllable {
@@ -142,8 +143,14 @@ fn broken_cluster() -> Pat {
     seq([opt(reph()), opt(n()), complex_syllable_tail()])
 }
 
-/// The compiled Indic grammar.
-pub(super) fn machine() -> Machine {
+/// The compiled Indic grammar, compiled once.
+pub(super) fn machine() -> &'static Machine {
+    static MACHINE: OnceBox<Machine> = OnceBox::new();
+    MACHINE.get_or_init(compile)
+}
+
+/// Compiles the Indic grammar.
+fn compile() -> Machine {
     Machine::new(
         vec![
             (consonant_syllable(), syllable::CONSONANT),

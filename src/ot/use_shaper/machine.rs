@@ -40,6 +40,7 @@ use super::category::{
 };
 use crate::ot::syllabic::machine::{alt, one, opt, seq, star, Machine, Pat};
 use crate::ot::syllabic::GlyphInfo;
+use crate::sync::OnceBox;
 
 /// USE syllable types (`use_syllable_type_t`).
 pub(crate) mod syllable {
@@ -208,8 +209,14 @@ fn with_zwnj(rule: Pat) -> Pat {
     seq([rule, opt(one(&[ZWNJ]))])
 }
 
+/// The machine, compiled once.
+fn machine() -> &'static Machine {
+    static MACHINE: OnceBox<Machine> = OnceBox::new();
+    MACHINE.get_or_init(compile)
+}
+
 /// The machine's rules, in priority order.
-fn machine() -> Machine {
+fn compile() -> Machine {
     use syllable::{
         BROKEN, HIEROGLYPH, NON_CLUSTER, NUMBER_JOINER_TERMINATED, NUMERAL, SAKOT_TERMINATED,
         STANDARD, SYMBOL, VIRAMA_TERMINATED,
