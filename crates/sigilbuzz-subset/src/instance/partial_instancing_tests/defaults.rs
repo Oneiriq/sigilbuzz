@@ -47,6 +47,13 @@ fn store(rows: &[[i16; 2]]) -> Vec<u8> {
 /// 200; a `kern` SinglePos adds an x advance of 40 and 6 through the
 /// `GDEF` store; `MVAR` moves the x height (500) by 30 and 4.
 fn font() -> Vec<u8> {
+    font_with_mvar(&[*b"xhgt"], &[[30, 4]])
+}
+
+/// The font of [`font`] (with an `hhea` caretSlopeRise of 1 and
+/// caretOffset of -114) whose `MVAR` record `i` names `tags[i]` and
+/// reads row `i` of `rows`: its deltas at wght 900 and at wdth 200.
+fn font_with_mvar(tags: &[[u8; 4]], rows: &[[i16; 2]]) -> Vec<u8> {
     let mut head = vec![0u8; 54];
     head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
     head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
@@ -55,6 +62,8 @@ fn font() -> Vec<u8> {
     let mut hhea = vec![0u8; 36];
     hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
     hhea[4..6].copy_from_slice(&800u16.to_be_bytes());
+    hhea[18..20].copy_from_slice(&1u16.to_be_bytes());
+    hhea[22..24].copy_from_slice(&(-114i16).to_be_bytes());
     hhea[34..36].copy_from_slice(&2u16.to_be_bytes());
     let mut maxp = 0x0000_5000u32.to_be_bytes().to_vec();
     push(&mut maxp, &[2]);
@@ -95,10 +104,13 @@ fn font() -> Vec<u8> {
     os2[0..2].copy_from_slice(&2u16.to_be_bytes());
     os2[86..88].copy_from_slice(&500u16.to_be_bytes());
     let mut mvar = Vec::new();
-    push(&mut mvar, &[1, 0, 0, 8, 1, 20]);
-    mvar.extend_from_slice(b"xhgt");
-    push(&mut mvar, &[0, 0]);
-    mvar.extend_from_slice(&store(&[[30, 4]]));
+    let count = tags.len() as u16;
+    push(&mut mvar, &[1, 0, 0, 8, count, 12 + 8 * count]);
+    for (i, tag) in tags.iter().enumerate() {
+        mvar.extend_from_slice(tag);
+        push(&mut mvar, &[0, i as u16]);
+    }
+    mvar.extend_from_slice(&store(rows));
 
     // GDEF 1.3 with only the store.
     let mut gdef = Vec::new();
@@ -209,6 +221,47 @@ fn a_partial_instance_moves_mvar_fields_to_the_pin() {
     let store = mvar.variation_store().unwrap();
     assert_eq!(store.region_count(), 1);
     assert_eq!(store.delta(0, 0, &[1.0]), 4.0);
+}
+
+#[test]
+fn instances_move_the_caret_fields_mvar_varies() {
+    // MVAR varies hhea's caretOffset (-114), caretSlopeRun (0) and
+    // caretSlopeRise (1): by -3, 500 and 1998 at wght 900, and by 5, 7
+    // and 0 at wdth 200.
+    let source = font_with_mvar(
+        &[*b"hcof", *b"hcrn", *b"hcrs", *b"xhgt"],
+        &[[-3, 5], [500, 7], [1998, 0], [30, 4]],
+    );
+    let face = Face::parse_bytes(&source, 0).unwrap();
+    let carets = |bytes: &[u8]| {
+        let face = Face::parse_bytes(bytes, 0).unwrap();
+        let hhea = face.table_bytes(tag::HHEA).unwrap();
+        [18, 20, 22].map(|off| i16::from_be_bytes([hhea[off], hhea[off + 1]]))
+    };
+
+    // Partial, wght pinned at 650 (0.5), wdth kept: the wght deltas,
+    // halved, move into the defaults; -1.5 rounds half up to -1.
+    let input = InstanceInput {
+        coords: vec![0.5, 0.0],
+        drop_var_tables: true,
+        axis_pins: vec![AxisPin::Pin, AxisPin::Keep],
+    };
+    let out = instance(&face, &input).expect("partial instance").bytes;
+    assert_eq!(carets(&out), [1 + 999, 250, -114 - 1]);
+    // MVAR keeps the wdth deltas.
+    let partial = Face::parse_bytes(&out, 0).unwrap();
+    let mvar = partial.mvar().unwrap().expect("MVAR stays");
+    assert_eq!(mvar.metric_delta(*b"hcrn", &[1.0]), Some(7.0));
+    assert_eq!(mvar.metric_delta(*b"hcof", &[1.0]), Some(5.0));
+
+    // Full, at wght 650 and wdth 200: 3.5 (-1.5 + 5) rounds to 4.
+    let input = InstanceInput {
+        coords: vec![0.5, 1.0],
+        drop_var_tables: true,
+        axis_pins: Vec::new(),
+    };
+    let out = instance(&face, &input).expect("full instance").bytes;
+    assert_eq!(carets(&out), [1 + 999, 250 + 7, -114 + 4]);
 }
 
 #[test]

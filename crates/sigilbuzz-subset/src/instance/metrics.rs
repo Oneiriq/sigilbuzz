@@ -500,13 +500,26 @@ pub(super) fn mvar_defaults(
     apply_mvar_deltas(&mvar, &delta, os2, hhea, vhea, post)
 }
 
+/// `hcrs`: hhea caretSlopeRise.
+const HORIZ_CARET_RISE: [u8; 4] = *b"hcrs";
+/// `hcrn`: hhea caretSlopeRun.
+const HORIZ_CARET_RUN: [u8; 4] = *b"hcrn";
+/// `hcof`: hhea caretOffset.
+const HORIZ_CARET_OFFSET: [u8; 4] = *b"hcof";
+/// `vcrs`: vhea caretSlopeRise.
+const VERT_CARET_RISE: [u8; 4] = *b"vcrs";
+/// `vcrn`: vhea caretSlopeRun.
+const VERT_CARET_RUN: [u8; 4] = *b"vcrn";
+/// `vcof`: vhea caretOffset.
+const VERT_CARET_OFFSET: [u8; 4] = *b"vcof";
+
 /// [`apply_mvar_records`] with each record's delta from `delta`, by its
 /// `(outer, inner)` row.
 fn apply_mvar_deltas(
     mvar: &sigilbuzz::tables::Mvar<'_>,
     delta: &dyn Fn(u16, u16) -> f32,
     mut os2: Option<Vec<u8>>,
-    hhea: Option<Vec<u8>>,
+    mut hhea: Option<Vec<u8>>,
     mut vhea: Option<Vec<u8>>,
     mut post: Option<Vec<u8>>,
 ) -> Result<MvarBake, SubsetError> {
@@ -534,13 +547,16 @@ fn apply_mvar_deltas(
     // post: italicAngle is offset 4 (Fixed16.16). underlineThickness
     // and underlinePosition are i16 at offsets 10 and 8 respectively.
     //
-    // hhea offsets:
-    //   ascent / vertTypoAscender at offset 4 (i16)
-    //   descent at offset 6
-    //   lineGap at offset 8
+    // hhea and vhea share a layout (all i16):
+    //   ascent / vertTypoAscender 4 (vhea only: vasc)
+    //   descent                   6 (vhea only: vdsc)
+    //   lineGap                   8 (vhea only: vlgp)
+    //   caretSlopeRise           18 (hcrs, vcrs)
+    //   caretSlopeRun            20 (hcrn, vcrn)
+    //   caretOffset              22 (hcof, vcof)
     //
-    // vhea (OpenType / AAT): same layout as hhea, ascent/descent/lineGap
-    // are at offsets 4/6/8.
+    // The gasp tags (gsp0 to gsp9) are left alone, as HarfBuzz's
+    // instancer leaves them: gasp passes through unchanged.
 
     // Per OpenType MVAR spec each tag appears at most once in a
     // well-formed `valueRecords` array. Malformed fonts can ship the
@@ -577,6 +593,12 @@ fn apply_mvar_deltas(
             t if t == mvar_tag::VERT_ASCENDER => (&mut vhea, 4, true),
             t if t == mvar_tag::VERT_DESCENDER => (&mut vhea, 6, true),
             t if t == mvar_tag::VERT_LINE_GAP => (&mut vhea, 8, true),
+            t if t == HORIZ_CARET_RISE => (&mut hhea, 18, true),
+            t if t == HORIZ_CARET_RUN => (&mut hhea, 20, true),
+            t if t == HORIZ_CARET_OFFSET => (&mut hhea, 22, true),
+            t if t == VERT_CARET_RISE => (&mut vhea, 18, true),
+            t if t == VERT_CARET_RUN => (&mut vhea, 20, true),
+            t if t == VERT_CARET_OFFSET => (&mut vhea, 22, true),
             t if t == mvar_tag::UNDERLINE_SIZE => (&mut post, 10, true),
             t if t == mvar_tag::UNDERLINE_OFFSET => (&mut post, 8, true),
             _ => continue, // unrecognized tag: silently ignore

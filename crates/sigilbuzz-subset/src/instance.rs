@@ -119,9 +119,12 @@
 //! When the source carries `MVAR` we walk every value record, look up
 //! its delta at `coords`, and apply the rounded result to the target
 //! field per the spec's tag -> field mapping (`hasc` -> OS/2.sTypoAscender,
-//! `xhgt` -> OS/2.sxHeight, `unds` -> post.underlineThickness, ...). The
+//! `xhgt` -> OS/2.sxHeight, `hcrs` -> hhea.caretSlopeRise, `vcof` ->
+//! vhea.caretOffset, `unds` -> post.underlineThickness, ...). The
 //! patched tables are emitted; `MVAR` is dropped. Sources without
-//! `MVAR` pass these tables through unchanged.
+//! `MVAR` pass these tables through unchanged. The `gasp` tags
+//! (`gsp0` to `gsp9`) are not applied, as HarfBuzz's instancer does
+//! not apply them: `gasp` passes through.
 //!
 //! # GDEF.IVS / GPOS variable-position bake
 //!

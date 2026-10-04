@@ -152,3 +152,49 @@ fn apply_mvar_records_skips_duplicate_tag() {
     // First-wins: 800 + 100 == 900. (Without dedup: 800 + 200 = 1000.)
     assert_eq!(val, 900, "duplicate hasc must apply delta exactly once");
 }
+
+#[test]
+fn apply_mvar_records_moves_the_caret_fields() {
+    // hcrs, hcrn and hcof vary hhea's caretSlopeRise, caretSlopeRun and
+    // caretOffset (offsets 18, 20, 22); vcrs, vcrn and vcof the same
+    // fields of vhea. Each record adds 99 at the peak, so 49.5 at 0.5,
+    // which rounds half up as HarfBuzz rounds field plus delta: 50.
+    // gsp0 (a gasp range) changes nothing, as in HarfBuzz.
+    let tags = [
+        *b"gsp0", *b"hcof", *b"hcrn", *b"hcrs", *b"vcof", *b"vcrn", *b"vcrs",
+    ];
+    let blob = build_synthetic_mvar(&tags, 99);
+    let mvar = sigilbuzz::tables::Mvar::parse(&blob).unwrap();
+    let mut header = alloc::vec![0u8; 36];
+    header[18..20].copy_from_slice(&1i16.to_be_bytes());
+    header[22..24].copy_from_slice(&(-114i16).to_be_bytes());
+    let os2 = alloc::vec![0u8; 96];
+    let post = alloc::vec![0u8; 32];
+    let baked = apply_mvar_records(
+        &mvar,
+        &[0.5],
+        Some(os2.clone()),
+        Some(header.clone()),
+        Some(header.clone()),
+        Some(post.clone()),
+    )
+    .unwrap();
+    let field = |t: &[u8], off: usize| i16::from_be_bytes([t[off], t[off + 1]]);
+    for table in [baked.hhea.unwrap(), baked.vhea.unwrap()] {
+        assert_eq!(field(&table, 18), 51, "caretSlopeRise 1 + 50");
+        assert_eq!(field(&table, 20), 50, "caretSlopeRun 0 + 50");
+        assert_eq!(field(&table, 22), -64, "caretOffset -114 + 50");
+        let mut rest = table.clone();
+        rest[18..24].copy_from_slice(&header[18..24]);
+        assert_eq!(rest, header, "no other field moves");
+    }
+    assert_eq!(baked.os2.unwrap(), os2);
+    assert_eq!(baked.post.unwrap(), post);
+
+    // A tie below zero: -114 - 0.5 is -114.5, which HarfBuzz rounds up
+    // to -114, as the delta -0.5 rounds to 0.
+    let blob = build_synthetic_mvar(&[*b"hcof"], -1);
+    let mvar = sigilbuzz::tables::Mvar::parse(&blob).unwrap();
+    let baked = apply_mvar_records(&mvar, &[0.5], None, Some(header.clone()), None, None).unwrap();
+    assert_eq!(field(&baked.hhea.unwrap(), 22), -114);
+}
