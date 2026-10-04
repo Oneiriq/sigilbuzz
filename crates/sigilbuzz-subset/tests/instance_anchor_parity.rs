@@ -59,7 +59,15 @@ fn mark_offsets(out: &GlyphBuffer) -> Vec<(u32, i32, i32)> {
 
 fn instance_at(wght: f32) -> Vec<u8> {
     let face = Face::parse_bytes(RUBIK, 0).unwrap();
-    let coords = face.fvar().unwrap().unwrap().normalize_coords(&[wght]);
+    let coords = face
+        .fvar()
+        .unwrap()
+        .unwrap()
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize([wght].get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords,
         drop_var_tables: true,

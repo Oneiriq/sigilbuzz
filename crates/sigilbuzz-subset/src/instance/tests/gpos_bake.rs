@@ -341,7 +341,15 @@ fn var_kern_fixture_bake_at_wght_900_folds_pair_pos_advance() {
     // statically and the device offset slot must be zero.
     let bytes = var_kern_with_pair_set_relative_device();
     let face = Face::parse_bytes(&bytes, 0).unwrap();
-    let coords = face.fvar().unwrap().unwrap().normalize_coords(&[900.0]);
+    let coords = face
+        .fvar()
+        .unwrap()
+        .unwrap()
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize([900.0].get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -391,7 +399,15 @@ fn var_kern_fixture_bake_at_default_coords_leaves_static_field_at_source() {
     // bake unconditionally severs the offset to keep GDEF.IVS
     // safe to drop).
     let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
-    let coords = face.fvar().unwrap().unwrap().normalize_coords(&[400.0]);
+    let coords = face
+        .fvar()
+        .unwrap()
+        .unwrap()
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize([400.0].get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords,
         drop_var_tables: true,
@@ -429,7 +445,12 @@ fn source_sans_vf_subset_bake_clears_all_gpos_variation_offsets() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords,
         drop_var_tables: true,

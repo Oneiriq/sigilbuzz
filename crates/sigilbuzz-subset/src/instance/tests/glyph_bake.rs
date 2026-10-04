@@ -12,7 +12,11 @@ fn rubik_coords(face: &Face<'_>, wght: f32) -> Vec<f32> {
     let mut user: Vec<f32> = fvar.axes().iter().map(|a| a.default_value).collect();
     let i = fvar.axis_index(*b"wght").expect("rubik has wght");
     user[i] = wght;
-    fvar.normalize_coords(&user)
+    fvar.axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>()
 }
 
 /// The points an outline passes through, contour by contour. A closing

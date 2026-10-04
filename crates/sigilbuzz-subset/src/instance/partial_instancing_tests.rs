@@ -192,7 +192,15 @@ fn rubik_partial_pin_wght_matches_full_instance_bytes() {
     // pins that contract: for all-Pin, partial == full.
     let face = rubik_face();
     let user_max = face.fvar().unwrap().unwrap().axes()[0].max_value;
-    let coords = face.fvar().unwrap().unwrap().normalize_coords(&[user_max]);
+    let coords = face
+        .fvar()
+        .unwrap()
+        .unwrap()
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize([user_max].get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let empty = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -268,7 +276,11 @@ fn partial_instance_source_sans_pin_wght_matches_full_instance() {
         .fvar()
         .unwrap()
         .unwrap()
-        .normalize_coords(&[user_default]);
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize([user_default].get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let empty = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -295,7 +307,15 @@ fn partial_instance_var_kern_pin_wght_matches_full_instance() {
     // validator).
     let face = Face::parse_bytes(VAR_KERN, 0).unwrap();
     let user_max = face.fvar().unwrap().unwrap().axes()[0].max_value;
-    let coords = face.fvar().unwrap().unwrap().normalize_coords(&[user_max]);
+    let coords = face
+        .fvar()
+        .unwrap()
+        .unwrap()
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize([user_max].get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let empty = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,

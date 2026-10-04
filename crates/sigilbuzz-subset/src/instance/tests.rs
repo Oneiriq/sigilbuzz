@@ -76,7 +76,12 @@ fn instance_at_extreme_coords_matches_outline_at_coords() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -109,7 +114,12 @@ fn instance_advances_match_hvar_eval_at_coords() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -222,7 +232,12 @@ fn source_sans_round_trip_at_extreme_coord_matches_source_outline() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
     let input = InstanceInput {
         coords: coords.clone(),
         drop_var_tables: true,
@@ -337,7 +352,12 @@ fn rubik_mvar_bake_applies_undo_delta_to_post_underline_position() {
     if let Some(idx) = fvar.axis_index(*b"wght") {
         user[idx] = fvar.axes()[idx].max_value;
     }
-    let coords = fvar.normalize_coords(&user);
+    let coords = fvar
+        .axes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.normalize(user.get(i).copied().unwrap_or(a.default_value)))
+        .collect::<Vec<f32>>();
 
     let mvar = face.mvar().unwrap().expect("rubik has MVAR");
     let undo_delta = mvar

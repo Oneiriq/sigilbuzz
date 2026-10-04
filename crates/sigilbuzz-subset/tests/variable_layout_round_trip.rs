@@ -105,7 +105,11 @@ fn instancing_a_subset_matches_the_variable_source() {
             .fvar()
             .unwrap()
             .unwrap()
-            .normalize_coords(&[wght]);
+            .axes()
+            .iter()
+            .enumerate()
+            .map(|(i, a)| a.normalize([wght].get(i).copied().unwrap_or(a.default_value)))
+            .collect::<Vec<f32>>();
         let input = InstanceInput {
             coords,
             drop_var_tables: true,
