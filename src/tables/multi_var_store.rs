@@ -344,26 +344,41 @@ impl<'a> MultiVarStore<'a> {
     /// Scalars for each entry of `region_indexes`, in order, and the
     /// number of region axes evaluated for them. Each distinct region is
     /// evaluated once, so a subtable that names one large region many
-    /// times does not repeat the work.
+    /// times does not repeat the work. The entries are put in region
+    /// order by one sort, so a subtable of many distinct regions costs
+    /// no map insert per region either.
     fn scalars_for(&self, region_indexes: &[u16], coords: &[f32]) -> (Vec<f32>, usize) {
-        let mut cache: BTreeMap<usize, f32> = BTreeMap::new();
-        let mut axis_steps = 0usize;
-        let scalars = region_indexes
+        let mut scalars = vec![0.0_f32; region_indexes.len()];
+        // Region slot and position, each under 65536 (both counts are
+        // u16), packed into one word to sort; an index past the region
+        // list keeps a zero scalar.
+        let mut order: Vec<u32> = region_indexes
             .iter()
-            .map(|&ri| {
-                let Some(&slot) = self.region_slots.get(ri as usize) else {
-                    return 0.0;
-                };
-                let Some(region) = self.regions.get(slot) else {
-                    return 0.0;
-                };
-                *cache.entry(slot).or_insert_with(|| {
-                    let (scalar, steps) = sparse_region_scalar_steps(region, coords);
-                    axis_steps = axis_steps.saturating_add(steps);
-                    scalar
-                })
+            .zip(0u32..)
+            .filter_map(|(&ri, at)| {
+                let slot = *self.region_slots.get(usize::from(ri))?;
+                Some(((slot as u32) << 16) | at)
             })
             .collect();
+        order.sort_unstable();
+        let mut axis_steps = 0usize;
+        let mut last: Option<(usize, f32)> = None;
+        for packed in order {
+            let (slot, at) = ((packed >> 16) as usize, (packed & 0xFFFF) as usize);
+            let scalar = match last {
+                Some((known, scalar)) if known == slot => scalar,
+                _ => {
+                    let scalar = self.regions.get(slot).map_or(0.0, |region| {
+                        let (scalar, steps) = sparse_region_scalar_steps(region, coords);
+                        axis_steps = axis_steps.saturating_add(steps);
+                        scalar
+                    });
+                    last = Some((slot, scalar));
+                    scalar
+                }
+            };
+            scalars[at] = scalar;
+        }
         (scalars, axis_steps)
     }
 
@@ -1008,6 +1023,30 @@ mod tests {
         let bytes = build_store(&[vec![(0, 0.0, 1.0, 1.0)]], &[0], &[&[0x00, 0x05]]);
         let s = MultiVarStore::parse(&bytes).unwrap();
         assert!(s.resolve_deltas(0, 0, 1 << 40, &[0.0]).is_none());
+    }
+
+    #[test]
+    fn region_scalars_keep_the_subtable_order() {
+        // Indexes out of order, repeated, and one past the region list:
+        // each scalar lands at its own position, and the one past the
+        // list is zero.
+        let bytes = build_store(
+            &[
+                vec![(0, 0.0, 1.0, 1.0)],
+                vec![(0, 0.0, 0.5, 1.0)],
+                vec![(1, 0.0, 1.0, 1.0)],
+            ],
+            &[2, 0, 2, 1, 7],
+            &[&[0x00, 0x01]],
+        );
+        let s = MultiVarStore::parse(&bytes).unwrap();
+        let coords = [0.75, 0.25];
+        let want: Vec<f32> = [2, 0, 2, 1, 7]
+            .iter()
+            .map(|&ri| s.region_scalar(ri, &coords))
+            .collect();
+        assert_eq!(want, [0.25, 0.75, 0.25, 0.5, 0.0]);
+        assert_eq!(s.region_scalars(0, &coords).unwrap(), want);
     }
 
     #[test]
