@@ -3,12 +3,13 @@
 
 use alloc::vec::Vec;
 
+use super::varc_draw::VarcDraw;
 use super::Face;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::font::f2dot14_coords;
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::parse::hb_roundf;
-use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Gvar, Loca, Outline, PathOp, Vmtx};
+use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Gvar, Loca, Outline, Vmtx};
 
 impl<'a> Face<'a> {
     /// Parses the `loca` table. Pulls the offset format from `head`
@@ -61,7 +62,8 @@ impl<'a> Face<'a> {
     /// Returns the design-unit bounding box for `glyph_id`, or
     /// `Ok(None)` when the glyph has no outline (e.g. a space
     /// glyph). Requires both `loca` and `glyf`. Fonts that use CFF
-    /// outlines instead will yield [`Error::MissingTable`] for
+    /// outlines instead will yield
+    /// [`Error::MissingTable`](crate::Error::MissingTable) for
     /// `glyf`.
     pub fn glyph_bounds(&self, glyph_id: u16) -> Result<Option<GlyphBounds>> {
         let loca = self.loca()?;
@@ -171,81 +173,37 @@ impl<'a> Face<'a> {
     /// zero draw the default instance. The table-level methods
     /// ([`Glyf::outline_at_coords`], [`Cff2::outline`]) take coords as
     /// given.
+    ///
+    /// A glyph the font's `VARC` table has a record for is drawn from
+    /// its components, as HarfBuzz draws it:
+    ///
+    /// - Each component is drawn at its own coords, which start from
+    ///   the coords of the glyph it belongs to, or from the font's
+    ///   (`coords`) when it sets `RESET_UNSPECIFIED_AXES`, however deep
+    ///   it sits.
+    /// - A component that names the glyph it belongs to draws that
+    ///   glyph's `glyf` or CFF outline instead of recursing.
+    ///
+    /// A glyph that draws more than 2048 components or 2^20 ops, or nests
+    /// components more than 64 deep, fails with `Malformed`.
     pub fn glyph_outline_at_coords(
         &self,
         glyph_id: u16,
         coords: &[f32],
     ) -> Result<Option<Outline>> {
-        let mut budget = VarcBudget {
-            components_left: MAX_VARC_COMPONENTS,
-            ops_left: MAX_VARC_OPS,
-        };
         let coords = f2dot14_coords(coords);
-        self.glyph_outline_at_coords_inner(glyph_id, &coords, 0, &mut budget)
-    }
-
-    /// Recursive entry point used by VARC composite resolution.
-    /// `depth` caps recursion through nested VARC composites the
-    /// same way [`Glyf::flatten`] caps `glyf` composites. `budget`
-    /// caps the total work: depth alone still lets a glyph whose
-    /// components share children expand exponentially.
-    fn glyph_outline_at_coords_inner(
-        &self,
-        glyph_id: u16,
-        coords: &[f32],
-        depth: u8,
-        budget: &mut VarcBudget,
-    ) -> Result<Option<Outline>> {
-        const MAX_VARC_DEPTH: u8 = 64;
-        if depth > MAX_VARC_DEPTH {
-            return Err(Error::Malformed {
-                offset: 0,
-                context: "VARC composite recursion exceeded cap",
-            });
-        }
-
-        // VARC routing: if the font ships a VARC table that covers
-        // this gid, recurse through the resolved components and apply
-        // each component's affine to the child outline. Children
-        // outside VARC's coverage fall through to the regular glyf /
-        // CFF path with the component's effective coord vector.
         if let Some(varc) = self.varc()? {
-            if varc.covers(glyph_id) {
-                if let Some(composite) = varc.composite(glyph_id, coords) {
-                    let mut out = Outline::new();
-                    for comp in &composite.components {
-                        budget.components_left =
-                            budget
-                                .components_left
-                                .checked_sub(1)
-                                .ok_or(Error::Malformed {
-                                    offset: 0,
-                                    context: "VARC composite exceeds component budget",
-                                })?;
-                        let child = self.glyph_outline_at_coords_inner(
-                            comp.gid,
-                            &comp.coords,
-                            depth + 1,
-                            budget,
-                        )?;
-                        if let Some(child) = child {
-                            budget.ops_left = budget
-                                .ops_left
-                                .checked_sub(child.ops().len())
-                                .ok_or(Error::Malformed {
-                                    offset: 0,
-                                    context: "VARC composite exceeds outline budget",
-                                })?;
-                            for op in child.ops() {
-                                out.push(transform_path_op(*op, comp.transform));
-                            }
-                        }
-                    }
-                    return Ok(Some(out));
-                }
+            let mut out = Outline::new();
+            if VarcDraw::new(self, &varc, &coords).draw(glyph_id, &mut out)? {
+                return Ok(Some(out));
             }
         }
+        self.plain_outline_at_coords(glyph_id, &coords)
+    }
 
+    /// The outline of `glyph_id` at `coords` (rounded to F2DOT14) from
+    /// `glyf` or CFF, without `VARC`.
+    fn plain_outline_at_coords(&self, glyph_id: u16, coords: &[f32]) -> Result<Option<Outline>> {
         // CFF / CFF2 path: presence of `CFF2` wins over `CFF ` since
         // variable fonts ship only CFF2. `CFF ` is used only when the
         // font has no `glyf`. A font carrying both takes the TrueType
@@ -369,73 +327,10 @@ impl PointBox {
     }
 }
 
-/// Most VARC components one outline request may resolve, summed over
-/// every nesting level. Mirrors HarfBuzz's graph edge cap. Real VARC
-/// glyphs use a few dozen.
-const MAX_VARC_COMPONENTS: usize = 2048;
-
-/// Most path ops VARC composition may copy into composite outlines
-/// for one outline request, summed over every nesting level.
-const MAX_VARC_OPS: usize = 1 << 20;
-
-/// Remaining work for one [`Face::glyph_outline_at_coords`] call.
-/// Components that share children can make the resolved outline
-/// grow exponentially with depth, so the whole request shares one
-/// budget and fails with `Malformed` when it runs out.
-struct VarcBudget {
-    components_left: usize,
-    ops_left: usize,
-}
-
-/// Applies a row-major `[xx, xy, yx, yy, tx, ty]` affine to a single
-/// path op, transforming every point inside it. Control points and
-/// endpoints alike receive the same affine, which is correct for
-/// affine maps because they preserve the "control point ratio"
-/// implied by Bezier evaluation.
-fn transform_path_op(op: PathOp, m: [f32; 6]) -> PathOp {
-    let xform =
-        |x: f32, y: f32| -> (f32, f32) { (m[0] * x + m[1] * y + m[4], m[2] * x + m[3] * y + m[5]) };
-    match op {
-        PathOp::MoveTo { x, y } => {
-            let (x, y) = xform(x, y);
-            PathOp::MoveTo { x, y }
-        }
-        PathOp::LineTo { x, y } => {
-            let (x, y) = xform(x, y);
-            PathOp::LineTo { x, y }
-        }
-        PathOp::QuadTo { cx, cy, x, y } => {
-            let (cx, cy) = xform(cx, cy);
-            let (x, y) = xform(x, y);
-            PathOp::QuadTo { cx, cy, x, y }
-        }
-        PathOp::CubicTo {
-            c1x,
-            c1y,
-            c2x,
-            c2y,
-            x,
-            y,
-        } => {
-            let (c1x, c1y) = xform(c1x, c1y);
-            let (c2x, c2y) = xform(c2x, c2y);
-            let (x, y) = xform(x, y);
-            PathOp::CubicTo {
-                c1x,
-                c1y,
-                c2x,
-                c2y,
-                x,
-                y,
-            }
-        }
-        PathOp::Close => PathOp::Close,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::PathOp;
 
     fn bounds(points: &[(f32, f32)]) -> GlyphBounds {
         let mut b = PointBox::default();

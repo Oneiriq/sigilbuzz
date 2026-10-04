@@ -6,14 +6,13 @@ use core::fmt;
 
 use alloc::vec::Vec;
 
+use super::varc_draw::VarcDraw;
 use super::Face;
 use crate::error::Result;
 use crate::font::f2dot14_coords;
 use crate::tables::cff2::Cff2Shared;
 use crate::tables::glyf::PhantomMetrics;
-use crate::tables::{
-    tag, Cff, Cff2, Glyf, Gvar, Hmtx, Loca, Outline, OutlineSink, PathOp, Varc, Vmtx,
-};
+use crate::tables::{tag, Cff, Cff2, Glyf, Gvar, Hmtx, Loca, Outline, OutlineSink, Varc, Vmtx};
 
 /// Draws glyphs of one face at one set of variation coords, reading the
 /// outline tables once for all of them.
@@ -117,15 +116,11 @@ impl<'a> GlyphOutlines<'a> {
             .get_or_init(|| self.face.varc())
             .as_ref()
             .map_err(Clone::clone)?;
-        // A VARC composite is drawn the way the face draws it: its
-        // components carry coords of their own.
+        // A VARC composite is drawn by the walk the face draws it with:
+        // its components carry coords of their own, so its leaves come
+        // from tables the walk reads for them.
         if let Some(varc) = varc {
-            if varc.covers(glyph_id) && varc.composite(glyph_id, &self.coords).is_some() {
-                let Some(outline) = self.face.glyph_outline_at_coords(glyph_id, &self.coords)?
-                else {
-                    return Ok(false);
-                };
-                replay(&outline, sink);
+            if VarcDraw::new(&self.face, varc, &self.coords).draw(glyph_id, sink)? {
                 return Ok(true);
             }
         }
@@ -187,26 +182,6 @@ impl<'a> GlyphOutlines<'a> {
             vmtx,
             gvar,
         })
-    }
-}
-
-/// Sends the ops of `outline` to `sink`.
-fn replay<S: OutlineSink>(outline: &Outline, sink: &mut S) {
-    for op in outline.ops() {
-        match *op {
-            PathOp::MoveTo { x, y } => sink.move_to(x, y),
-            PathOp::LineTo { x, y } => sink.line_to(x, y),
-            PathOp::QuadTo { cx, cy, x, y } => sink.quad_to(cx, cy, x, y),
-            PathOp::CubicTo {
-                c1x,
-                c1y,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => sink.curve_to(c1x, c1y, c2x, c2y, x, y),
-            PathOp::Close => sink.close(),
-        }
     }
 }
 
