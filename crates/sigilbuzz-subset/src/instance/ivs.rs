@@ -129,14 +129,27 @@ pub(crate) struct Projection {
     /// map (an HVAR or VVAR advance read by glyph id) still reads the
     /// first subtable's rows, not the next surviving subtable's.
     pub(crate) keep_outer_zero: bool,
+    /// Keep a subtable with no rows when some of its regions survive. A
+    /// CFF2 store's subtables hold no rows (the charstrings carry the
+    /// deltas), yet `vsindex` and `blend` count on them and their region
+    /// lists.
+    pub(crate) keep_itemless: bool,
 }
 
 impl Projection {
-    /// The projection [`project_ivs`] makes.
+    /// Every region that survives keeps its own column.
     pub(crate) const KEEP_ALL: Self = Self {
         pinned_only: PinnedOnly::Keep,
         merge: false,
         keep_outer_zero: false,
+        keep_itemless: false,
+    };
+
+    /// The projection of a CFF2 store: every surviving region keeps its
+    /// own column, in order, and subtables stay without rows.
+    pub(crate) const CFF2: Self = Self {
+        keep_itemless: true,
+        ..Self::KEEP_ALL
     };
 
     /// The projection of a store whose default values stay at the
@@ -147,6 +160,7 @@ impl Projection {
         pinned_only: PinnedOnly::Keep,
         merge: true,
         keep_outer_zero: false,
+        keep_itemless: false,
     };
 }
 
@@ -157,7 +171,7 @@ pub(crate) fn bake_ivs_partial(
     coords: &[f32],
     pins: &[AxisPin],
 ) -> Option<(Vec<u8>, RegionRemap)> {
-    project_ivs(ivs_bytes, coords, pins).ok()
+    project_ivs_with(ivs_bytes, coords, pins, Projection::CFF2).ok()
 }
 
 /// Re-emits an `ItemVariationStore` with every Pin-axis dimension
@@ -182,6 +196,7 @@ pub(crate) fn bake_ivs_partial(
 /// [`SubsetError::Unsupported`] when the projected store
 /// outgrows its Offset32s. Offsets and sizes are checked, so a crafted
 /// Offset32 cannot wrap a 32-bit `usize`.
+#[cfg(test)]
 pub(crate) fn project_ivs(
     ivs_bytes: &[u8],
     coords: &[f32],
@@ -358,8 +373,8 @@ pub(crate) fn project_ivs_with(
         }
 
         // Subtable collapses entirely if either no items or no
-        // surviving regions.
-        if item_count == 0 || columns.is_empty() {
+        // surviving regions; a CFF2 store's subtables have no items.
+        if (item_count == 0 && !how.keep_itemless) || columns.is_empty() {
             new_outer_for_old.push(None);
             continue;
         }

@@ -120,6 +120,7 @@ fn apply_variations(
             pinned_only: PinnedOnly::Drop,
             merge: true,
             keep_outer_zero: false,
+            keep_itemless: false,
         };
         Some(
             project_ivs_with(store_bytes, coords, pins, how)

@@ -107,13 +107,15 @@ pub fn bake_at_coords(cff_bytes: &[u8], coords: &[f32]) -> Result<Vec<u8>, Subse
         new_private_body: Vec<u8>,
     }
     let mut fd_emits: Vec<FdBakeEmit> = Vec::with_capacity(parsed.fd_array.len());
+    // The Private DICTs' blends resolve at the same coordinates.
+    let mut private_blend = BlendCache::new(ivs.as_ref(), ivs_bytes.unwrap_or_default(), coords);
     for (fd_bytes, &private_dict) in parsed.fd_array.iter().zip(&parsed.per_fd_private) {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
         let priv_entries = if private_dict.is_empty() {
             Vec::new()
         } else {
-            walk_dict(private_dict)?
+            super::private::bake_private(walk_dict(private_dict)?, &mut private_blend)?
         };
         // No local subrs survive the bake.
         let (new_private_body, _) = serialise_private_dict(&priv_entries, false);

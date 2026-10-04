@@ -45,6 +45,7 @@ use crate::SubsetError;
 
 mod bake;
 mod partial;
+mod private;
 mod subset;
 
 pub use bake::bake_at_coords;

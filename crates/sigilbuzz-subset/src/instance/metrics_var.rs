@@ -152,6 +152,7 @@ fn bake_metrics_var_partial(
     // outer 0 has to stay the first subtable.
     let how = Projection {
         keep_outer_zero: read::u32_at(table, 8, CTX)? == 0,
+        keep_itemless: false,
         ..how
     };
     let (new_ivs, remap) =
@@ -233,6 +234,7 @@ pub(super) fn bake_hvar_partial_with(
             pinned_only,
             merge: true,
             keep_outer_zero: false,
+            keep_itemless: false,
         },
         "partial instancing: HVAR exceeds 4 GiB",
     )
@@ -259,6 +261,7 @@ pub(super) fn bake_vvar_partial_with(
             pinned_only,
             merge: true,
             keep_outer_zero: false,
+            keep_itemless: false,
         },
         "partial instancing: VVAR exceeds 4 GiB",
     )

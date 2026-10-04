@@ -84,8 +84,8 @@ pub use emit::{
 };
 pub use reader::encode_index_cff2;
 pub(crate) use reader::{
-    private_operands, read_index_cff2, read_private_dict, walk_dict, DictEntry, OP_CHARSTRINGS,
-    OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE, OP_SUBRS, OP_VSTORE,
+    private_operands, read_index_cff2, read_private_dict, walk_dict, DictEntry, DictOperand,
+    OP_CHARSTRINGS, OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE, OP_SUBRS, OP_VSTORE,
 };
 pub(crate) use seac::SeacClosure;
 

@@ -639,3 +639,19 @@ fn partial_gdef_bake_trims_the_store_and_keeps_its_offset() {
             .unwrap();
     assert_eq!(parsed.axis_count(), 1);
 }
+
+#[test]
+fn bake_ivs_partial_keeps_cff2_subtables_without_rows() {
+    // A CFF2 store's subtables hold no rows: the charstrings carry the
+    // deltas. A subtable whose regions survive stays, so `vsindex` and
+    // `blend` still find it.
+    let bytes = build_ivs2(
+        &[[(0.0, 1.0, 1.0), (0.0, 1.0, 1.0)]],
+        &[(alloc::vec![0], alloc::vec![])],
+    );
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let (out, _remap) = bake_ivs_partial(&bytes, &[0.5, 0.0], &pins).expect("bakes");
+    let store = sigilbuzz::tables::variation_store::ItemVariationStore::parse(&out).unwrap();
+    assert_eq!(store.subtable_count(), 1);
+    assert_eq!(store.variation_region_count(0), Some(1));
+}

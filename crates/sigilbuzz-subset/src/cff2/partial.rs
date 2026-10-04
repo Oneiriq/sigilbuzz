@@ -26,13 +26,13 @@ use crate::SubsetError;
 
 /// Per-source-subtable surviving slot info for the CFF2 partial-bake
 /// charstring rewrite.
-struct CffSubtableSurvivors {
+pub(super) struct CffSubtableSurvivors {
     /// New outer index in the trimmed VarStore.
-    new_outer: u16,
+    pub(super) new_outer: u16,
     /// Surviving slots in source-slot order: `(source_slot, scalar)`.
     /// Source delta at `source_slot` becomes `scalar * delta` in the
     /// rewritten blend.
-    surviving: alloc::vec::Vec<(u16, f32)>,
+    pub(super) surviving: alloc::vec::Vec<(u16, f32)>,
 }
 
 /// Re-emits a CFF2 table with its `VariationStore` partially trimmed
@@ -137,10 +137,15 @@ pub(crate) fn bake_cff2_partial(
     for (i, fd_bytes) in parsed.fd_array.iter().enumerate() {
         let fd_entries = walk_dict(fd_bytes)?;
         let (font_dict_body, font_dict_private_slot) = serialise_font_dict(&fd_entries);
+        // Its blends keep the regions the projected store keeps.
         let priv_entries = if parsed.per_fd_private[i].is_empty() {
             Vec::new()
         } else {
-            walk_dict(parsed.per_fd_private[i])?
+            super::private::project_private(
+                walk_dict(parsed.per_fd_private[i])?,
+                &src_ivs,
+                &survivors,
+            )?
         };
         let (new_private_body, _) = serialise_private_dict(&priv_entries, false);
         fd_emits.push(FdEmit {
@@ -333,7 +338,9 @@ fn compute_subtable_survivors(
     let mut per_subtable: Vec<Option<CffSubtableSurvivors>> = Vec::with_capacity(subtable_count);
     let mut new_outer: u16 = 0;
     for &sub_off in &subtable_offsets {
-        let item_count = read_u16_at(ivs_bytes, sub_off)?;
+        // The subtable's header must be readable; its item count does
+        // not matter (see below).
+        read_u16_at(ivs_bytes, sub_off)?;
         let region_index_count = usize::from(read_u16_at(ivs_bytes, sub_off.checked_add(4)?)?);
         // The read above put `sub_off + 6` inside the data.
         let region_indexes = ivs_bytes
@@ -346,7 +353,9 @@ fn compute_subtable_survivors(
                 surviving.push((slot as u16, *scalar));
             }
         }
-        if item_count == 0 || surviving.is_empty() {
+        // A CFF2 subtable holds no rows: the charstrings carry its
+        // deltas. It survives while any of its regions does.
+        if surviving.is_empty() {
             per_subtable.push(None);
         } else {
             per_subtable.push(Some(CffSubtableSurvivors {
