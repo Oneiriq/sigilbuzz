@@ -8,7 +8,7 @@ technical reasons, and the rules I follow when adding or changing public items.
 Every crate in the workspace is below 1.0, so a minor release may break the API. The
 crates are released together. Each release bumps the crates that changed, and one git
 tag covers the whole set. Companion crates keep their own version numbers, so pin
-versions that came out of the same release. For 0.23.0 that means `sigilbuzz = "0.23"`
+versions that came out of the same release. For 0.23.1 that means `sigilbuzz = "0.23"`
 with, for example, `sigilbuzz-render = "0.10"` and `sigilbuzz-paint = "0.3"`.
 [RELEASING.md](RELEASING.md) has the release checklist.
 

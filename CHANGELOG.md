@@ -82,7 +82,7 @@ Fixed:
   tested. Tens of thousands of offsets were off before.
 - A composite component anchored by point numbers matches its point to the walk's
   running point list, as HarfBuzz does, so an anchor past the points before the
-  component, or inside a nested composite, lands where HarfBuzz puts it (#283). Anchor
+  component lands where HarfBuzz puts it (#283). Anchor
   point numbers in word form are read unsigned, and a component that closes a cycle is
   skipped instead of failing the outline. In a font without `vmtx`, an anchor to a
   vertical phantom point uses HarfBuzz's phantom points for that case, `(0, yMax)` and
@@ -143,6 +143,11 @@ Fixed:
   the variation tables. Before, Source Serif 4 pinned at wght 650 drew 1,450 of 1,464
   glyphs up to 110 units off at its default, and Roboto Flex shaped kerning pairs up to
   137 units off.
+- `sigilbuzz-subset`: `MVAR`'s caret records (`hcrs`, `hcrn`, `hcof`, `vcrs`, `vcrn`,
+  `vcof`) move `hhea`'s and `vhea`'s caretSlopeRise, caretSlopeRun and caretOffset in
+  full and partial instances, rounded as HarfBuzz rounds them (#286). Before, Recursive
+  instanced at slnt -15 kept a caret slope of 1/0 instead of 1000/250, and Sitka Italic
+  at opsz 7 a caret offset of -114 instead of -115.
 - `sigilbuzz-subset`: `instance` adds the `cvar` deltas to `cvt`, as HarfBuzz does
   (#284). A full instance drops `cvar`, and a partial instance rebuilds it for the kept
   axes. Partial instances used to carry the source `cvar` with tuples sized for the old
@@ -174,7 +179,9 @@ Fixed:
   `HVAR`, `VVAR`, `VORG`, `GPOS`, `GDEF` and `BASE` resolve, and FeatureVariations each
   work within a budget scaled to the input, or share what many records name, and report
   what they leave out. A CFF2 Private DICT that many Font DICTs share is written once.
-  The crate docs list each budget.
+  A partial CFF2 instance moves blend defaults in constant work each, and fails with
+  `SubsetError::Unsupported` on a charstring that stacks more than the 513 operands
+  CFF2 allows, where HarfBuzz's interpreter stops too. The crate docs list each budget.
 - `sigilbuzz-subset`: `subset` keeps the base and accent glyphs of a kept CFF1 seac
   glyph when both codes resolve (#284). hb-subset does the same for a seac in the
   glyph's own charstring, and this subsetter also follows one that a subroutine ends. A
