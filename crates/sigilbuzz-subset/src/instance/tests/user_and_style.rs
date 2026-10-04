@@ -18,10 +18,10 @@ fn weight_axis() -> VariationAxis {
 }
 
 fn user(axes: &[([u8; 4], AxisLimit)]) -> UserInstanceInput {
-    UserInstanceInput {
-        axes: axes.to_vec(),
-        ..UserInstanceInput::default()
-    }
+    axes.iter()
+        .fold(UserInstanceInput::new(), |input, &(tag, limit)| {
+            input.with_axis(tag, limit)
+        })
 }
 
 /// Reads a big-endian `u16` at `off` of table `tag`.
@@ -114,10 +114,10 @@ fn unnamed_axes_are_pinned_or_kept() {
     let pinned = instance_user(&face, &UserInstanceInput::default()).unwrap();
     let pinned = Face::parse_bytes(&pinned.bytes, 0).unwrap();
     assert!(pinned.fvar().unwrap().is_none(), "a static instance");
-    let kept = UserInstanceInput {
-        keep_unnamed_axes: true,
-        ..UserInstanceInput::default()
-    };
+    let kept = UserInstanceInput::new().with_unnamed_axes_kept(true);
+    assert!(kept.keep_unnamed_axes && kept.drop_var_tables && kept.axes.is_empty());
+    let kept_tables = UserInstanceInput::new().with_var_tables_dropped(false);
+    assert!(!kept_tables.drop_var_tables);
     let kept = instance_user(&face, &kept).unwrap();
     let kept = Face::parse_bytes(&kept.bytes, 0).unwrap();
     assert!(kept.fvar().unwrap().is_some(), "the axis stays");

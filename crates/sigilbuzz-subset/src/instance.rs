@@ -334,7 +334,11 @@ impl Default for InstanceInput {
 
 /// One axis' setting for [`instance_user`], in the axis' own units, the
 /// user space `fvar` describes (`wght` 100 to 900, say).
+///
+/// More settings may come, such as narrowing an axis, so a `match` on
+/// it needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum AxisLimit {
     /// Pins the axis at this value, clamped to the axis' range as
     /// HarfBuzz's `hb_subset_input_pin_axis_location` clamps it. A NaN
@@ -363,7 +367,12 @@ pub enum AxisLimit {
 }
 
 /// Inputs to [`instance_user`].
+///
+/// Build one with [`UserInstanceInput::new`] and the `with_` methods;
+/// fields may be added, so it cannot be written as a struct literal
+/// outside this crate.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UserInstanceInput {
     /// Axis settings by axis tag. A later setting for a tag wins over an
     /// earlier one, and a setting applies to every axis with its tag. A
@@ -387,6 +396,40 @@ impl Default for UserInstanceInput {
             keep_unnamed_axes: false,
             drop_var_tables: true,
         }
+    }
+}
+
+impl UserInstanceInput {
+    /// An input that names no axis: every axis is pinned at its
+    /// default, and the variation tables go.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The input with axis `tag` set to `limit`, after the settings it
+    /// already has.
+    #[must_use]
+    pub fn with_axis(mut self, tag: [u8; 4], limit: AxisLimit) -> Self {
+        self.axes.push((tag, limit));
+        self
+    }
+
+    /// The input with the axes it does not name kept variable (`true`)
+    /// or pinned at their defaults (`false`). See
+    /// [`UserInstanceInput::keep_unnamed_axes`].
+    #[must_use]
+    pub fn with_unnamed_axes_kept(mut self, keep: bool) -> Self {
+        self.keep_unnamed_axes = keep;
+        self
+    }
+
+    /// The input with the variable-font tables dropped (`true`) or kept.
+    /// See [`UserInstanceInput::drop_var_tables`].
+    #[must_use]
+    pub fn with_var_tables_dropped(mut self, drop: bool) -> Self {
+        self.drop_var_tables = drop;
+        self
     }
 }
 
@@ -415,10 +458,7 @@ impl Default for UserInstanceInput {
 ///
 /// let bytes = std::fs::read("./MyFont-VF.ttf").unwrap();
 /// let face = Face::parse_bytes(&bytes, 0).unwrap();
-/// let input = UserInstanceInput {
-///     axes: vec![(*b"wght", AxisLimit::Pin(700.0))],
-///     ..Default::default()
-/// };
+/// let input = UserInstanceInput::new().with_axis(*b"wght", AxisLimit::Pin(700.0));
 /// let bold = instance_user(&face, &input).unwrap();
 /// std::fs::write("./MyFont-Bold.ttf", &bold.bytes).unwrap();
 /// ```
