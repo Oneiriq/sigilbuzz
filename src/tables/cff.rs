@@ -47,7 +47,9 @@ use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 
-pub(crate) use charstring::{BlendContext, CharstringSink, Interp2, RegionCache};
+pub(crate) use charstring::{
+    BlendContext, CharstringSink, Interp2, RegionCache, MAX_CHARSTRING_OPS, OUT_OF_CHARSTRING_OPS,
+};
 pub(crate) use dict::FdSelect;
 pub(crate) use index::{read_index2, Index};
 
@@ -211,13 +213,38 @@ impl<'a> Cff<'a> {
     /// [`Cff::outline`] into any [`CharstringSink`], such as one that
     /// keeps the points in the `f64` the charstring is evaluated in.
     pub(crate) fn draw<S: CharstringSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
+        self.draw_with(glyph_id, sink, None)
+    }
+
+    /// [`Cff::draw`] for a caller that bounds many glyphs together: the
+    /// glyph's charstrings (a seac's base and accent included) may run
+    /// at most `ops_left` operations between them, which they take from
+    /// `ops_left`, failing with the operation-limit error past them.
+    pub(crate) fn draw_limited<S: CharstringSink>(
+        &self,
+        glyph_id: u16,
+        sink: &mut S,
+        ops_left: &mut u32,
+    ) -> Result<bool> {
+        self.draw_with(glyph_id, sink, Some(ops_left))
+    }
+
+    /// [`Cff::draw`], each charstring limited to its own operations, or
+    /// with `ops_left` shared as [`Cff::draw_limited`] shares it.
+    fn draw_with<S: CharstringSink>(
+        &self,
+        glyph_id: u16,
+        sink: &mut S,
+        mut ops_left: Option<&mut u32>,
+    ) -> Result<bool> {
         let gid = usize::from(glyph_id);
         if gid >= self.char_strings.len() {
             return Ok(false);
         }
         let local_subrs = self.local_subrs(gid)?;
-        if let Some(seac) = self.run_charstring(gid, local_subrs, sink, None)? {
-            self.draw_seac(seac, local_subrs, sink)?;
+        let seac = self.run_charstring(gid, local_subrs, sink, None, ops_left.as_deref_mut())?;
+        if let Some(seac) = seac {
+            self.draw_seac(seac, local_subrs, sink, ops_left)?;
         }
         Ok(true)
     }
@@ -231,13 +258,23 @@ impl<'a> Cff<'a> {
         local_subrs: Index<'a>,
         sink: &mut S,
         component: Option<(f64, f64)>,
+        ops_left: Option<&mut u32>,
     ) -> Result<Option<Seac>> {
         let cs = self.char_strings.get(gid)?;
         let mut interp = Interp::new(self.global_subrs, local_subrs, sink, false);
         if let Some((x, y)) = component {
             interp.start_seac_component(x, y);
         }
-        interp.run(cs, 0)?;
+        let ran = match ops_left {
+            Some(ops_left) => {
+                interp.limit_ops(*ops_left);
+                let ran = interp.run(cs, 0);
+                *ops_left = ops_left.saturating_sub(interp.ops());
+                ran
+            }
+            None => interp.run(cs, 0),
+        };
+        ran?;
         // A well-formed CFF1 charstring has already closed its last
         // contour at endchar; this only covers charstrings that end
         // without one.
@@ -254,6 +291,7 @@ impl<'a> Cff<'a> {
         seac: Seac,
         local_subrs: Index<'a>,
         sink: &mut S,
+        mut ops_left: Option<&mut u32>,
     ) -> Result<()> {
         if let FontDicts::Cid { .. } = self.fonts {
             return Err(Error::Unsupported {
@@ -263,8 +301,10 @@ impl<'a> Cff<'a> {
         let n_glyphs = self.char_strings.len();
         let base = charset::glyph_for_sid(self.data, self.charset, seac.base, n_glyphs)?;
         let accent = charset::glyph_for_sid(self.data, self.charset, seac.accent, n_glyphs)?;
-        self.run_charstring(base, local_subrs, sink, Some((0.0, 0.0)))?;
-        self.run_charstring(accent, local_subrs, sink, Some((seac.adx, seac.ady)))?;
+        let origin = Some((0.0, 0.0));
+        self.run_charstring(base, local_subrs, sink, origin, ops_left.as_deref_mut())?;
+        let accent_origin = Some((seac.adx, seac.ady));
+        self.run_charstring(accent, local_subrs, sink, accent_origin, ops_left)?;
         Ok(())
     }
 

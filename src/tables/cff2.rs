@@ -31,7 +31,9 @@ use alloc::vec::Vec;
 use core::cell::{OnceCell, RefCell};
 
 use crate::error::{Error, Result};
-use crate::tables::cff::{read_index2, BlendContext, CharstringSink, FdSelect, Index, RegionCache};
+use crate::tables::cff::{
+    read_index2, BlendContext, CharstringSink, FdSelect, Index, RegionCache, MAX_CHARSTRING_OPS,
+};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 use crate::tables::variation_store::ItemVariationStore;
@@ -158,6 +160,22 @@ impl<'a> Cff2<'a> {
         shared: &Cff2Shared<'a>,
         sink: &mut S,
     ) -> Result<bool> {
+        let mut ops = MAX_CHARSTRING_OPS;
+        self.outline_limited(glyph_id, coords, shared, sink, &mut ops)
+    }
+
+    /// [`Cff2::outline_shared`] for a caller that bounds many glyphs
+    /// together: the charstring may run at most `ops_left` operations
+    /// (and never more than one glyph may), which it takes from
+    /// `ops_left`, failing with the operation-limit error past them.
+    pub(crate) fn outline_limited<S: CharstringSink>(
+        &self,
+        glyph_id: u16,
+        coords: &[f32],
+        shared: &Cff2Shared<'a>,
+        sink: &mut S,
+        ops_left: &mut u32,
+    ) -> Result<bool> {
         let gid = usize::from(glyph_id);
         if gid >= self.char_strings.len() {
             return Ok(false);
@@ -207,7 +225,10 @@ impl<'a> Cff2<'a> {
         });
         let mut interp =
             crate::tables::cff::Interp2::new(self.global_subrs, private.local_subrs, sink, blend);
-        interp.run(cs, 0)?;
+        interp.limit_ops(*ops_left);
+        let ran = interp.run(cs, 0);
+        *ops_left = ops_left.saturating_sub(interp.ops());
+        ran?;
         // CFF2 has no endchar, so the last contour is still open when
         // the charstring runs out. Close it here.
         interp.finish();
@@ -262,6 +283,18 @@ pub(crate) struct Cff2Shared<'a> {
     ivs: OnceCell<Result<Option<ItemVariationStore<'a>>>>,
     privates: RefCell<BTreeMap<u16, Private<'a>>>,
     regions: RegionCache,
+}
+
+impl Cff2Shared<'_> {
+    /// Regions times axes of the variation store read so far: what
+    /// working out every region scalar at one coord vector costs, at
+    /// most. Zero before a glyph has read the store, or without one.
+    pub(crate) fn scalar_work(&self) -> usize {
+        match self.ivs.get() {
+            Some(Ok(Some(ivs))) => usize::from(ivs.region_count()) * usize::from(ivs.axis_count()),
+            _ => 0,
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------

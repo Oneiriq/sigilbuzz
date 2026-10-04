@@ -576,12 +576,16 @@ const PHANTOM_COUNT: usize = 4;
 /// few hundred points over at most a few hundred tuples.
 pub(crate) const MAX_TUPLE_WORK: usize = 1 << 24;
 
+/// The `context` of the error a walk fails with when its tuple work
+/// runs out.
+pub(crate) const OUT_OF_TUPLE_WORK: &str = "gvar variation work exceeds the cap";
+
 /// Takes `cost` units from `work`, or fails with the byte offset of the
 /// tuple data that would overspend it.
 fn charge(work: &mut usize, cost: usize, offset: usize) -> Result<()> {
     *work = work.checked_sub(cost).ok_or(Error::Malformed {
         offset,
-        context: "gvar variation work exceeds the cap",
+        context: OUT_OF_TUPLE_WORK,
     })?;
     Ok(())
 }
