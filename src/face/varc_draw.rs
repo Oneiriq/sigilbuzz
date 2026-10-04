@@ -50,7 +50,9 @@ const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// glyphs whose composites are being drawn, from the glyph drawn down,
 /// and a glyph that `VARC` covers is not drawn at position `k` of the
 /// path when it is the glyph at position `k / 2`, where HarfBuzz's
-/// tortoise sits.
+/// tortoise sits. That cuts a cycle of `n` glyphs `2n - 1` levels down,
+/// so one of more than 32 glyphs reaches [`MAX_VARC_DEPTH`] first, which
+/// fails the glyph where HarfBuzz stops expanding at that depth.
 pub(crate) struct VarcDraw<'w, 'a> {
     face: &'w Face<'a>,
     varc: &'w Varc<'a>,
