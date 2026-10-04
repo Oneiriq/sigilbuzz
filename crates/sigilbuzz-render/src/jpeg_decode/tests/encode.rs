@@ -289,25 +289,52 @@ pub(super) fn encode_baseline(img: &Image) -> Vec<u8> {
 
 /// `img` as a progressive (SOF2) stream under `script`.
 pub(super) fn encode_progressive(img: &Image, script: &[Scan]) -> Vec<u8> {
+    let parts: Vec<(Scan, Vec<u8>)> = script
+        .iter()
+        .map(|s| (s.clone(), scan_data(img, s)))
+        .collect();
+    assemble_progressive(img, &parts)
+}
+
+/// A progressive stream for `img` from scan headers and the entropy
+/// data that follows each, as given.
+pub(super) fn assemble_progressive(img: &Image, scans: &[(Scan, Vec<u8>)]) -> Vec<u8> {
     let mut out = header(img, MARKER_SOF2);
-    for s in script {
+    for (s, data) in scans {
         sos(&mut out, &s.comps, s.ss, s.se, s.ah, s.al);
-        let mut e = Entropy::new();
-        let order = img.scan_order(&s.comps);
-        match (s.ss, s.ah) {
-            (0, 0) => dc_first(&mut e, img, &order, s.al),
-            (0, _) => {
-                for &(ci, b) in &order {
-                    e.bits((img.blocks[ci][b][0] >> s.al) as u32 & 1, 1);
-                }
-            }
-            (_, 0) => ac_first(&mut e, img, &order, s),
-            _ => panic!("AC refinement scans are not encoded yet"),
-        }
-        out.extend_from_slice(&e.finish());
+        out.extend_from_slice(data);
     }
     out.extend_from_slice(&[0xFF, MARKER_EOI]);
     out
+}
+
+/// The entropy-coded data of scan `s` over `img`.
+pub(super) fn scan_data(img: &Image, s: &Scan) -> Vec<u8> {
+    let mut e = Entropy::new();
+    let order = img.scan_order(&s.comps);
+    match (s.ss, s.ah) {
+        (0, 0) => dc_first(&mut e, img, &order, s.al),
+        (0, _) => {
+            for &(ci, b) in &order {
+                e.bits((img.blocks[ci][b][0] >> s.al) as u32 & 1, 1);
+            }
+        }
+        (_, 0) => ac_first(&mut e, img, &order, s),
+        _ => ac_refine(&mut e, img, &order, s),
+    }
+    e.finish()
+}
+
+/// Entropy data that codes `symbols` in order, each `(symbol, bits,
+/// bit count)` with the table every test stream carries, for streams
+/// no encoder would write.
+pub(super) fn raw_data(symbols: &[(u8, u32, u8)]) -> Vec<u8> {
+    let mut e = Entropy::new();
+    for &(sym, bits, n) in symbols {
+        e.symbol(sym);
+        e.bits(bits, n);
+    }
+    e.finish()
 }
 
 fn dc_first(e: &mut Entropy, img: &Image, order: &[(usize, usize)], al: u8) {
@@ -384,6 +411,130 @@ pub(super) fn spectral_script(n_comps: usize) -> Vec<Scan> {
     }
     for ci in 0..n_comps {
         script.push(scan(vec![ci], 6, 63, 0, 0));
+    }
+    script
+}
+
+/// Correction bits libjpeg buffers before it forces out an EOB run.
+const MAX_CORR_BITS: usize = 1000;
+
+/// An AC refinement scan, as libjpeg's `encode_mcu_AC_refine` writes
+/// it: newly nonzero coefficients as run/size-1 symbols with a sign
+/// bit, correction bits for the already-nonzero ones after the symbol
+/// that follows them, and EOB runs that carry the correction bits of
+/// the blocks they end.
+fn ac_refine(e: &mut Entropy, img: &Image, order: &[(usize, usize)], s: &Scan) {
+    let (ss, se) = (usize::from(s.ss), usize::from(s.se));
+    let mut eob_run = 0u32;
+    // Correction bits of the blocks in the pending EOB run.
+    let mut be: Vec<u8> = Vec::new();
+    for &(ci, b) in order {
+        let block = &img.blocks[ci][b];
+        let abs: Vec<u16> = (0..64).map(|k| block[k].unsigned_abs() >> s.al).collect();
+        // The last coefficient that becomes nonzero in this scan.
+        let eob = (ss..=se).rev().find(|&k| abs[k] == 1).unwrap_or(0);
+        let mut run = 0u8;
+        // Correction bits of this block since the last symbol.
+        let mut br: Vec<u8> = Vec::new();
+        for k in ss..=se {
+            let a = abs[k];
+            if a == 0 {
+                run += 1;
+                continue;
+            }
+            while run > 15 && k <= eob {
+                flush_eob_run(e, &mut eob_run, &mut be);
+                e.symbol(0xF0);
+                run -= 16;
+                for bit in br.drain(..) {
+                    e.bits(u32::from(bit), 1);
+                }
+            }
+            if a > 1 {
+                br.push((a & 1) as u8);
+                continue;
+            }
+            flush_eob_run(e, &mut eob_run, &mut be);
+            e.symbol((run << 4) | 1);
+            e.bits(u32::from(block[k] >= 0), 1);
+            for bit in br.drain(..) {
+                e.bits(u32::from(bit), 1);
+            }
+            run = 0;
+        }
+        if run > 0 || !br.is_empty() {
+            eob_run += 1;
+            be.append(&mut br);
+            if eob_run == 0x7FFF || be.len() > MAX_CORR_BITS - 64 + 1 {
+                flush_eob_run(e, &mut eob_run, &mut be);
+            }
+        }
+    }
+    flush_eob_run(e, &mut eob_run, &mut be);
+}
+
+/// [`emit_eob_run`], then the correction bits the run carries.
+fn flush_eob_run(e: &mut Entropy, eob_run: &mut u32, be: &mut Vec<u8>) {
+    if *eob_run == 0 {
+        return;
+    }
+    emit_eob_run(e, eob_run);
+    for bit in be.drain(..) {
+        e.bits(u32::from(bit), 1);
+    }
+}
+
+/// libjpeg's `jpeg_simple_progression` script: spectral selection and
+/// successive approximation, with refinement scans for DC and AC.
+pub(super) fn libjpeg_script(n_comps: usize) -> Vec<Scan> {
+    let all: Vec<usize> = (0..n_comps).collect();
+    if n_comps == 3 {
+        vec![
+            scan(all.clone(), 0, 0, 0, 1),
+            scan(vec![0], 1, 5, 0, 2),
+            scan(vec![2], 1, 63, 0, 1),
+            scan(vec![1], 1, 63, 0, 1),
+            scan(vec![0], 6, 63, 0, 2),
+            scan(vec![0], 1, 63, 2, 1),
+            scan(all, 0, 0, 1, 0),
+            scan(vec![2], 1, 63, 1, 0),
+            scan(vec![1], 1, 63, 1, 0),
+            scan(vec![0], 1, 63, 1, 0),
+        ]
+    } else {
+        let mut script = vec![scan(all.clone(), 0, 0, 0, 1)];
+        for ci in 0..n_comps {
+            script.push(scan(vec![ci], 1, 5, 0, 2));
+            script.push(scan(vec![ci], 6, 63, 0, 2));
+            script.push(scan(vec![ci], 1, 63, 2, 1));
+        }
+        script.push(scan(all, 0, 0, 1, 0));
+        for ci in 0..n_comps {
+            script.push(scan(vec![ci], 1, 63, 1, 0));
+        }
+        script
+    }
+}
+
+/// Every bit of every coefficient in its own pass: DC and four AC
+/// bands, each first coded at `Al = 5` and then refined one bit at a
+/// time. Long EOB runs and many correction bits per block.
+pub(super) fn deep_script(n_comps: usize) -> Vec<Scan> {
+    let all: Vec<usize> = (0..n_comps).collect();
+    let bands = [(1, 2), (3, 9), (10, 40), (41, 63)];
+    let mut script = vec![scan(all.clone(), 0, 0, 0, 5)];
+    for ci in 0..n_comps {
+        for &(ss, se) in &bands {
+            script.push(scan(vec![ci], ss, se, 0, 5));
+        }
+    }
+    for al in (0..5).rev() {
+        script.push(scan(all.clone(), 0, 0, al + 1, al));
+        for ci in 0..n_comps {
+            for &(ss, se) in &bands {
+                script.push(scan(vec![ci], ss, se, al + 1, al));
+            }
+        }
     }
     script
 }

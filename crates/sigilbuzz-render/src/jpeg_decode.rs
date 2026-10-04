@@ -7,10 +7,11 @@
 //!
 //! - **8-bit precision only.** All real-world font sbix JPEGs are 8-bit.
 //! - **Baseline sequential DCT (SOF0)** plus **progressive DCT (SOF2)**
-//!   first-time DC and AC scans, plus DC successive-approximation
-//!   refinement. AC successive-approximation refinement scans (Ah > 0
-//!   on an AC band) are surfaced as [`RenderError::BadJpeg`]. They are
-//!   uncommon in real-world font payloads and not implemented. No
+//!   with spectral selection and successive approximation: first DC
+//!   and AC scans and DC and AC refinement scans (T.81 G.1.2). All the
+//!   scans of a progressive frame together may visit at most 1024
+//!   coefficients per 8x8 block, which a valid scan script never
+//!   needs; a stream past that is [`RenderError::BadJpeg`]. No
 //!   arithmetic coding (SOF9..15), no hierarchical (SOFE).
 //! - **YCbCr** (3-component) and **grayscale** (1-component).
 //! - **Sampling factors:** 4:4:4, 4:2:2, 4:2:0, and any combination
@@ -45,9 +46,6 @@
 //!
 //! # Non-goals
 //!
-//! - AC successive-approximation refinement scans (rare; the bit-plane
-//!   walking over existing nonzeros is the thorny progressive
-//!   subroutine and not seen in font sbix payloads we tested against).
 //! - Arithmetic coding, lossless JPEG, JPEG-LS, JPEG 2000 (`'jp2 '`),
 //!   TIFF (`'tiff'`).
 //! - Color-managed output (ICC profiles), EXIF orientation.
@@ -97,6 +95,15 @@ const MAX_HUFF_TABLES: usize = 4;
 /// Hard cap on quantization table count. Same logic: 4 destinations.
 const MAX_QT_TABLES: usize = 4;
 
+/// Coefficient visits a progressive frame's scans may make per 8x8
+/// block, summed over every scan: a scan of band `Ss..=Se` costs
+/// `Se - Ss + 1` per block it covers. A valid script codes each bit of
+/// each coefficient once, which costs at most 64 * 14 = 896 (the first
+/// scan plus one refinement per bit, `Al <= 13`), so only a stream
+/// that repeats scans runs out. The cap keeps a few bytes per scan
+/// from making the decoder walk every block again and again.
+const SCAN_WORK_PER_BLOCK: u64 = 1024;
+
 // ---------------------------------------------------------------------------
 // Public API.
 // ---------------------------------------------------------------------------
@@ -107,9 +114,8 @@ const MAX_QT_TABLES: usize = 4;
 /// Supports 8-bit JPEGs with YCbCr (3-component) or grayscale
 /// (1-component) data and sampling factors where each component's
 /// max h/v is `<= 2`. Both baseline (SOF0) and progressive (SOF2,
-/// first-time DC/AC scans plus DC successive-approximation
-/// refinement) modes are handled. AC successive-approximation
-/// refinement scans, arithmetic coding, 16-bit precision,
+/// spectral selection and successive approximation, refinement scans
+/// included) modes are handled. Arithmetic coding, 16-bit precision,
 /// hierarchical mode, restart markers, and JPEG2000 / TIFF return
 /// [`RenderError::BadJpeg`].
 ///
@@ -159,6 +165,9 @@ struct Decoder<'a> {
     /// to `mcus_x * h_sampling` and `mcus_y * v_sampling` for each
     /// component.
     blocks_per_comp: Vec<(u32, u32)>,
+    /// Coefficient visits the progressive scans may still spend. See
+    /// [`SCAN_WORK_PER_BLOCK`].
+    scan_budget: u64,
 }
 
 impl<'a> Decoder<'a> {
@@ -175,6 +184,7 @@ impl<'a> Decoder<'a> {
             progressive: false,
             coeffs: Vec::new(),
             blocks_per_comp: Vec::new(),
+            scan_budget: 0,
         }
     }
 
@@ -476,6 +486,12 @@ impl<'a> Decoder<'a> {
             self.blocks_per_comp.push((bw, bh));
             self.coeffs.push(vec![0i16; (bw * bh * 64) as usize]);
         }
+        let blocks: u64 = self
+            .blocks_per_comp
+            .iter()
+            .map(|&(bw, bh)| u64::from(bw) * u64::from(bh))
+            .sum();
+        self.scan_budget = blocks.saturating_mul(SCAN_WORK_PER_BLOCK);
     }
 }
 

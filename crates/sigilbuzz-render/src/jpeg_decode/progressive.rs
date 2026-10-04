@@ -85,27 +85,25 @@ impl<'a> Decoder<'a> {
             return Err(RenderError::BadJpeg("progressive Ah/Al out of range"));
         }
 
-        // AC successive-approximation refinement (bit-plane walking
-        // over the existing nonzero coefficients) is not implemented.
-        // Surface it before any table validation so callers see a
-        // stable error message regardless of the upstream stream's
-        // table layout.
-        if !is_dc && ah != 0 {
-            return Err(RenderError::BadJpeg(
-                "progressive AC refinement scans not supported",
-            ));
-        }
-
-        // Validate Huffman tables for the scan participants.
+        // Validate Huffman tables for the scan participants. A DC
+        // refinement scan reads raw bits and needs no table.
         for &ci in &scan_indices {
             let comp = &self.components[ci];
-            if is_dc && table_slot(&self.dc_huff, comp.dc_huff).is_none() {
+            if is_dc && ah == 0 && table_slot(&self.dc_huff, comp.dc_huff).is_none() {
                 return Err(RenderError::BadJpeg("missing DC Huffman table"));
             }
             if !is_dc && table_slot(&self.ac_huff, comp.ac_huff).is_none() {
                 return Err(RenderError::BadJpeg("missing AC Huffman table"));
             }
         }
+
+        // Charge the whole scan before decoding it.
+        let band = u64::from(se - ss) + 1;
+        let cost = self.scan_block_count(&scan_indices).saturating_mul(band);
+        self.scan_budget = self
+            .scan_budget
+            .checked_sub(cost)
+            .ok_or(RenderError::BadJpeg("progressive scans exceed work budget"))?;
 
         // Hand off to the appropriate scan handler. The bit reader
         // consumes from `self.cursor`; on completion we advance the
@@ -121,7 +119,11 @@ impl<'a> Decoder<'a> {
                     self.scan_dc_refine(&mut br, &scan_indices, al)?;
                 }
             } else if let &[ci] = scan_indices.as_slice() {
-                self.scan_ac_first(&mut br, ci, ss, se, al)?;
+                if ah == 0 {
+                    self.scan_ac_first(&mut br, ci, ss, se, al)?;
+                } else {
+                    self.scan_ac_refine(&mut br, ci, ss, se, al)?;
+                }
             }
             br.pos
         };
@@ -244,6 +246,23 @@ impl<'a> Decoder<'a> {
         (comp_w.div_ceil(8).min(bw), comp_h.div_ceil(8).min(bh))
     }
 
+    /// Blocks a scan over `scan_indices` visits: the component's sample
+    /// blocks for a single-component scan, every block of every MCU for
+    /// an interleaved one.
+    fn scan_block_count(&self, scan_indices: &[usize]) -> u64 {
+        if let &[ci] = scan_indices {
+            let (cols, rows) = self.scan_blocks(ci);
+            return u64::from(cols) * u64::from(rows);
+        }
+        let (mcus_x, mcus_y) = self.mcu_grid();
+        let per_mcu: u64 = scan_indices
+            .iter()
+            .filter_map(|&ci| self.components.get(ci))
+            .map(|c| u64::from(c.h_sampling) * u64::from(c.v_sampling))
+            .sum();
+        u64::from(mcus_x) * u64::from(mcus_y) * per_mcu
+    }
+
     /// Refinement DC scan (Ah > 0). Reads one bit per block and ORs
     /// it into bit position `al` of the existing DC coefficient.
     fn scan_dc_refine(
@@ -356,6 +375,105 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
+    /// AC successive-approximation refinement scan (Ah > 0), T.81
+    /// G.1.2.3. Each newly nonzero coefficient arrives as a run/size
+    /// symbol of size 1 and a sign bit, and becomes `±2^al`. Every
+    /// coefficient that was already nonzero gets one correction bit,
+    /// read as the scan walks past it, that adds `2^al` to its
+    /// magnitude. An EOB run ends the band for a number of blocks, but
+    /// the nonzero coefficients in the rest of each of those blocks
+    /// still read their correction bits.
+    ///
+    /// Each pass through a loop moves `k` forward or ends the block,
+    /// and an EOB run counts down once per block, so a scan does at
+    /// most one step per coefficient of its band per block whatever
+    /// the stream says.
+    fn scan_ac_refine(
+        &mut self,
+        br: &mut BitReader<'_>,
+        ci: usize,
+        ss: u8,
+        se: u8,
+        al: u8,
+    ) -> Result<(), RenderError> {
+        let comp = self.components[ci];
+        let (cols, rows) = self.scan_blocks(ci);
+        let stride = self.blocks_per_comp.get(ci).map_or(0, |&(bw, _)| bw);
+        let ac_tbl = table_slot(&self.ac_huff, comp.ac_huff)
+            .ok_or(RenderError::BadJpeg("missing AC Huffman table"))?;
+        let Some(coeffs) = self.coeffs.get_mut(ci) else {
+            return Ok(());
+        };
+        // `al <= 13`, so both fit an i16.
+        let p1: i16 = 1 << al;
+        let m1: i16 = -1 << al;
+        let (ss, se) = (usize::from(ss), usize::from(se));
+        let mut eob_run: u32 = 0;
+        for by in 0..rows {
+            for bx in 0..cols {
+                let off = (by * stride + bx) as usize * 64;
+                let Some(block) = coeffs.get_mut(off..off + 64) else {
+                    continue;
+                };
+                let mut k = ss;
+                if eob_run == 0 {
+                    while k <= se {
+                        let rs = br.decode_huff(ac_tbl)?;
+                        let mut run = i32::from(rs >> 4);
+                        let size = rs & 0x0F;
+                        let mut value = 0i16;
+                        if size != 0 {
+                            // The size is 1 in a valid stream; libjpeg
+                            // reads any other size the same way.
+                            value = if br.read_bits(1) != 0 { p1 } else { m1 };
+                        } else if run != 15 {
+                            // EOBn: this block and 2^run - 1 + the
+                            // extra bits more end here.
+                            eob_run = 1u32 << run;
+                            if run > 0 {
+                                eob_run += br.read_bits(run as u8);
+                            }
+                            break;
+                        }
+                        // Walk past the already-nonzero coefficients,
+                        // refining each, and `run` zero ones. The value
+                        // (or, for ZRL, the 16th zero) goes at the zero
+                        // the walk stops on.
+                        while k <= se {
+                            let coef = &mut block[k];
+                            if *coef != 0 {
+                                refine_coefficient(br, coef, p1, m1);
+                            } else {
+                                run -= 1;
+                                if run < 0 {
+                                    break;
+                                }
+                            }
+                            k += 1;
+                        }
+                        if value != 0 {
+                            if let Some(slot) = block.get_mut(k).filter(|_| k <= se) {
+                                *slot = value;
+                            }
+                        }
+                        k += 1;
+                    }
+                }
+                if eob_run > 0 {
+                    // The band ended: only the correction bits of the
+                    // nonzero coefficients left in it follow.
+                    for coef in block.iter_mut().take(se + 1).skip(k) {
+                        if *coef != 0 {
+                            refine_coefficient(br, coef, p1, m1);
+                        }
+                    }
+                    eob_run -= 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run IDCT over each component's accumulated coefficient buffer
     /// and compose into the final RGBA pixmap.
     pub(super) fn finalize_progressive(&mut self) -> Result<ColorPixmap, RenderError> {
@@ -429,5 +547,15 @@ impl<'a> Decoder<'a> {
         }
 
         self.compose_planes(&planes, &plane_strides, max_h, max_v)
+    }
+}
+
+/// Reads the correction bit of an already-nonzero coefficient being
+/// refined at bit `al` (`p1 = 2^al`, `m1 = -2^al`). A set bit moves the
+/// coefficient one step away from zero, unless that bit is already set,
+/// as libjpeg does for a stream that refines a bit twice.
+fn refine_coefficient(br: &mut BitReader<'_>, coef: &mut i16, p1: i16, m1: i16) {
+    if br.read_bits(1) != 0 && *coef & p1 == 0 {
+        *coef = coef.wrapping_add(if *coef >= 0 { p1 } else { m1 });
     }
 }
