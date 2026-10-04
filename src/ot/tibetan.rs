@@ -29,10 +29,10 @@ use crate::tables::Gsub;
 /// for fonts that only carry features in the default LangSys.
 pub const TIBT_SCRIPT_PRIORITY: &[[u8; 4]] = &[*b"tibt", *b"DFLT"];
 
-/// True for every codepoint that is part of the Tibetan block.
-/// Mirrors [`crate::unicode::script_of`]'s Tibetan arm so the
-/// dispatcher can use it as a fast pre-filter without going through
-/// the full script classifier.
+/// True for every codepoint that is part of the Tibetan block
+/// (U+0F00..U+0FFF), a fast block check. [`crate::unicode::script_of`]
+/// reads the Script property instead, which gives the Common symbols
+/// of the block (U+0FD5..U+0FD8) no Tibetan bucket.
 #[must_use]
 pub const fn is_tibetan(ch: char) -> bool {
     matches!(ch as u32, 0x0F00..=0x0FFF)

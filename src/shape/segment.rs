@@ -32,14 +32,15 @@ pub(super) struct ProcessedSegment {
 /// The script tags a segment of `script` tries. The Han bucket also
 /// holds Hiragana and Katakana, which HarfBuzz tags `kana`, not `hani`
 /// (`hb_ot_tags_from_script`); a segment whose first script-bearing
-/// character is kana takes `kana`, as HarfBuzz's buffer would.
+/// character's Script property is Hiragana or Katakana takes `kana`,
+/// as HarfBuzz's buffer would.
 fn segment_priority(script: Script, cps: &[char]) -> &'static [[u8; 4]] {
     const KANA_PRIORITY: &[[u8; 4]] = &[*b"kana", *b"DFLT"];
     let kana = script == Script::Han
         && cps
             .iter()
             .find(|&&c| !is_common_for_segmentation(c))
-            .is_some_and(|&c| matches!(c as u32, 0x3040..=0x30FF));
+            .is_some_and(|&c| matches!(&crate::unicode::script_code(c), b"Hira" | b"Kana"));
     if kana {
         KANA_PRIORITY
     } else {
@@ -49,8 +50,10 @@ fn segment_priority(script: Script, cps: &[char]) -> &'static [[u8; 4]] {
 
 /// Splits the post-cmap codepoint stream into [`Segment`]s whose
 /// scripts agree with the buffer-level [`crate::buffer::Buffer::script_runs`]
-/// segmentation: COMMON codepoints (ASCII space/digits/punctuation,
-/// ZWJ/ZWNJ/bidi marks) extend whichever real-script segment ran
+/// segmentation: each codepoint takes the bucket of its Unicode Script
+/// property, and COMMON, INHERITED, and UNKNOWN codepoints (ASCII
+/// space/digits/punctuation, ZWJ/ZWNJ/bidi marks, combining marks,
+/// private-use characters) extend whichever real-script segment ran
 /// before them, and so does a Hangul tone mark. A leading COMMON-only
 /// run joins the first real script after it, the way HarfBuzz gives a
 /// buffer the script of its first non-COMMON character, and text with
@@ -109,8 +112,8 @@ pub(super) fn build_segments(codepoints: &[char]) -> Vec<Segment> {
 }
 
 /// The script HarfBuzz's `hb_buffer_guess_segment_properties` gives a
-/// buffer of `chars`: that of the first character that is not Common
-/// or Inherited, or `None` when every character is.
+/// buffer of `chars`: that of the first character that is not Common,
+/// Inherited, or Unknown, or `None` when every character is.
 pub(crate) fn guess_script(chars: impl IntoIterator<Item = char>) -> Option<Script> {
     chars
         .into_iter()

@@ -3,10 +3,24 @@
 use super::*;
 
 #[test]
-fn classifies_latin_ascii() {
+fn classifies_latin() {
     assert_eq!(script_of('A'), Script::Latin);
     assert_eq!(script_of('z'), Script::Latin);
-    assert_eq!(script_of('0'), Script::Latin);
+    // The ordinal indicators are Latin letters.
+    assert_eq!(script_of('\u{00AA}'), Script::Latin);
+    // Letters outside Basic Latin and Latin-1 and Extended-A/B: IPA,
+    // Latin Extended Additional (Vietnamese), Extended-C, -D, -E,
+    // the f ligatures, the fullwidth forms, and the Roman numerals.
+    for c in [
+        '\u{0250}', '\u{1EF7}', '\u{1EF0}', '\u{1EA0}', '\u{2C60}', '\u{A732}', '\u{AB30}',
+        '\u{FB01}', '\u{FF41}', '\u{2160}',
+    ] {
+        assert_eq!(script_of(c), Script::Latin, "U+{:04X}", c as u32);
+    }
+    // Digits, punctuation, and the space are Common.
+    for c in ['0', ' ', '.', '\u{00D7}'] {
+        assert_eq!(script_of(c), Script::Other, "U+{:04X}", c as u32);
+    }
 }
 
 #[test]
@@ -14,12 +28,33 @@ fn classifies_cjk_ideographs() {
     assert_eq!(script_of('字'), Script::Han);
     assert_eq!(script_of('あ'), Script::Han); // Hiragana
     assert_eq!(script_of('カ'), Script::Han); // Katakana
+
+    // Extensions past B, the compatibility ideographs, the radicals,
+    // the ideographic iteration mark, and the kana outside the
+    // Hiragana and Katakana blocks.
+    let han =
+        "\u{2A700}\u{2B820}\u{30000}\u{2EBF0}\u{F900}\u{2F00}\u{2E80}\u{3005}\u{31F0}\u{FF66}";
+    for c in han.chars().chain(['\u{1B001}', '\u{32D0}']) {
+        assert_eq!(script_of(c), Script::Han, "U+{:04X}", c as u32);
+    }
+    // The CJK punctuation and the prolonged sound mark are Common.
+    assert_eq!(script_of('\u{3001}'), Script::Other);
+    assert_eq!(script_of('\u{30FC}'), Script::Other);
 }
 
 #[test]
 fn classifies_arabic() {
     assert_eq!(script_of('ا'), Script::Arabic);
     assert_eq!(script_of('ل'), Script::Arabic);
+    // Arabic Extended-A, -B, and -C, the Rumi numerals, and the
+    // mathematical alphabetic symbols.
+    for c in "\u{08A0}\u{08F0}\u{0870}\u{10EC2}\u{10E60}\u{1EE00}".chars() {
+        assert_eq!(script_of(c), Script::Arabic, "U+{:04X}", c as u32);
+    }
+    // The tatweel and the comma are Common, the harakat Inherited.
+    for c in ['\u{0640}', '\u{060C}', '\u{064B}'] {
+        assert_eq!(script_of(c), Script::Other, "U+{:04X}", c as u32);
+    }
 }
 
 #[test]
@@ -42,7 +77,14 @@ fn classifies_hebrew() {
 #[test]
 fn classifies_greek_and_cyrillic() {
     assert_eq!(script_of('Δ'), Script::Greek);
+    assert_eq!(script_of('\u{1F00}'), Script::Greek);
     assert_eq!(script_of('Д'), Script::Cyrillic);
+    // Cyrillic Extended-A (combining letters), -B, and -C.
+    assert_eq!(script_of('\u{2DE0}'), Script::Cyrillic);
+    assert_eq!(script_of('\u{A640}'), Script::Cyrillic);
+    assert_eq!(script_of('\u{1C80}'), Script::Cyrillic);
+    // The Coptic letters of the Greek and Coptic block are Coptic.
+    assert_eq!(script_of('\u{03E2}'), Script::Other);
 }
 
 #[test]
@@ -50,6 +92,11 @@ fn classifies_devanagari() {
     // Devanagari ka (U+0915) and vowel sign I (U+093F).
     assert_eq!(script_of('\u{0915}'), Script::Devanagari);
     assert_eq!(script_of('\u{093F}'), Script::Devanagari);
+    // Devanagari Extended and Extended-A.
+    assert_eq!(script_of('\u{A8F2}'), Script::Devanagari);
+    assert_eq!(script_of('\u{11B00}'), Script::Devanagari);
+    // The dandas are Common.
+    assert_eq!(script_of('\u{0964}'), Script::Other);
 }
 
 #[test]
@@ -138,6 +185,24 @@ fn classifies_hangul() {
     assert_eq!(script_of('\u{AC00}'), Script::Hangul);
     assert_eq!(script_of('\u{A960}'), Script::Hangul);
     assert_eq!(script_of('\u{D7B0}'), Script::Hangul);
+    // The tone marks, a parenthesized syllable, and a halfwidth jamo.
+    assert_eq!(script_of('\u{302E}'), Script::Hangul);
+    assert_eq!(script_of('\u{3200}'), Script::Hangul);
+    assert_eq!(script_of('\u{FFA1}'), Script::Hangul);
+}
+
+#[test]
+fn classifies_supplements_of_the_older_buckets() {
+    assert_eq!(script_of('\u{11660}'), Script::Mongolian); // Mongolian Supplement
+    assert_eq!(script_of('\u{1820}'), Script::Mongolian);
+    assert_eq!(script_of('\u{11FC0}'), Script::Tamil); // Tamil Supplement
+    assert_eq!(script_of('\u{111E1}'), Script::Sinhala); // archaic numbers
+    assert_eq!(script_of('\u{116D0}'), Script::Myanmar); // Myanmar Extended-C
+    assert_eq!(script_of('\u{1CC0}'), Script::Sundanese); // Sundanese Supplement
+
+    // The Mongolian comma and full stop are Common.
+    assert_eq!(script_of('\u{1802}'), Script::Other);
+    assert_eq!(script_of('\u{1803}'), Script::Other);
 }
 
 #[test]
@@ -238,9 +303,13 @@ fn classifies_scripts_from_the_script_property() {
     // Other: Javanese pangrangkep, and a gap in the Syriac block.
     assert_eq!(script_of('\u{A9CF}'), Script::Other);
     assert_eq!(script_of('\u{070E}'), Script::Other);
-    // The block ranges of the older buckets still win.
-    assert_eq!(script_of('\u{0640}'), Script::Arabic);
-    assert_eq!(script_of('\u{0964}'), Script::Devanagari);
+    // So do the Common code points in the blocks of the older
+    // buckets, and the unassigned and private-use code points.
+    assert_eq!(script_of('\u{0640}'), Script::Other);
+    assert_eq!(script_of('\u{0964}'), Script::Other);
+    assert_eq!(script_of('\u{0378}'), Script::Other);
+    assert_eq!(script_of('\u{E000}'), Script::Other);
+    assert_eq!(script_of('\u{10FFFF}'), Script::Other);
 }
 
 #[test]
@@ -262,14 +331,24 @@ fn common_and_inherited_characters_take_the_run_script() {
     for c in ['\u{0640}', '\u{064B}', '\u{0964}', '\u{A9CF}', '\u{3001}'] {
         assert!(is_common_or_inherited(c), "U+{:04X}", c as u32);
     }
-    // The blocks listed by hand before.
+    // Common punctuation and digits, the combining marks, the joiners
+    // and selectors, and the Cyrillic combining half marks of the
+    // hand-listed combining mark blocks.
     for c in [
-        ' ', '1', '\u{00AA}', '\u{0301}', '\u{200D}', '\u{25CC}', '\u{FE0F}',
+        ' ', '1', '\u{0301}', '\u{200D}', '\u{25CC}', '\u{FE0F}', '\u{FE2E}',
     ] {
         assert!(is_common_or_inherited(c), "U+{:04X}", c as u32);
     }
+    // Unknown: unassigned and private-use code points, which
+    // HarfBuzz's script guess skips too.
+    for c in ['\u{0378}', '\u{E000}', '\u{F0000}', '\u{10FFFF}'] {
+        assert!(is_common_or_inherited(c), "U+{:04X}", c as u32);
+    }
+    // Letters of a script, the ordinal indicators (Latin) included,
+    // and the default ignorables of a script of their own.
     for c in [
-        'a', '\u{0628}', '\u{0915}', '\u{A98F}', '\u{17B4}', '\u{180B}',
+        'a', '\u{00AA}', '\u{00BA}', '\u{1EF7}', '\u{0628}', '\u{08A0}', '\u{0915}', '\u{A98F}',
+        '\u{17B4}', '\u{180B}',
     ] {
         assert!(!is_common_or_inherited(c), "U+{:04X}", c as u32);
     }

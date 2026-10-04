@@ -55,9 +55,9 @@ const CODES: &[(Script, [u8; 4])] = &[
 /// A bucket, its ISO 15924 code, and the script tags its lookups try.
 type TableCode = (Script, [u8; 4], [[u8; 4]; 2]);
 
-/// The buckets whose code points come from the Unicode Script property
-/// (see [`super::script_of`]): each with its ISO 15924 code and the
-/// script tags its lookups try. HarfBuzz tags each of these scripts with
+/// The buckets added in 0.22.0, Syriac through Seal (see
+/// [`super::Script`]): each with its ISO 15924 code and the script
+/// tags its lookups try. HarfBuzz tags each of these scripts with
 /// its ISO 15924 code in lowercase (`hb_ot_old_tag_from_script` in
 /// `hb-ot-tag.cc`), and sigilbuzz falls back to `DFLT` as for the
 /// other buckets.
@@ -202,9 +202,9 @@ impl Script {
             })
     }
 
-    /// The script tags the lookups of a bucket that takes its code
-    /// points from the Unicode Script property try, or `None` for the
-    /// older buckets, whose lists live with their shapers.
+    /// The script tags the lookups of a bucket added in 0.22.0 try, or
+    /// `None` for the older buckets, whose lists live with their
+    /// shapers.
     pub(crate) fn table_script_priority(self) -> Option<&'static [[u8; 4]]> {
         TABLE_CODES
             .iter()

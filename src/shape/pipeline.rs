@@ -25,6 +25,17 @@ use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningFor
 use crate::unicode::joining::{joining_type, JoiningType};
 use crate::unicode::{script_of, Script};
 
+/// Whether text whose first character is `first` takes the implicit
+/// vertical layout of Mongolian: `first` is a character of the
+/// Mongolian script in the Mongolian block (U+1800..U+18AF: a letter, a
+/// digit, the birga, a variation selector). The Common punctuation of
+/// the block and the ornaments of the Mongolian Supplement start no
+/// vertical text, and neither does a space, a digit, a quotation mark,
+/// or a letter of another script before the Mongolian.
+fn starts_mongolian(first: char) -> bool {
+    matches!(first as u32, 0x1800..=0x18AF) && script_of(first) == Script::Mongolian
+}
+
 /// Shapes `buffer` against `font` with optional feature overrides.
 ///
 /// Feature tags with `value: 0` disable the corresponding feature
@@ -49,21 +60,13 @@ use crate::unicode::{script_of, Script};
 // visible in one place.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
     // Vertical layout: explicit when the buffer direction is TTB/BTT,
-    // *implicit* when the run is dominantly Mongolian and the caller
-    // never chose a direction. Mongolian's traditional writing axis is
-    // top-to-bottom; auto-vertical here lets simple callers shape
-    // Mongolian without having to know the default. An explicit
-    // direction always wins, so `set_direction(Direction::Ltr)` gives
-    // horizontal Mongolian.
-    let mongolian_dominant = buffer
-        .text()
-        .chars()
-        .any(|c| crate::unicode::script_of(c) == crate::unicode::Script::Mongolian)
-        && buffer
-            .text()
-            .chars()
-            .find(|c| !matches!(crate::unicode::script_of(*c), crate::unicode::Script::Other))
-            .is_some_and(|c| crate::unicode::script_of(c) == crate::unicode::Script::Mongolian);
+    // *implicit* for Mongolian text when the caller never chose a
+    // direction (see `starts_mongolian`). Mongolian's traditional
+    // writing axis is top-to-bottom; auto-vertical here lets simple
+    // callers shape Mongolian without having to know the default.
+    // HarfBuzz has no such default. An explicit direction always wins,
+    // so `set_direction(Direction::Ltr)` gives horizontal Mongolian.
+    let mongolian_dominant = buffer.text().chars().next().is_some_and(starts_mongolian);
     // The direction every later pass works with: the buffer's, or TTB
     // for implicit vertical Mongolian.
     let direction = if !buffer.has_explicit_direction() && mongolian_dominant {
