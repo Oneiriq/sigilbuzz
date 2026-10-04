@@ -13,9 +13,10 @@
 //!   [`Font::with_coords`](super::Font::with_coords) and
 //!   [`Font::with_size`](super::Font::with_size) keep it.
 //! - [`InstanceCache`], which depends on the variation coordinates too:
-//!   the vertical origins and the advances that come from phantom
-//!   points, which cost an outline walk per glyph. `with_size` keeps it
-//!   and `with_coords` starts a new one.
+//!   the vertical origins and the varied advances, which cost an outline
+//!   walk (phantom points) or a walk of a variation store's regions
+//!   (`HVAR`, `VVAR`) per glyph. `with_size` keeps it and `with_coords`
+//!   starts a new one.
 //!
 //! A font's first shaping call builds none of this: a font shaped once,
 //! which many callers build per run, would spend more building it than
@@ -175,7 +176,7 @@ impl FaceCache {
 }
 
 /// What a font keeps that depends on its coordinates too: per-glyph
-/// values whose computation walks an outline.
+/// values whose computation walks an outline or a variation store.
 pub(crate) struct InstanceCache {
     v_origins: OnceBox<GlyphCache>,
     v_advances: OnceBox<GlyphCache>,
@@ -187,12 +188,13 @@ pub(crate) struct InstanceCache {
 pub(crate) enum GlyphValue {
     /// The y of the vertical origin.
     VOrigin,
-    /// The vertical advance from varied phantom points, if they could
-    /// be computed.
-    VPhantomAdvance,
-    /// The horizontal advance from varied phantom points, if they
-    /// could be computed.
-    HPhantomAdvance,
+    /// The varied vertical advance: from `VVAR`, or from varied phantom
+    /// points, if they could be computed. A font has `VVAR` or not, so
+    /// one instance only ever stores one kind.
+    VAdvance,
+    /// The varied horizontal advance: from `HVAR`, or from varied
+    /// phantom points, if they could be computed.
+    HAdvance,
 }
 
 impl InstanceCache {
@@ -207,8 +209,8 @@ impl InstanceCache {
     fn cache(&self, which: GlyphValue) -> &OnceBox<GlyphCache> {
         match which {
             GlyphValue::VOrigin => &self.v_origins,
-            GlyphValue::VPhantomAdvance => &self.v_advances,
-            GlyphValue::HPhantomAdvance => &self.h_advances,
+            GlyphValue::VAdvance => &self.v_advances,
+            GlyphValue::HAdvance => &self.h_advances,
         }
     }
 

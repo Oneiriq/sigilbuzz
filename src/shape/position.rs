@@ -374,9 +374,11 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
 ///
 /// The pipeline builds one per shaping call and hands it to the
 /// vertical origins, the fallback spaces, and the `stch` stretch. The
-/// values that walk an outline (vertical origins, and advances from
-/// phantom points) are also kept in the font's [`InstanceCache`] for
-/// later calls, as HarfBuzz keeps them for a font.
+/// values that walk an outline or a variation store (vertical origins,
+/// and every varied advance, from `HVAR`, `VVAR` or phantom points) are
+/// also kept in the font's [`InstanceCache`] for later calls, as
+/// HarfBuzz keeps them for a font, and a value found there is not
+/// looked up in the call's own maps.
 pub(super) struct FontAdvances<'a, 'c> {
     face: &'c Face<'a>,
     coords: &'c [f32],
@@ -491,6 +493,31 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         })
     }
 
+    /// The font's cache of `which`, if this call shares it.
+    fn cache_for(&self, which: GlyphValue) -> Option<&'c InstanceCache> {
+        // The vertical values come from `vmtx`, `VORG` and `VVAR`, which
+        // only a vertical run reads, so only a vertical run shares them.
+        let vertical_value = matches!(which, GlyphValue::VOrigin | GlyphValue::VAdvance);
+        self.cache.filter(|_| self.vertical || !vertical_value)
+    }
+
+    /// `which` of glyph `id`, if the font's cache holds it.
+    #[inline]
+    fn cached_value(&self, which: GlyphValue, id: u16) -> Option<Known> {
+        self.cache_for(which)?.get(which, id)
+    }
+
+    /// Adds `which` of glyph `id` to the font's cache, if this call
+    /// shares it.
+    fn store(&self, which: GlyphValue, id: u16, value: Option<i32>) {
+        if let Some(cache) = self.cache_for(which) {
+            let num_glyphs = *self
+                .num_glyphs
+                .get_or_init(|| self.face.maxp().map_or(u16::MAX, |maxp| maxp.num_glyphs));
+            cache.set(which, id, num_glyphs, value);
+        }
+    }
+
     /// `which` of glyph `id` from the font's cache, else computed with
     /// `compute` and added to the cache.
     fn cached(
@@ -499,20 +526,11 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         id: u16,
         compute: impl FnOnce() -> Option<i32>,
     ) -> Option<i32> {
-        // The vertical values come from `vmtx`, `VORG` and `VVAR`, which
-        // only a vertical run reads, so only a vertical run shares them.
-        let vertical_value = matches!(which, GlyphValue::VOrigin | GlyphValue::VPhantomAdvance);
-        let Some(cache) = self.cache.filter(|_| self.vertical || !vertical_value) else {
-            return compute();
-        };
-        if let Some(Known(value)) = cache.get(which, id) {
+        if let Some(Known(value)) = self.cached_value(which, id) {
             return value;
         }
         let value = compute();
-        let num_glyphs = *self
-            .num_glyphs
-            .get_or_init(|| self.face.maxp().map_or(u16::MAX, |maxp| maxp.num_glyphs));
-        cache.set(which, id, num_glyphs, value);
+        self.store(which, id, value);
         value
     }
 
@@ -534,9 +552,16 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             return base;
         }
         if let Some(hvar) = &self.hvar {
-            let delta = hvar.advance_delta(id, self.coords);
-            // HarfBuzz's `hb_max (0.0f, advance + roundf (delta))`.
-            return base.saturating_add(hb_round(delta)).max(0);
+            // An `HVAR` delta walks the variation store's regions for
+            // every glyph, so the font's cache keeps the varied advance,
+            // as HarfBuzz's advance cache does.
+            return self
+                .cached(GlyphValue::HAdvance, id, || {
+                    let delta = hvar.advance_delta(id, self.coords);
+                    // HarfBuzz's `hb_max (0.0f, advance + roundf (delta))`.
+                    Some(base.saturating_add(hb_round(delta)).max(0))
+                })
+                .unwrap_or(base);
         }
         self.h_phantom_advance(id).unwrap_or(base)
     }
@@ -554,14 +579,19 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             return base;
         }
         if let Some(vvar) = &self.vvar {
-            let delta = vvar.advance_height_delta(id, self.coords);
-            return base.saturating_add(hb_round(delta)).max(0);
+            // Kept in the font's cache, as the `HVAR` advances are.
+            return self
+                .cached(GlyphValue::VAdvance, id, || {
+                    let delta = vvar.advance_height_delta(id, self.coords);
+                    Some(base.saturating_add(hb_round(delta)).max(0))
+                })
+                .unwrap_or(base);
         }
         // HarfBuzz takes the phantom points only from a gvar it reads.
         if !self.outlines().is_some_and(|t| t.gvar.is_some()) {
             return base;
         }
-        self.cached(GlyphValue::VPhantomAdvance, id, || {
+        self.cached(GlyphValue::VAdvance, id, || {
             self.v_phantoms(id)
                 .map(|pp| hb_round(pp[2].1 - pp[3].1).max(0))
         })
@@ -595,6 +625,11 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
     /// outline, shapes too.
     pub(super) fn v_origin(&self, id: u32) -> i32 {
         let id = id as u16;
+        // The font's cache first: a hit there is one atomic load, and
+        // needs no entry in the call's own map.
+        if let Some(Known(Some(origin))) = self.cached_value(GlyphValue::VOrigin, id) {
+            return origin;
+        }
         // The cell is only borrowed here and in the insert below, so
         // the borrows always succeed.
         if let Some(origin) = self
@@ -605,9 +640,8 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         {
             return origin;
         }
-        let origin = self
-            .cached(GlyphValue::VOrigin, id, || Some(self.compute_v_origin(id)))
-            .unwrap_or_else(|| self.compute_v_origin(id));
+        let origin = self.compute_v_origin(id);
+        self.store(GlyphValue::VOrigin, id, Some(origin));
         if let Ok(mut cache) = self.v_origins.try_borrow_mut() {
             cache.insert(id, origin);
         }
@@ -668,25 +702,28 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
     /// cannot be computed; the caller then keeps the glyph's static
     /// advance.
     fn h_phantom_advance(&self, id: u16) -> Option<i32> {
+        // The font's cache first, as for the vertical origins.
+        if let Some(Known(advance)) = self.cached_value(GlyphValue::HAdvance, id) {
+            return advance;
+        }
         // The cells are only borrowed inside this method, which does
         // not call itself, so the borrows always succeed.
         if let Some(&advance) = self.h_phantom.try_borrow().ok()?.get(&id) {
             return advance;
         }
-        let advance = self.cached(GlyphValue::HPhantomAdvance, id, || {
-            self.outlines().and_then(|t| {
-                let gvar = t.gvar.as_ref()?;
-                let metrics = PhantomMetrics {
-                    hmtx: &self.hmtx,
-                    vmtx: None,
-                };
-                let pp = t
-                    .glyf
-                    .phantom_points_at_coords(&t.loca, id, Some(gvar), self.coords, &metrics)
-                    .ok()?;
-                Some(hb_round(pp[1].0 - pp[0].0).max(0))
-            })
+        let advance = self.outlines().and_then(|t| {
+            let gvar = t.gvar.as_ref()?;
+            let metrics = PhantomMetrics {
+                hmtx: &self.hmtx,
+                vmtx: None,
+            };
+            let pp = t
+                .glyf
+                .phantom_points_at_coords(&t.loca, id, Some(gvar), self.coords, &metrics)
+                .ok()?;
+            Some(hb_round(pp[1].0 - pp[0].0).max(0))
         });
+        self.store(GlyphValue::HAdvance, id, advance);
         if let Ok(mut cache) = self.h_phantom.try_borrow_mut() {
             cache.insert(id, advance);
         }
@@ -811,5 +848,39 @@ mod tests {
         glyphs[0].x_advance = 300;
         zero_mark_widths(&mut glyphs, Some(&gdef), true);
         assert_eq!((glyphs[0].x_advance, glyphs[0].x_offset), (0, -300));
+    }
+
+    #[test]
+    fn varied_advances_are_kept_in_the_font_cache() {
+        // Noto Sans KR's vertical subset varies both advances through
+        // HVAR and VVAR, whose deltas walk a variation store per glyph.
+        let data = include_bytes!("../../tests/fixtures/noto_sans_kr_vf_vertical_subset.otf");
+        let face = Face::parse_bytes(data, 0).unwrap();
+        let coords = [0.6f32];
+        let caches = crate::font::FontCaches::new();
+        let cache = caches.instance();
+        let plain = FontAdvances::new(&face, &coords, true, None).unwrap();
+        let first = FontAdvances::new(&face, &coords, true, Some(cache)).unwrap();
+        for gid in 0..16 {
+            assert_eq!(first.h_advance(gid), plain.h_advance(gid), "{gid}");
+            assert_eq!(first.v_advance(gid), plain.v_advance(gid), "{gid}");
+            assert_eq!(first.v_origin(gid), plain.v_origin(gid), "{gid}");
+        }
+        // A later call finds them in the font's cache.
+        let later = FontAdvances::new(&face, &coords, true, Some(cache)).unwrap();
+        for gid in 0..16u16 {
+            let id = u32::from(gid);
+            let h = Some(Known(Some(plain.h_advance(id))));
+            assert_eq!(cache.get(GlyphValue::HAdvance, gid), h, "{gid}");
+            let v = Some(Known(Some(plain.v_advance(id))));
+            assert_eq!(cache.get(GlyphValue::VAdvance, gid), v, "{gid}");
+            assert_eq!(later.h_advance(id), plain.h_advance(id));
+            assert_eq!(later.v_advance(id), plain.v_advance(id));
+            assert_eq!(later.v_origin(id), plain.v_origin(id));
+        }
+        // A horizontal call shares the horizontal advances only.
+        let horizontal = FontAdvances::new(&face, &coords, false, Some(cache)).unwrap();
+        assert_eq!(horizontal.h_advance(3), plain.h_advance(3));
+        assert!(horizontal.cached_value(GlyphValue::VAdvance, 3).is_none());
     }
 }
