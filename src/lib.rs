@@ -96,7 +96,7 @@ pub use bidi::{BidiParagraph, BidiParagraphSpan, BidiRun, ShapedBidiRun};
 pub use blob::Blob;
 pub use buffer::{Buffer, BufferFlags, ClusterLevel, Direction, Glyph, GlyphFlags, ShapedRun};
 pub use error::{Error, Result};
-pub use face::{Face, GlyphBitmapEntry};
+pub use face::{Face, GlyphBitmapEntry, GlyphOutlines};
 pub use font::Font;
 pub use language::Language;
 pub use owned::OwnedFace;

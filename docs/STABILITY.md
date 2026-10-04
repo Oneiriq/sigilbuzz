@@ -89,6 +89,12 @@ signatures only change in a major version.
     cluster levels. A Rust `Buffer` defaults to `MonotoneCharacters`; the C API
     defaults to HarfBuzz's `MONOTONE_GRAPHEMES`. Both settings survive
     `Buffer::clear`.
+- Added in 0.24.0:
+  - `Font::with_variations`: bind a variable instance from user-space axis values, as
+    HarfBuzz's `hb_font_set_variations` does. `Font::coords` now returns a slice that
+    borrows the font, since such a font owns its coords.
+  - `Face::glyph_outlines` and `GlyphOutlines::{outline, draw}`: draw many glyphs at
+    one instance with the outline tables read once.
 
 `sigilbuzz-render`:
 

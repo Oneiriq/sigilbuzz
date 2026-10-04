@@ -33,6 +33,7 @@
 //! with [`crate::fonts_in_collection`].
 
 mod color;
+mod glyph_outlines;
 mod layout;
 mod outlines;
 mod variations;
@@ -45,6 +46,7 @@ use crate::tables::parse::Reader;
 use crate::tables::{tag, Cmap, Head, Hhea, Hmtx, Maxp, Name, Vhea, Vmtx, Vorg};
 
 pub use color::GlyphBitmapEntry;
+pub use glyph_outlines::GlyphOutlines;
 pub(crate) use outlines::varied_glyph_bounds;
 
 /// One entry in the SFNT table directory.
