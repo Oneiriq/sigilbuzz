@@ -104,7 +104,7 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     for &old_fd in &kept_fds_sorted {
         let locals = parsed.per_fd_local_subrs[old_fd as usize].as_slice();
         let vsindex = parsed.per_fd_vsindex[old_fd as usize];
-        let mut fd_walk = walk.fd(locals, vsindex);
+        let mut fd_walk = FdWalk::new(locals, vsindex);
         for (i, &gid) in kept_gids.iter().enumerate() {
             if kept_fd_old[i] == old_fd {
                 charstring_calls[i] =

@@ -36,9 +36,11 @@
 //! it reads, inside subroutines too, and one for each value a `blend`
 //! leaves, and fails once the budget is spent. Subroutines that call
 //! each other many times can describe far more work than the table's
-//! size.
+//! size. Its memory follows the subroutines the glyphs reach, not the
+//! size of the INDEXes: Font DICTs that share one Subrs INDEX keep
+//! nothing per entry they do not reach.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use sigilbuzz::tables::variation_store::ItemVariationStore;
@@ -105,11 +107,10 @@ impl<'a> BlendRegions<'a> {
     }
 }
 
-/// How far the walk has read one subroutine.
+/// How far the walk has read one subroutine it reached. A subroutine
+/// not reached has no entry.
 #[derive(Debug, Clone)]
 enum Visit {
-    /// Not reached yet.
-    Unvisited,
     /// Being read for the first time: a call to it now is recursion.
     Reading,
     /// Read, with the calls its reading found.
@@ -120,7 +121,7 @@ impl Visit {
     fn calls(&self) -> Option<&[SubrCall]> {
         match self {
             Self::Read(calls) => Some(calls),
-            _ => None,
+            Self::Reading => None,
         }
     }
 }
@@ -130,18 +131,28 @@ impl Visit {
 pub(crate) struct FdWalk<'a> {
     locals: &'a [&'a [u8]],
     vsindex: u16,
-    local_visits: Vec<Visit>,
-    /// Global subroutines this Font DICT's glyphs reached, in the
-    /// order the walk first reached them.
-    reached_globals: Vec<u32>,
-    /// Marks the globals in `reached_globals` in the walk's stamps.
-    stamp: u32,
+    /// The local subroutines reached, by index.
+    local_visits: BTreeMap<u32, Visit>,
+    /// Global subroutines this Font DICT's glyphs reached.
+    reached_globals: BTreeSet<u32>,
 }
 
-impl FdWalk<'_> {
+impl<'a> FdWalk<'a> {
+    /// The bodies of a Font DICT with local subroutines `locals` and
+    /// Private DICT `vsindex`, ready for its glyphs.
+    pub(crate) fn new(locals: &'a [&'a [u8]], vsindex: u16) -> Self {
+        Self {
+            locals,
+            vsindex,
+            local_visits: BTreeMap::new(),
+            reached_globals: BTreeSet::new(),
+        }
+    }
+
     /// The calls of local subroutine `index`, when a glyph reached it.
     pub(crate) fn local_calls(&self, index: usize) -> Option<&[SubrCall]> {
-        self.local_visits.get(index).and_then(Visit::calls)
+        let index = u32::try_from(index).ok()?;
+        self.local_visits.get(&index).and_then(Visit::calls)
     }
 
     /// The local subroutines the glyphs reached, ascending.
@@ -151,19 +162,15 @@ impl FdWalk<'_> {
 
     /// The global subroutines this Font DICT's glyphs reached, ascending.
     pub(crate) fn reached_globals(&self) -> Vec<u32> {
-        let mut out = self.reached_globals.clone();
-        out.sort_unstable();
-        out
+        self.reached_globals.iter().copied().collect()
     }
 }
 
 /// The walk over every kept glyph of one table. See the module docs.
 pub(crate) struct CharstringWalk<'a> {
     globals: &'a [&'a [u8]],
-    global_visits: Vec<Visit>,
-    /// Per global: the stamp of the last Font DICT that reached it.
-    global_stamps: Vec<u32>,
-    next_stamp: u32,
+    /// The global subroutines reached, by index.
+    global_visits: BTreeMap<u32, Visit>,
     /// `Some` for CFF2, whose `blend` and `vsindex` operators the walk
     /// runs. A CFF1 charstring has neither, and the walk clears the
     /// stack at those opcodes as the per-body scanner does.
@@ -216,36 +223,17 @@ impl<'a> CharstringWalk<'a> {
     ) -> Self {
         Self {
             globals,
-            global_visits: alloc::vec![Visit::Unvisited; globals.len()],
-            global_stamps: alloc::vec![0; globals.len()],
-            next_stamp: 0,
+            global_visits: BTreeMap::new(),
             blend,
             budget,
             next_frame: 0,
         }
     }
 
-    /// The bodies of a Font DICT with local subroutines `locals` and
-    /// Private DICT `vsindex`, ready for its glyphs.
-    pub(crate) fn fd(&mut self, locals: &'a [&'a [u8]], vsindex: u16) -> FdWalk<'a> {
-        self.next_stamp = self.next_stamp.wrapping_add(1);
-        if self.next_stamp == 0 {
-            // A wrapped stamp could match a stale one; start over.
-            self.global_stamps.iter_mut().for_each(|s| *s = 0);
-            self.next_stamp = 1;
-        }
-        FdWalk {
-            locals,
-            vsindex,
-            local_visits: alloc::vec![Visit::Unvisited; locals.len()],
-            reached_globals: Vec::new(),
-            stamp: self.next_stamp,
-        }
-    }
-
     /// The calls of global subroutine `index`, when a glyph reached it.
     pub(crate) fn global_calls(&self, index: usize) -> Option<&[SubrCall]> {
-        self.global_visits.get(index).and_then(Visit::calls)
+        let index = u32::try_from(index).ok()?;
+        self.global_visits.get(&index).and_then(Visit::calls)
     }
 
     /// The global subroutines any glyph reached, ascending.
@@ -449,51 +437,37 @@ impl<'a> CharstringWalk<'a> {
         index: usize,
         depth: usize,
     ) -> Result<(), SubsetError> {
-        let (body, visit) = match kind {
-            SubrKind::Local => (
-                fd.locals.get(index).copied(),
-                fd.local_visits.get_mut(index),
-            ),
-            SubrKind::Global => {
-                if let Some(stamp) = self.global_stamps.get_mut(index) {
-                    if *stamp != fd.stamp {
-                        *stamp = fd.stamp;
-                        fd.reached_globals.push(index as u32);
-                    }
-                }
-                (
-                    self.globals.get(index).copied(),
-                    self.global_visits.get_mut(index),
-                )
-            }
+        const OUT_OF_RANGE: SubsetError =
+            SubsetError::Unsupported("CFF subroutine index out of range");
+        let body = match kind {
+            SubrKind::Local => fd.locals.get(index).copied(),
+            SubrKind::Global => self.globals.get(index).copied(),
+        }
+        .ok_or(OUT_OF_RANGE)?;
+        let key = u32::try_from(index).map_err(|_| OUT_OF_RANGE)?;
+        if kind == SubrKind::Global {
+            fd.reached_globals.insert(key);
+        }
+        let visits = match kind {
+            SubrKind::Local => &mut fd.local_visits,
+            SubrKind::Global => &mut self.global_visits,
         };
-        let (Some(body), Some(visit)) = (body, visit) else {
-            return Err(SubsetError::Unsupported(
-                "CFF subroutine index out of range",
-            ));
-        };
-        let first = match visit {
-            Visit::Read(_) => false,
-            Visit::Reading => {
+        match visits.get(&key) {
+            Some(Visit::Read(_)) => return self.run(fd, glyph, body, depth, None),
+            Some(Visit::Reading) => {
                 return Err(SubsetError::Unsupported("CFF subroutine reaches itself"));
             }
-            Visit::Unvisited => {
-                *visit = Visit::Reading;
-                true
+            None => {
+                visits.insert(key, Visit::Reading);
             }
-        };
-        if !first {
-            return self.run(fd, glyph, body, depth, None);
         }
         let mut calls = Vec::new();
         self.run(fd, glyph, body, depth, Some(&mut calls))?;
-        let visit = match kind {
-            SubrKind::Local => fd.local_visits.get_mut(index),
-            SubrKind::Global => self.global_visits.get_mut(index),
+        let visits = match kind {
+            SubrKind::Local => &mut fd.local_visits,
+            SubrKind::Global => &mut self.global_visits,
         };
-        if let Some(visit) = visit {
-            *visit = Visit::Read(calls);
-        }
+        visits.insert(key, Visit::Read(calls));
         Ok(())
     }
 
@@ -524,12 +498,11 @@ impl<'a> CharstringWalk<'a> {
 }
 
 /// The indexes of the `visits` that were read, ascending.
-fn kept(visits: &[Visit]) -> Vec<u32> {
+fn kept(visits: &BTreeMap<u32, Visit>) -> Vec<u32> {
     visits
         .iter()
-        .enumerate()
         .filter(|(_, v)| matches!(v, Visit::Read(_)))
-        .map(|(i, _)| i as u32)
+        .map(|(&i, _)| i)
         .collect()
 }
 

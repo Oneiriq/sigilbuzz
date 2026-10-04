@@ -67,7 +67,7 @@ fn walk_cff1<'a>(
     globals: &'a [&'a [u8]],
 ) -> Result<Walked, SubsetError> {
     let mut walk = CharstringWalk::new(globals, None, BIG);
-    let mut fd = walk.fd(locals, 0);
+    let mut fd = FdWalk::new(locals, 0);
     let calls = walk.glyph(&mut fd, charstring)?;
     Ok((calls, fd.kept_locals(), walk.kept_globals()))
 }
@@ -93,7 +93,7 @@ fn blended_stems_size_the_mask() {
         &[OP_CALLSUBR],
     ]);
     let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(Some(&ivs))), BIG);
-    let mut fd = walk.fd(&locals, 0);
+    let mut fd = FdWalk::new(&locals, 0);
     let calls = walk.glyph(&mut fd, &charstring).expect("walk");
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].kind, SubrKind::Local);
@@ -126,10 +126,10 @@ fn private_dict_vsindex_picks_the_region_count() {
         &[OP_CALLSUBR],
     ]);
     let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(Some(&ivs))), BIG);
-    let mut fd = walk.fd(&locals, 1);
+    let mut fd = FdWalk::new(&locals, 1);
     let calls = walk.glyph(&mut fd, &charstring).expect("walk");
     assert_eq!(calls.len(), 1);
-    let mut fd = walk.fd(&locals, 0);
+    let mut fd = FdWalk::new(&locals, 0);
     assert!(walk.glyph(&mut fd, &charstring).is_err());
 }
 
@@ -147,7 +147,7 @@ fn vsindex_past_the_store_blends_no_deltas() {
         &[OP_BLEND, OP_HSTEMHM, OP_HINTMASK, 9],
     ]);
     let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(Some(&ivs))), BIG);
-    let mut fd = walk.fd(&[], 0);
+    let mut fd = FdWalk::new(&[], 0);
     walk.glyph(&mut fd, &charstring).expect("walk");
     // A negative vsindex saturates to 0, which has four regions.
     let negative = cs(&[
@@ -173,7 +173,7 @@ fn a_missing_store_blends_no_deltas() {
     ]);
     for bytes in [None, Some(&[0u8, 9][..])] {
         let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(bytes)), BIG);
-        let mut fd = walk.fd(&[], 0);
+        let mut fd = FdWalk::new(&[], 0);
         walk.glyph(&mut fd, &charstring).expect("walk");
     }
 }
@@ -197,7 +197,7 @@ fn stems_of_the_caller_size_a_mask_in_a_subroutine() {
         &[OP_CALLSUBR, OP_ENDCHAR],
     ]);
     let mut walk = CharstringWalk::new(&[], None, BIG);
-    let mut fd = walk.fd(&locals, 0);
+    let mut fd = FdWalk::new(&locals, 0);
     let calls = walk.glyph(&mut fd, &charstring).expect("walk");
     assert_eq!(calls.len(), 1);
     assert_eq!(fd.kept_locals(), [0, 1]);
@@ -268,7 +268,7 @@ fn a_subroutine_is_read_once_and_kept_once() {
     let locals: [&[u8]; 3] = [&local_0, &local_1, &local_2];
     let glyph = cs(&[&subr_number(0, 3), &[OP_CALLSUBR, OP_ENDCHAR]]);
     let mut walk = CharstringWalk::new(&[], None, BIG);
-    let mut fd = walk.fd(&locals, 0);
+    let mut fd = FdWalk::new(&locals, 0);
     walk.glyph(&mut fd, &glyph).expect("first glyph");
     walk.glyph(&mut fd, &glyph).expect("second glyph");
     assert_eq!(fd.kept_locals(), [0, 1]);
@@ -302,10 +302,10 @@ fn globals_are_kept_per_fd_reached() {
     let calls_0 = cs(&[&subr_number(0, 2), &[OP_CALLGSUBR, OP_ENDCHAR]]);
     let calls_1 = cs(&[&subr_number(1, 2), &[OP_CALLGSUBR, OP_ENDCHAR]]);
     let mut walk = CharstringWalk::new(&globals, None, BIG);
-    let mut fd_a = walk.fd(&[], 0);
+    let mut fd_a = FdWalk::new(&[], 0);
     walk.glyph(&mut fd_a, &calls_1).expect("walk");
     walk.glyph(&mut fd_a, &calls_1).expect("walk");
-    let mut fd_b = walk.fd(&[], 0);
+    let mut fd_b = FdWalk::new(&[], 0);
     walk.glyph(&mut fd_b, &calls_0).expect("walk");
     walk.glyph(&mut fd_b, &calls_1).expect("walk");
     assert_eq!(fd_a.reached_globals(), [1]);
@@ -386,7 +386,7 @@ fn a_spent_budget_fails() {
     let refs: Vec<&[u8]> = locals.iter().map(Vec::as_slice).collect();
     let charstring = cs(&[&subr_number(0, depth), &[OP_CALLSUBR, OP_ENDCHAR]]);
     let mut walk = CharstringWalk::new(&[], None, walk_budget(64));
-    let mut fd = walk.fd(&refs, 0);
+    let mut fd = FdWalk::new(&refs, 0);
     let r = walk.glyph(&mut fd, &charstring);
     assert_eq!(r.unwrap_err(), WORK_EXCEEDED);
 }
@@ -425,7 +425,7 @@ fn malformed_charstrings_fail() {
     ];
     for (what, charstring) in cases {
         let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(Some(&ivs))), BIG);
-        let mut fd = walk.fd(&locals, 0);
+        let mut fd = FdWalk::new(&locals, 0);
         assert!(walk.glyph(&mut fd, &charstring).is_err(), "{what}");
     }
     // A blended value is no subroutine number.
@@ -437,7 +437,7 @@ fn malformed_charstrings_fail() {
         &[OP_BLEND, OP_CALLSUBR],
     ]);
     let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(Some(&ivs))), BIG);
-    let mut fd = walk.fd(&locals, 0);
+    let mut fd = FdWalk::new(&locals, 0);
     assert!(walk.glyph(&mut fd, &blended).is_err());
 }
 
@@ -464,7 +464,7 @@ fn a_blend_charges_the_values_it_leaves() {
     charstring.push(OP_BLEND);
     for budget in [1026, 1025] {
         let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(None)), budget);
-        let mut fd = walk.fd(&[], 0);
+        let mut fd = FdWalk::new(&[], 0);
         let r = walk.glyph(&mut fd, &charstring);
         assert_eq!(r.is_ok(), budget == 1026, "budget {budget}");
     }
@@ -479,6 +479,22 @@ fn a_blend_charges_the_values_it_leaves() {
         Some(BlendRegions::new(None)),
         walk_budget(repeated.len()),
     );
-    let mut fd = walk.fd(&[], 0);
+    let mut fd = FdWalk::new(&[], 0);
     assert_eq!(walk.glyph(&mut fd, &repeated).unwrap_err(), WORK_EXCEEDED);
+}
+
+#[test]
+fn font_dicts_keep_only_the_locals_they_reach() {
+    // Many Font DICTs over one large Subrs INDEX: each keeps an entry
+    // for the one local it reaches.
+    let filler = [OP_RETURN];
+    let locals: Vec<&[u8]> = alloc::vec![&filler; 60_000];
+    let charstring = cs(&[&subr_number(5, locals.len()), &[OP_CALLSUBR, OP_ENDCHAR]]);
+    let mut walk = CharstringWalk::new(&[], None, BIG);
+    for _ in 0..256 {
+        let mut fd = FdWalk::new(&locals, 0);
+        walk.glyph(&mut fd, &charstring).expect("walk");
+        assert_eq!(fd.local_visits.len(), 1);
+        assert_eq!(fd.kept_locals(), [5]);
+    }
 }

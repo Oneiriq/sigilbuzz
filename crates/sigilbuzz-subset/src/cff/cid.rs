@@ -1,6 +1,8 @@
 //! CID-keyed CFF1 subsetting: FDArray and FDSelect rebuild with
 //! per-FD subroutine keep-sets.
 
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::charset::extract_kept_charset_sids;
@@ -242,13 +244,18 @@ pub(super) fn subset_cid_keyed(
 
     // For each source FD, capture (Font DICT bytes, parsed entries,
     // optional Private DICT info, Private DICT bytes, Local Subr INDEX).
+    // Font DICTs that name the same Private DICT share one read of it
+    // and of its Local Subr INDEX.
     struct FdInfo<'a> {
         font_dict_entries: Vec<DictEntry>,
         private_dict: &'a [u8],
         private: Option<(u32, u32)>,
-        local_subrs: Vec<&'a [u8]>,
+        local_subrs: Rc<Vec<&'a [u8]>>,
     }
     let mut fd_infos: Vec<FdInfo<'_>> = Vec::with_capacity(fd_array_entries.len());
+    // Private DICT (size, offset) -> its bytes and Local Subr INDEX.
+    type Privates<'a> = BTreeMap<(u32, u32), (&'a [u8], Rc<Vec<&'a [u8]>>)>;
+    let mut privates: Privates<'_> = BTreeMap::new();
     for fd_bytes in &fd_array_entries {
         let entries = walk_dict(fd_bytes)?;
         // The last well-formed Private operator wins.
@@ -257,15 +264,23 @@ pub(super) fn subset_cid_keyed(
             .rev()
             .filter(|e| e.op == OP_PRIVATE)
             .find_map(private_operands);
-        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = match priv_info {
-            Some((size, off)) => read_private_dict(
-                cff_bytes,
-                size,
-                off,
-                read_index,
-                "CFF1 CID Private DICT past end",
-            )?,
-            None => (&[][..], Vec::new()),
+        let (private_dict, local_subrs): (&[u8], Rc<Vec<&[u8]>>) = match priv_info {
+            Some(key) => match privates.get(&key) {
+                Some((dict, locals)) => (dict, Rc::clone(locals)),
+                None => {
+                    let (dict, locals) = read_private_dict(
+                        cff_bytes,
+                        key.0,
+                        key.1,
+                        read_index,
+                        "CFF1 CID Private DICT past end",
+                    )?;
+                    let locals = Rc::new(locals);
+                    privates.insert(key, (dict, Rc::clone(&locals)));
+                    (dict, locals)
+                }
+            },
+            None => (&[][..], Rc::default()),
         };
         fd_infos.push(FdInfo {
             font_dict_entries: entries,
@@ -312,7 +327,7 @@ pub(super) fn subset_cid_keyed(
     let mut fd_walks: Vec<FdWalk<'_>> = Vec::with_capacity(kept_fds_sorted.len());
     let mut charstring_calls: Vec<Vec<SubrCall>> = alloc::vec![Vec::new(); kept_gids.len()];
     for &old_fd in &kept_fds_sorted {
-        let mut fd_walk = walk.fd(fd_infos[old_fd as usize].local_subrs.as_slice(), 0);
+        let mut fd_walk = FdWalk::new(fd_infos[old_fd as usize].local_subrs.as_slice(), 0);
         for (i, &gid) in kept_gids.iter().enumerate() {
             if kept_fd_old[i] == old_fd {
                 charstring_calls[i] =

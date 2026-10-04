@@ -288,7 +288,7 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     // sites are found with its masks sized by the stems its callers
     // declared (see `walk`).
     let mut walk = CharstringWalk::new(&parsed.global_subrs, None, walk_budget(cff_bytes.len()));
-    let mut fd_walk = walk.fd(&parsed.local_subrs, 0);
+    let mut fd_walk = FdWalk::new(&parsed.local_subrs, 0);
     let mut charstring_calls: Vec<Vec<SubrCall>> = Vec::with_capacity(kept_charstrings.len());
     for cs in &kept_charstrings {
         charstring_calls.push(walk.glyph(&mut fd_walk, cs)?);
