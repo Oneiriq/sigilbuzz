@@ -13,8 +13,10 @@
 
 use crate::buffer::ClusterLevel;
 use crate::error::{Error, Result};
+use crate::ot::layout_select::LayoutView;
+use crate::tables::layout::accel::{accel_for, Accel, LayoutCache};
 use crate::tables::layout::{
-    ActiveFeatures, FeatureList, FeatureVariations, LookupList, ScriptList,
+    ActiveFeatures, FeatureList, FeatureVariations, LayoutTable, Lookup, LookupList, ScriptList,
 };
 use crate::tables::parse::Reader;
 
@@ -79,6 +81,12 @@ pub struct Gsub<'a> {
     /// resolves a feature through this view. Empty selects each
     /// script's default language system.
     language_tags: &'a [[u8; 4]],
+    /// What the font keeps for this table between shaping calls: the
+    /// lookup accelerators, which let the shaper pass over lookups and
+    /// subtables that cannot apply without parsing them, and the
+    /// resolved language systems. `None` reads each lookup's coverages
+    /// directly and walks the language system per query.
+    cache: Option<&'a LayoutCache>,
     /// Cluster level of the run being shaped: a ligature merges its
     /// components' clusters only at the monotone levels, as
     /// HarfBuzz's `ligate_input` does through its buffer.
@@ -145,6 +153,7 @@ impl<'a> Gsub<'a> {
             feature_variations_offset,
             feature_variation: None,
             language_tags: &[],
+            cache: None,
             cluster_level: ClusterLevel::MonotoneCharacters,
             unsafe_to_concat: false,
         })
@@ -207,6 +216,45 @@ impl<'a> Gsub<'a> {
     ) -> Self {
         self.feature_variation = variation;
         self
+    }
+
+    /// Returns this view with what the font keeps for the table: the
+    /// lookup accelerators [`Self::lookup_accel`] hands out and the
+    /// language systems [`Self::layout_view`] resolves, each built the
+    /// first time it is needed.
+    #[must_use]
+    pub(crate) const fn with_cache(mut self, cache: Option<&'a LayoutCache>) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// True when the view has the font's cache, so its lookup
+    /// accelerators are digests rather than coverages read per use.
+    pub(crate) const fn has_cache(&self) -> bool {
+        self.cache.is_some()
+    }
+
+    /// The table's length in bytes.
+    pub(crate) const fn table_len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// What feature resolution (`crate::ot::layout_select`) reads of
+    /// this view.
+    pub(crate) fn layout_view(&self) -> LayoutView<'a> {
+        LayoutView {
+            script_list: self.script_list,
+            features: self.features(),
+            language_tags: self.language_tags,
+            maps: self.cache.map(|c| &c.maps),
+            plans: self.cache.map(|c| &c.plans),
+        }
+    }
+
+    /// The accelerator of `lookup`, lookup `index` of the table: the
+    /// font's, or one built for this use when the view has none.
+    pub(crate) fn lookup_accel<'l>(&self, index: u16, lookup: &Lookup<'l>) -> Accel<'a, 'l> {
+        accel_for(self.cache, LayoutTable::Gsub, index, lookup)
     }
 
     /// The FeatureList as the shaper sees it: with the substitutions of

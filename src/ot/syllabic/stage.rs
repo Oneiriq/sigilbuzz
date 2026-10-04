@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use super::GlyphInfo;
 use crate::buffer::Glyph;
+use crate::ot::layout_select::{stage_kind, PlannedLookup};
 use crate::shape::{Feature, SyllabicGsub};
 use crate::tables::layout::skip_iter::match_prop;
 use crate::tables::layout::Joiners;
@@ -117,9 +118,10 @@ impl StageFeature {
     }
 }
 
-/// True when the caller turned `tag` off with a zero-valued feature.
+/// True when the caller turned `tag` off: the last entry for it in the
+/// feature list has value 0.
 pub(crate) fn user_disabled(features: &[Feature], tag: [u8; 4]) -> bool {
-    features.iter().any(|f| f.tag == tag && f.value == 0)
+    crate::shape::last_value(features, tag) == Some(0)
 }
 
 /// The lookups of `tag` in the font, for a run of candidate script
@@ -129,15 +131,11 @@ pub(crate) fn feature_lookups(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Vec<u16> {
-    let gsub = runner.gsub();
-    crate::ot::layout_select::feature_lookup_indices(
-        gsub.script_list(),
-        &gsub.features(),
-        gsub.language_tags(),
-        tag,
-        script_priority,
-    )
-    .unwrap_or_default()
+    runner
+        .gsub()
+        .layout_view()
+        .feature_lookups(tag, script_priority)
+        .unwrap_or_default()
 }
 
 /// True when the language system the run selects lists `tag` and the
@@ -154,15 +152,7 @@ pub(crate) fn has_feature(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> bool {
-    let gsub = runner.gsub();
-    !user_disabled(features, tag)
-        && crate::ot::layout_select::lists_feature(
-            gsub.script_list(),
-            &gsub.features(),
-            gsub.language_tags(),
-            tag,
-            script_priority,
-        )
+    !user_disabled(features, tag) && runner.gsub().layout_view().lists(tag, script_priority)
 }
 
 /// Adds the caller's features to a shaper's last stage, where HarfBuzz
@@ -241,18 +231,13 @@ fn stage_lookups(
     features: &[StageFeature],
     user: &[Feature],
 ) -> Vec<StageLookup> {
-    let gsub = runner.gsub();
-    let active = gsub.features();
+    let view = runner.gsub().layout_view();
     let enabled = || features.iter().filter(|f| !user_disabled(user, f.tag));
-    let required = crate::ot::layout_select::required_feature(
-        gsub.script_list(),
-        &active,
-        gsub.language_tags(),
-        script_priority,
-    )
-    .filter(|(tag, _)| enabled().any(|f| f.tag == *tag))
-    .map(|(_, indices)| indices)
-    .unwrap_or_default();
+    let required = view
+        .required(script_priority)
+        .filter(|(tag, _)| enabled().any(|f| f.tag == *tag))
+        .map(|(_, indices)| indices)
+        .unwrap_or_default();
     let mut lookups: Vec<StageLookup> = Vec::new();
     let mut add = |index: u16, mask: u32, joiners: Joiners, per_syllable: bool| match lookups
         .iter_mut()
@@ -273,13 +258,7 @@ fn stage_lookups(
         add(index, GLOBAL_MASK, Joiners::AUTO, false);
     }
     for f in enabled() {
-        let listed = crate::ot::layout_select::listed_feature_lookups(
-            gsub.script_list(),
-            &active,
-            gsub.language_tags(),
-            f.tag,
-            script_priority,
-        );
+        let listed = view.listed_lookups(f.tag, script_priority);
         let per_syllable = f.flags.contains(FeatureFlags::PER_SYLLABLE);
         for index in listed {
             add(index, f.mask, f.flags.joiners(), per_syllable);
@@ -337,10 +316,46 @@ pub(crate) fn apply_stage(
     if glyphs.len() != info.len() || glyphs.is_empty() || glyphs.len() > MAX_SLOTS {
         return;
     }
-    let lookups = stage_lookups(runner, script_priority, features, user);
-    if lookups.is_empty() {
+    // The stage's lookups, merged once per script, language, feature
+    // list and stage and kept by the font.
+    let spec: Vec<u64> = core::iter::once(stage_kind::SYLLABIC)
+        .chain(features.iter().flat_map(|f| {
+            [
+                u64::from(u32::from_be_bytes(f.tag)) << 8 | u64::from(f.flags.0),
+                u64::from(f.mask),
+            ]
+        }))
+        .collect();
+    let view = runner.gsub().layout_view();
+    let planned = view.stage_plan(script_priority, user, &spec, || {
+        stage_lookups(runner, script_priority, features, user)
+            .into_iter()
+            .map(|l| PlannedLookup {
+                mask: l.mask,
+                joiners: l.joiners,
+                per_syllable: l.per_syllable,
+                ..PlannedLookup::new(l.index)
+            })
+            .collect()
+    });
+    if planned.is_empty() {
         return;
     }
+    // A stage none of whose lookups can start at a glyph of the run
+    // changes nothing but the syllables the glyphs carry, which the
+    // slots below would set.
+    if !planned.iter().any(|p| runner.may_apply(p.index, glyphs)) {
+        for (g, info) in glyphs.iter_mut().zip(info.iter()) {
+            g.syllable = info.syllable;
+        }
+        return;
+    }
+    let lookups = planned.iter().map(|p| StageLookup {
+        index: p.index,
+        mask: p.mask,
+        joiners: p.joiners,
+        per_syllable: p.per_syllable,
+    });
 
     let mut slots: Vec<Slot> = glyphs
         .iter_mut()
@@ -361,6 +376,11 @@ pub(crate) fn apply_stage(
         })
         .collect();
     for lookup in lookups {
+        // A lookup none of whose subtables can start at a glyph of the
+        // run leaves the glyphs, and so their slots, as they are.
+        if !runner.may_apply(lookup.index, glyphs) {
+            continue;
+        }
         let joiners = lookup.joiners;
         let substituted: Vec<bool>;
         {

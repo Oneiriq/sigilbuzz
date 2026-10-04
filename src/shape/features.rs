@@ -6,10 +6,14 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::arabic_joining::Action;
-use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked, apply_gsub_stage, StageLookup};
+use super::gsub::{
+    apply_gsub_lookup, apply_gsub_lookups_masked, apply_gsub_stage, gsub_lookup_may_apply,
+    gsub_lookup_may_apply_to_ids, StageLookup,
+};
 use super::joiners::FeatureFlags;
 use super::{feature_disabled, feature_enabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
+use crate::ot::layout_select::{flag_bits, stage_kind};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -167,29 +171,42 @@ fn apply_feature_stage(
     mask: Option<&[bool]>,
     budget: &mut LookupBudget,
 ) {
-    let mut lookups: BTreeMap<u16, StageLookup> = BTreeMap::new();
-    for f in stage {
-        if feature_disabled(features, f.tag) {
-            continue;
+    // The stage's lookups, merged once per script, language, feature
+    // list and stage and kept by the font.
+    let spec: Vec<u64> = core::iter::once(stage_kind::GSUB)
+        .chain(stage.iter().map(|f| {
+            u64::from(u32::from_be_bytes(f.tag)) << 32
+                | u64::from(f.alternate) << 16
+                | flag_bits(f.flags.joiners, f.flags.per_syllable, f.masked)
+        }))
+        .collect();
+    let view = gsub.layout_view();
+    let planned = view.stage_plan(script_priority, features, &spec, || {
+        let mut lookups: BTreeMap<u16, StageLookup> = BTreeMap::new();
+        for f in stage {
+            if feature_disabled(features, f.tag) {
+                continue;
+            }
+            for index in lookup_indices_for_feature_in_scripts(gsub, f.tag, script_priority)
+                .unwrap_or_default()
+            {
+                lookups
+                    .entry(index)
+                    .and_modify(|l| {
+                        l.flags = l.flags.and(f.flags);
+                        l.masked &= f.masked;
+                    })
+                    .or_insert(StageLookup {
+                        index,
+                        flags: f.flags,
+                        alternate: f.alternate,
+                        masked: f.masked,
+                    });
+            }
         }
-        for index in
-            lookup_indices_for_feature_in_scripts(gsub, f.tag, script_priority).unwrap_or_default()
-        {
-            lookups
-                .entry(index)
-                .and_modify(|l| {
-                    l.flags = l.flags.and(f.flags);
-                    l.masked &= f.masked;
-                })
-                .or_insert(StageLookup {
-                    index,
-                    flags: f.flags,
-                    alternate: f.alternate,
-                    masked: f.masked,
-                });
-        }
-    }
-    let lookups: Vec<StageLookup> = lookups.into_values().collect();
+        lookups.into_values().map(StageLookup::planned).collect()
+    });
+    let lookups: Vec<StageLookup> = planned.iter().map(StageLookup::from_planned).collect();
     apply_gsub_stage(gsub, &lookups, glyphs, gdef, mask, budget);
 }
 
@@ -431,7 +448,12 @@ pub(super) fn apply_arabic_positional_features(
         else {
             continue;
         };
-        if lookup_indices.is_empty() {
+        // Lookups that cannot start at any glyph leave the run as it
+        // is, so the mask is not worth building.
+        if !lookup_indices
+            .iter()
+            .any(|&index| gsub_lookup_may_apply(gsub, index, glyphs))
+        {
             continue;
         }
         let mask: Vec<bool> = glyphs.iter().map(|g| action.is_on(g)).collect();
@@ -451,13 +473,7 @@ fn lookup_indices_for_feature_in_scripts(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Option<Vec<u16>> {
-    crate::ot::layout_select::feature_lookup_indices(
-        gsub.script_list(),
-        &gsub.features(),
-        gsub.language_tags(),
-        tag,
-        script_priority,
-    )
+    gsub.layout_view().feature_lookups(tag, script_priority)
 }
 
 /// Asks "would feature `tag`'s lookups substitute starting at the
@@ -485,6 +501,17 @@ pub(crate) fn feature_would_substitute(
     joiners: impl Into<FeatureFlags>,
 ) -> bool {
     if glyph_ids.is_empty() {
+        return false;
+    }
+    // Lookups none of which can start at one of the glyphs change
+    // nothing, so the dry run is not worth setting up.
+    let may_apply =
+        lookup_indices_for_feature_in_scripts(gsub, tag, script_priority).is_some_and(|lookups| {
+            lookups
+                .iter()
+                .any(|&index| gsub_lookup_may_apply_to_ids(gsub, index, glyph_ids))
+        });
+    if !may_apply {
         return false;
     }
     // Build a throw-away glyph slice: cluster values don't matter,

@@ -6,6 +6,7 @@
 //! in?". Every non-trivial lookup in GSUB and GPOS is built on top
 //! of one or both.
 
+pub(crate) mod accel;
 pub mod class_def;
 pub mod context;
 pub mod coverage;

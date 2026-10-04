@@ -34,9 +34,13 @@
 //!
 //! [`Script::select_lang_sys`]: crate::tables::layout::Script::select_lang_sys
 
+use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::tables::layout::{ActiveFeatures, LangSys, ScriptList};
+use crate::shape::Feature;
+use crate::sync::OnceBox;
+use crate::tables::layout::{ActiveFeatures, Joiners, LangSys, ScriptList};
 
 /// Script tags HarfBuzz falls back to, in order, when none of the
 /// run's own tags is in the table.
@@ -211,6 +215,586 @@ fn sorted(mut indices: Vec<u16>) -> Vec<u16> {
     indices.sort_unstable();
     indices.dedup();
     indices
+}
+
+/// What feature resolution reads of a GSUB or GPOS view: its lists,
+/// its language preference, and the font's cache of resolved language
+/// systems, if the view has one.
+#[derive(Clone, Copy)]
+pub(crate) struct LayoutView<'a> {
+    pub(crate) script_list: ScriptList<'a>,
+    pub(crate) features: ActiveFeatures<'a>,
+    pub(crate) language_tags: &'a [[u8; 4]],
+    pub(crate) maps: Option<&'a FeatureMaps>,
+    pub(crate) plans: Option<&'a StagePlans>,
+}
+
+impl<'a> LayoutView<'a> {
+    /// The lookups of one shaping stage, which `build` merges from the
+    /// features of the stage: the caller's `features`, and the
+    /// stage-specific `spec` (its own features, flags and settings,
+    /// encoded by the caller), for a run whose candidate script tags
+    /// are `script_priority`. The font's cache keeps the result, so a
+    /// stage is merged once per combination of those and of the view's
+    /// language and FeatureVariations record. Without a cache, or for a
+    /// stage too large to keep, `build` runs each time.
+    pub(crate) fn stage_plan(
+        &self,
+        script_priority: &[[u8; 4]],
+        features: &[Feature],
+        spec: &[u64],
+        build: impl Fn() -> Vec<PlannedLookup>,
+    ) -> Cow<'a, [PlannedLookup]> {
+        let Some(plans) = self.plans else {
+            return Cow::Owned(build());
+        };
+        let key = StageKey {
+            script_priority,
+            language_tags: self.language_tags,
+            record: self.features.record(),
+            features,
+            spec,
+        };
+        plans.get(&key, build)
+    }
+
+    /// [`feature_lookup_indices`] for this view.
+    pub(crate) fn feature_lookups(
+        &self,
+        tag: [u8; 4],
+        script_priority: &[[u8; 4]],
+    ) -> Option<Vec<u16>> {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.feature_lookups(tag),
+            None => feature_lookup_indices(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                tag,
+                script_priority,
+            ),
+        }
+    }
+
+    /// [`lists_feature`] for this view.
+    pub(crate) fn lists(&self, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.lists(tag),
+            None => lists_feature(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                tag,
+                script_priority,
+            ),
+        }
+    }
+
+    /// [`listed_feature_lookups`] for this view.
+    pub(crate) fn listed_lookups(&self, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Vec<u16> {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.listed_lookups(tag),
+            None => listed_feature_lookups(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                tag,
+                script_priority,
+            ),
+        }
+    }
+
+    /// [`required_feature`] for this view.
+    pub(crate) fn required(&self, script_priority: &[[u8; 4]]) -> Option<([u8; 4], Vec<u16>)> {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.required.clone(),
+            None => required_feature(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                script_priority,
+            ),
+        }
+    }
+
+    /// The resolved language system of a run whose candidate script
+    /// tags are `script_priority`, from the font's cache: `None`
+    /// without one, or when the language system is too large to keep.
+    fn map(&self, script_priority: &[[u8; 4]]) -> Option<Cow<'_, FeatureMap>> {
+        let maps = self.maps?;
+        let key = MapKey {
+            script_priority,
+            language_tags: self.language_tags,
+            record: self.features.record(),
+        };
+        maps.get(&key, || FeatureMap::build(self, script_priority))
+    }
+}
+
+/// Feature indices a language system may list for its resolution to be
+/// kept. Real fonts list a few dozen.
+const MAX_MAP_FEATURES: usize = 1024;
+/// Lookup indices one resolution may keep, over all its features.
+const MAX_MAP_LOOKUPS: usize = 1 << 14;
+/// Resolutions one table keeps: one per combination of script tags,
+/// language and FeatureVariations record a font is shaped with.
+const MAP_SLOTS: usize = 16;
+
+/// One language system resolved once, so each feature query of a
+/// shaping call is a binary search instead of a walk of the script
+/// list, the language system and its features. Answers every query
+/// exactly as the walk does (see [`feature_lookup_indices`],
+/// [`lists_feature`], [`listed_feature_lookups`] and
+/// [`required_feature`]).
+#[derive(Debug, Clone)]
+pub(crate) struct FeatureMap {
+    /// The table has a usable script and language system.
+    lang_sys: bool,
+    /// The tags of the language system's features and of its required
+    /// feature, sorted.
+    entries: Vec<MapEntry>,
+    /// [`required_feature`].
+    required: Option<([u8; 4], Vec<u16>)>,
+    /// The lookups of the first `vert` feature in the FeatureList, which
+    /// the global search finds.
+    global_vert: Option<Vec<u16>>,
+}
+
+#[derive(Debug, Clone)]
+struct MapEntry {
+    tag: [u8; 4],
+    /// The language system lists the tag (its required feature does
+    /// not count).
+    listed: bool,
+    /// [`lang_sys_lookups`] for the tag.
+    lookups: Option<Vec<u16>>,
+    /// The lookups of the first listed feature with the tag, as
+    /// [`listed_feature_lookups`] reads them.
+    listed_lookups: Vec<u16>,
+}
+
+impl FeatureMap {
+    /// Resolves the language system `view` picks for `script_priority`,
+    /// or `None` when it lists too many features or lookups to keep.
+    fn build(view: &LayoutView<'_>, script_priority: &[[u8; 4]]) -> Option<Self> {
+        let features = &view.features;
+        let lookups_of = |index: u16| -> Option<Vec<u16>> {
+            features
+                .get(index)
+                .map(|(_, f)| sorted(f.lookup_indices().collect()))
+        };
+        let global_vert = features
+            .find(*b"vert")
+            .map(|index| lookups_of(index).unwrap_or_default());
+        let lang_sys = select_lang_sys(&view.script_list, view.language_tags, script_priority);
+        let Some(lang_sys) = lang_sys else {
+            return Some(Self {
+                lang_sys: false,
+                entries: Vec::new(),
+                required: None,
+                global_vert,
+            });
+        };
+        // The first listed feature of each tag, and the first one whose
+        // table reads.
+        let mut firsts: BTreeMap<[u8; 4], (Option<u16>, Option<u16>)> = BTreeMap::new();
+        for (n, index) in lang_sys.feature_indices().enumerate() {
+            if n >= MAX_MAP_FEATURES {
+                return None;
+            }
+            let Some(tag) = features.tag(index) else {
+                continue;
+            };
+            let first = firsts.entry(tag).or_insert((Some(index), None));
+            if first.1.is_none() && features.get(index).is_some() {
+                first.1 = Some(index);
+            }
+        }
+        let required_index = lang_sys.required_feature_index();
+        let required_tag = required_index.and_then(|index| features.tag(index));
+        if let Some(tag) = required_tag {
+            firsts.entry(tag).or_insert((None, None));
+        }
+        let required = required_index.and_then(|index| {
+            let (tag, f) = features.get(index)?;
+            Some((tag, sorted(f.lookup_indices().collect())))
+        });
+        let mut total = 0usize;
+        let mut entries = Vec::with_capacity(firsts.len());
+        for (tag, (first_listed, first_read)) in firsts {
+            // `lang_sys_lookups`: the required feature when it has the
+            // tag and reads, and the first listed one that reads.
+            let from_required = required_index
+                .filter(|_| required_tag == Some(tag))
+                .and_then(|index| features.get(index));
+            let from_listed = first_read.and_then(|index| features.get(index));
+            let lookups = (from_required.is_some() || from_listed.is_some()).then(|| {
+                sorted(
+                    from_required
+                        .into_iter()
+                        .chain(from_listed)
+                        .flat_map(|(_, f)| f.lookup_indices())
+                        .collect(),
+                )
+            });
+            let listed_lookups = first_listed.and_then(lookups_of).unwrap_or_default();
+            total = total
+                .saturating_add(lookups.as_ref().map_or(0, Vec::len))
+                .saturating_add(listed_lookups.len());
+            if total > MAX_MAP_LOOKUPS {
+                return None;
+            }
+            entries.push(MapEntry {
+                tag,
+                listed: first_listed.is_some(),
+                lookups,
+                listed_lookups,
+            });
+        }
+        Some(Self {
+            lang_sys: true,
+            entries,
+            required,
+            global_vert,
+        })
+    }
+
+    fn entry(&self, tag: [u8; 4]) -> Option<&MapEntry> {
+        self.entries
+            .binary_search_by_key(&tag, |e| e.tag)
+            .ok()
+            .and_then(|i| self.entries.get(i))
+    }
+
+    fn feature_lookups(&self, tag: [u8; 4]) -> Option<Vec<u16>> {
+        if let Some(lookups) = self.entry(tag).and_then(|e| e.lookups.as_ref()) {
+            return Some(lookups.clone());
+        }
+        if GLOBAL_SEARCH_FEATURES.contains(&tag) {
+            if let Some(lookups) = &self.global_vert {
+                return Some(lookups.clone());
+            }
+        }
+        self.lang_sys.then(Vec::new)
+    }
+
+    fn lists(&self, tag: [u8; 4]) -> bool {
+        self.entry(tag).is_some_and(|e| e.listed)
+    }
+
+    fn listed_lookups(&self, tag: [u8; 4]) -> Vec<u16> {
+        match self.entry(tag).filter(|e| e.listed) {
+            Some(e) => e.listed_lookups.clone(),
+            None if GLOBAL_SEARCH_FEATURES.contains(&tag) => {
+                self.global_vert.clone().unwrap_or_default()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Heap bytes the map holds.
+    fn heap_bytes(&self) -> usize {
+        let lookups = |v: &Vec<u16>| v.capacity() * 2;
+        self.entries.capacity() * core::mem::size_of::<MapEntry>()
+            + self
+                .entries
+                .iter()
+                .map(|e| e.lookups.as_ref().map_or(0, lookups) + lookups(&e.listed_lookups))
+                .sum::<usize>()
+            + self.required.as_ref().map_or(0, |(_, v)| lookups(v))
+            + self.global_vert.as_ref().map_or(0, lookups)
+    }
+}
+
+/// What a [`FeatureMap`] depends on besides the table.
+struct MapKey<'k> {
+    script_priority: &'k [[u8; 4]],
+    language_tags: &'k [[u8; 4]],
+    record: Option<u32>,
+}
+
+/// A kept [`FeatureMap`] with its key; `None` for a language system too
+/// large to keep, which is then walked each time.
+struct KeyedMap {
+    script_priority: Vec<[u8; 4]>,
+    language_tags: Vec<[u8; 4]>,
+    record: Option<u32>,
+    map: Option<FeatureMap>,
+}
+
+impl KeyedMap {
+    fn matches(&self, key: &MapKey<'_>) -> bool {
+        self.script_priority == key.script_priority
+            && self.language_tags == key.language_tags
+            && self.record == key.record
+    }
+}
+
+/// The language systems one table has resolved, kept by a
+/// [`crate::Font`] across shaping calls: at most [`MAP_SLOTS`] of them.
+/// Past that, a run's language system is walked each time, as it is
+/// without a cache.
+pub(crate) struct FeatureMaps {
+    slots: [OnceBox<KeyedMap>; MAP_SLOTS],
+}
+
+impl FeatureMaps {
+    /// No language system resolved yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| OnceBox::new()),
+        }
+    }
+
+    /// The map for `key`, built with `build` the first time, or `None`
+    /// when it is too large to keep.
+    fn get(
+        &self,
+        key: &MapKey<'_>,
+        build: impl Fn() -> Option<FeatureMap>,
+    ) -> Option<Cow<'_, FeatureMap>> {
+        for slot in &self.slots {
+            let keyed = match slot.get() {
+                Some(keyed) => keyed,
+                None => slot.get_or_init(|| KeyedMap {
+                    script_priority: key.script_priority.to_vec(),
+                    language_tags: key.language_tags.to_vec(),
+                    record: key.record,
+                    map: build(),
+                }),
+            };
+            if keyed.matches(key) {
+                return keyed.map.as_ref().map(Cow::Borrowed);
+            }
+        }
+        build().map(Cow::Owned)
+    }
+
+    /// Heap bytes the kept maps hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .filter_map(OnceBox::get)
+            .map(|k| {
+                core::mem::size_of::<KeyedMap>()
+                    + (k.script_priority.capacity() + k.language_tags.capacity()) * 4
+                    + k.map.as_ref().map_or(0, FeatureMap::heap_bytes)
+            })
+            .sum()
+    }
+}
+
+impl Default for FeatureMaps {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One lookup of a shaping stage, in a form every stage kind (the GSUB
+/// stages, the syllabic shapers' stages, the GPOS stage) converts to
+/// and from, so one cache keeps them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlannedLookup {
+    /// Index into the LookupList.
+    pub(crate) index: u16,
+    /// The alternate an AlternateSubst lookup picks.
+    pub(crate) alternate: u16,
+    /// The glyph mask bits the lookup applies at (syllabic stages).
+    pub(crate) mask: u32,
+    /// The joiner handling of the features that share the lookup.
+    pub(crate) joiners: Joiners,
+    /// The lookup matches within the cursor's syllable only.
+    pub(crate) per_syllable: bool,
+    /// The lookup applies only where the stage's mask says.
+    pub(crate) masked: bool,
+}
+
+impl PlannedLookup {
+    /// A lookup with every setting at its default: automatic joiners,
+    /// no alternate, global.
+    pub(crate) const fn new(index: u16) -> Self {
+        Self {
+            index,
+            alternate: 0,
+            mask: u32::MAX,
+            joiners: Joiners::AUTO,
+            per_syllable: false,
+            masked: false,
+        }
+    }
+}
+
+/// The kinds of stage a plan's spec starts with, so that two kinds of
+/// stage over the same table never share a plan.
+pub(crate) mod stage_kind {
+    /// The GPOS stage.
+    pub(crate) const GPOS: u64 = 1;
+    /// A GSUB stage of the default, Arabic and merged passes.
+    pub(crate) const GSUB: u64 = 2;
+    /// A GSUB stage of a syllabic shaper.
+    pub(crate) const SYLLABIC: u64 = 3;
+}
+
+/// The spec word of joiner handling and two flags.
+pub(crate) fn flag_bits(joiners: Joiners, first: bool, second: bool) -> u64 {
+    u64::from(joiners.auto_zwnj)
+        | u64::from(joiners.auto_zwj) << 1
+        | u64::from(first) << 2
+        | u64::from(second) << 3
+}
+
+/// Stage plans one table keeps at most.
+const STAGE_SLOTS: usize = 64;
+/// Caller features a kept plan's key may hold.
+const MAX_STAGE_FEATURES: usize = 64;
+/// Spec words a kept plan's key may hold.
+const MAX_STAGE_SPEC: usize = 256;
+/// Lookups a kept plan may hold.
+const MAX_STAGE_LOOKUPS: usize = 4096;
+
+/// What a stage plan depends on.
+struct StageKey<'k> {
+    script_priority: &'k [[u8; 4]],
+    language_tags: &'k [[u8; 4]],
+    record: Option<u32>,
+    features: &'k [Feature],
+    spec: &'k [u64],
+}
+
+impl StageKey<'_> {
+    /// An FNV-1a hash of the key's spec, script tags and feature tags,
+    /// which picks the first slot a lookup probes.
+    fn slot_hash(&self) -> usize {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |w: u64| {
+            h ^= w;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        };
+        self.spec.iter().for_each(|&w| mix(w));
+        self.script_priority
+            .iter()
+            .for_each(|t| mix(u64::from(u32::from_be_bytes(*t))));
+        self.features
+            .iter()
+            .for_each(|f| mix(u64::from(u32::from_be_bytes(f.tag)) << 32 | u64::from(f.value)));
+        (h >> 32) as usize
+    }
+}
+
+/// A kept stage plan with its key.
+struct KeyedStage {
+    script_priority: Vec<[u8; 4]>,
+    language_tags: Vec<[u8; 4]>,
+    record: Option<u32>,
+    features: Vec<Feature>,
+    spec: Vec<u64>,
+    lookups: Vec<PlannedLookup>,
+}
+
+impl KeyedStage {
+    fn matches(&self, key: &StageKey<'_>) -> bool {
+        self.spec == key.spec
+            && self.script_priority == key.script_priority
+            && self.record == key.record
+            && self.features == key.features
+            && self.language_tags == key.language_tags
+    }
+}
+
+/// The stage plans one table has merged, kept by a [`crate::Font`]
+/// across shaping calls: at most [`STAGE_SLOTS`] of them, each with a
+/// key of at most [`MAX_STAGE_FEATURES`] caller features and
+/// [`MAX_STAGE_SPEC`] spec words and at most [`MAX_STAGE_LOOKUPS`]
+/// lookups. A stage past those limits is merged each time, as it is
+/// without a cache.
+pub(crate) struct StagePlans {
+    slots: [OnceBox<KeyedStage>; STAGE_SLOTS],
+}
+
+impl StagePlans {
+    /// No stage merged yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| OnceBox::new()),
+        }
+    }
+
+    /// The plan for `key`, merged with `build` the first time.
+    fn get<'s>(
+        &'s self,
+        key: &StageKey<'_>,
+        build: impl Fn() -> Vec<PlannedLookup>,
+    ) -> Cow<'s, [PlannedLookup]> {
+        if key.features.len() > MAX_STAGE_FEATURES || key.spec.len() > MAX_STAGE_SPEC {
+            return Cow::Owned(build());
+        }
+        let mut built: Option<Vec<PlannedLookup>> = None;
+        // Probing starts at a slot the key hashes to, so a stage usually
+        // finds its plan at the first slot it looks at.
+        let start = key.slot_hash() % STAGE_SLOTS;
+        let order = (start..STAGE_SLOTS).chain(0..start);
+        for slot in order.filter_map(|i| self.slots.get(i)) {
+            if let Some(kept) = slot.get() {
+                if kept.matches(key) {
+                    return Cow::Borrowed(&kept.lookups);
+                }
+                continue;
+            }
+            let lookups = built.take().unwrap_or_else(&build);
+            if lookups.len() > MAX_STAGE_LOOKUPS {
+                return Cow::Owned(lookups);
+            }
+            let kept = slot.get_or_init(|| KeyedStage {
+                script_priority: key.script_priority.to_vec(),
+                language_tags: key.language_tags.to_vec(),
+                record: key.record,
+                features: key.features.to_vec(),
+                spec: key.spec.to_vec(),
+                lookups: lookups.clone(),
+            });
+            if kept.matches(key) {
+                return Cow::Borrowed(&kept.lookups);
+            }
+            // Another thread kept a different stage here first.
+            built = Some(lookups);
+        }
+        Cow::Owned(built.unwrap_or_else(build))
+    }
+
+    /// Heap bytes the kept plans hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .filter_map(OnceBox::get)
+            .map(|k| {
+                core::mem::size_of::<KeyedStage>()
+                    + (k.script_priority.capacity() + k.language_tags.capacity()) * 4
+                    + k.features.capacity() * core::mem::size_of::<Feature>()
+                    + k.spec.capacity() * 8
+                    + k.lookups.capacity() * core::mem::size_of::<PlannedLookup>()
+            })
+            .sum()
+    }
+}
+
+impl Default for StagePlans {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Debug for StagePlans {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kept = self.slots.iter().filter(|s| s.get().is_some()).count();
+        f.debug_struct("StagePlans").field("kept", &kept).finish()
+    }
+}
+
+impl core::fmt::Debug for FeatureMaps {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kept = self.slots.iter().filter(|s| s.get().is_some()).count();
+        f.debug_struct("FeatureMaps").field("kept", &kept).finish()
+    }
 }
 
 #[cfg(test)]
@@ -583,5 +1167,161 @@ mod tests {
             features: feature_list(&[]),
         };
         assert_eq!(f.lookups(&[], b"liga", &[*b"DFLT"]), None);
+    }
+
+    /// Every query through a kept [`FeatureMap`] answers as the walk
+    /// does, for the tags each real font lists and some it does not,
+    /// over several scripts, languages and FeatureVariations records.
+    #[test]
+    fn kept_language_systems_answer_as_the_walk_does() {
+        use crate::tables::layout::accel::LayoutCache;
+        use crate::tables::layout::LayoutTable;
+        use crate::Face;
+        let fonts: [&[u8]; 5] = [
+            include_bytes!("../../tests/fixtures/opensans_regular.ttf"),
+            include_bytes!("../../tests/fixtures/amiri_regular.ttf"),
+            include_bytes!("../../tests/fonts/NotoSansDevanagari-Regular.ttf"),
+            include_bytes!("../../tests/fonts/NotoSansKR-Palt-Subset.ttf"),
+            include_bytes!("../../tests/fixtures/rubik_vf.ttf"),
+        ];
+        let priorities: [&[[u8; 4]]; 6] = [
+            &[*b"latn"],
+            &[*b"arab"],
+            &[*b"dev2", *b"deva"],
+            &[*b"hang"],
+            &[*b"cyrl"],
+            &[],
+        ];
+        let languages: [&[[u8; 4]]; 4] = [&[], &[*b"TRK "], &[*b"URD ", *b"ARA "], &[*b"KOR "]];
+        let unknown = [*b"zzzz", *b"vert", *b"kern", *b"liga", *b"rvrn", *b"mark"];
+        for data in fonts {
+            let face = Face::parse_bytes(data, 0).unwrap();
+            for gsub in [true, false] {
+                let (script_list, list, variations, count) = if gsub {
+                    let Some(t) = face.gsub().unwrap() else {
+                        continue;
+                    };
+                    let v = t.feature_variations().ok().flatten();
+                    (
+                        *t.script_list(),
+                        *t.feature_list(),
+                        v,
+                        t.lookup_list().len(),
+                    )
+                } else {
+                    let Some(t) = face.gpos().unwrap() else {
+                        continue;
+                    };
+                    let v = t.feature_variations().ok().flatten();
+                    (
+                        *t.script_list(),
+                        *t.feature_list(),
+                        v,
+                        t.lookup_list().len(),
+                    )
+                };
+                let table = if gsub {
+                    LayoutTable::Gsub
+                } else {
+                    LayoutTable::Gpos
+                };
+                let records: Vec<Option<(FeatureVariations<'_>, u32)>> = core::iter::once(None)
+                    .chain(
+                        variations
+                            .into_iter()
+                            .flat_map(|v| (0..v.len()).map(move |r| Some((v, r)))),
+                    )
+                    .collect();
+                let mut tags: Vec<[u8; 4]> = list.iter().map(|(tag, _)| tag).collect();
+                tags.extend(unknown);
+                for record in records {
+                    let features = ActiveFeatures::new(list, record);
+                    let cache = LayoutCache::new(table, count, 1 << 20);
+                    for languages in languages {
+                        let walk = LayoutView {
+                            script_list,
+                            features,
+                            language_tags: languages,
+                            maps: None,
+                            plans: None,
+                        };
+                        let kept = LayoutView {
+                            maps: Some(&cache.maps),
+                            ..walk
+                        };
+                        for priority in priorities {
+                            assert_eq!(kept.required(priority), walk.required(priority));
+                            for &tag in &tags {
+                                let what = (tag, priority, languages, record.map(|r| r.1));
+                                assert_eq!(
+                                    kept.feature_lookups(tag, priority),
+                                    walk.feature_lookups(tag, priority),
+                                    "{what:?}"
+                                );
+                                assert_eq!(kept.lists(tag, priority), walk.lists(tag, priority));
+                                assert_eq!(
+                                    kept.listed_lookups(tag, priority),
+                                    walk.listed_lookups(tag, priority),
+                                    "{what:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const LATN: &[[u8; 4]] = &[*b"latn"];
+
+    #[test]
+    fn stage_plans_are_kept_per_key() {
+        let plans = StagePlans::new();
+        let built = core::cell::Cell::new(0);
+        let build = |n: u16| {
+            built.set(built.get() + 1);
+            (0..n).map(PlannedLookup::new).collect::<Vec<_>>()
+        };
+        let liga = [Feature {
+            tag: *b"liga",
+            value: 0,
+        }];
+        let key = |spec: &'static [u64], features: &'static [Feature]| StageKey {
+            script_priority: LATN,
+            language_tags: &[],
+            record: None,
+            features,
+            spec,
+        };
+        let first = plans.get(&key(&[1, 0], &[]), || build(3));
+        assert!(matches!(first, Cow::Borrowed(_)));
+        assert_eq!(first.len(), 3);
+        // The same key reads the kept plan.
+        let again = plans.get(&key(&[1, 0], &[]), || build(9));
+        assert_eq!(again.len(), 3);
+        assert_eq!(built.get(), 1);
+        // Another spec or feature list is another plan.
+        assert_eq!(plans.get(&key(&[1, 1], &[]), || build(2)).len(), 2);
+        let with_liga: &'static [Feature] = Box::leak(Box::new(liga));
+        assert_eq!(plans.get(&key(&[1, 0], with_liga), || build(4)).len(), 4);
+        assert_eq!(built.get(), 3);
+        // Keys and plans past the limits are merged each time.
+        let long: &'static [u64] = Box::leak(alloc::vec![7; MAX_STAGE_SPEC + 1].into_boxed_slice());
+        assert!(matches!(
+            plans.get(&key(long, &[]), || build(1)),
+            Cow::Owned(_)
+        ));
+        let huge = plans.get(&key(&[5], &[]), || build(MAX_STAGE_LOOKUPS as u16 + 1));
+        assert!(matches!(huge, Cow::Owned(_)));
+        // Once every slot holds another key, plans are not kept.
+        for i in 0..STAGE_SLOTS as u64 {
+            let spec: &'static [u64] = Box::leak(Box::new([100 + i]));
+            plans.get(&key(spec, &[]), || build(1));
+        }
+        assert!(matches!(
+            plans.get(&key(&[999], &[]), || build(1)),
+            Cow::Owned(_)
+        ));
+        assert!(plans.heap_bytes() > 0);
     }
 }

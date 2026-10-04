@@ -41,6 +41,11 @@ impl<'a> Face<'a> {
     /// entirely (CFF-only); the caller should treat the missing
     /// information as "drop the kern silently", the same conservative
     /// posture sigilbuzz uses for fmt-4 fall-through everywhere else.
+    ///
+    /// A font without `vmtx` gets HarfBuzz's vertical metrics for one
+    /// (see [`Vmtx::missing`]), as the outline and bounds methods do:
+    /// the top phantom point sits at the top of the glyph's box and the
+    /// bottom one an em below it.
     pub fn glyph_points(&self, glyph_id: u16) -> Result<Option<Vec<(i16, i16)>>> {
         if self.record(tag::GLYF).is_none() {
             return Ok(None);
@@ -49,7 +54,8 @@ impl<'a> Face<'a> {
         let glyf = self.glyf()?;
         let hmtx = self.hmtx()?;
         let vmtx = self.vmtx()?;
-        glyf.glyph_points(&loca, glyph_id, &hmtx, vmtx.as_ref())
+        let vmtx = self.phantom_vmtx(vmtx)?;
+        glyf.glyph_points(&loca, glyph_id, &hmtx, Some(&vmtx))
     }
 
     /// Returns the design-unit bounding box for `glyph_id`, or

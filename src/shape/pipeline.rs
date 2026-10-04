@@ -41,7 +41,9 @@ fn starts_mongolian(first: char) -> bool {
 /// Feature tags with `value: 0` disable the corresponding feature
 /// for this call. Non-zero values enable a feature if the font
 /// supports it. Unknown tags are accepted and ignored rather than
-/// returning an error.
+/// returning an error. When the list names a tag more than once, the
+/// last entry wins, as in HarfBuzz: `liga=0` then `liga=1` turns
+/// ligatures on.
 ///
 /// # Output order
 ///
@@ -59,6 +61,10 @@ fn starts_mongolian(first: char) -> bool {
 // The pipeline is a straight-line sequence of passes so the order is
 // visible in one place.
 pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<ShapedRun> {
+    // A tag the list repeats takes its last value, as in HarfBuzz, so
+    // every pass below sees each tag once.
+    let features = super::last_values(features);
+    let features: &[Feature] = &features;
     // Vertical layout: explicit when the buffer direction is TTB/BTT,
     // *implicit* for Mongolian text when the caller never chose a
     // direction (see `starts_mongolian`). Mongolian's traditional
@@ -246,20 +252,32 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let select = |variations| {
         crate::tables::layout::feature_variations::select(variations, coords, var_store)
     };
+    // What the font keeps between calls: the lookup accelerators, which
+    // let every pass below skip the lookups and subtables a glyph cannot
+    // start without parsing them, the resolved language systems, and the
+    // per-glyph metrics that walk outlines. A font's first call builds
+    // none of it: a font shaped once, which many callers build per run,
+    // would spend more building them than they save.
+    let warm = font.caches().note_use();
+    let face_cache = warm.then(|| font.caches().face());
     let gsub = face.gsub()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
+        let cache = face_cache.map(|c| c.gsub(g.lookup_list().len(), g.table_len()));
         Some(
             g.with_language_tags(language_tags)
                 .with_cluster_level(level)
                 .with_unsafe_to_concat(concat)
-                .with_feature_variation(variation),
+                .with_feature_variation(variation)
+                .with_cache(cache),
         )
     });
     let gpos = face.gpos()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
+        let cache = face_cache.map(|c| c.gpos(g.lookup_list().len(), g.table_len()));
         Some(
             g.with_language_tags(language_tags)
-                .with_feature_variation(variation),
+                .with_feature_variation(variation)
+                .with_cache(cache),
         )
     });
 
@@ -333,29 +351,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // leaves `mark` none changes nothing.
     let mark_enabled = !super::feature_disabled(features, *b"mark");
     let has_gpos_mark = |priority: &[[u8; 4]]| {
-        use crate::ot::layout_select::lists_feature;
         let mark = *b"mark";
         let in_gpos = || {
-            gpos.as_ref().is_some_and(|g| {
-                lists_feature(
-                    g.script_list(),
-                    &g.features(),
-                    g.language_tags(),
-                    mark,
-                    priority,
-                )
-            })
+            gpos.as_ref()
+                .is_some_and(|g| g.layout_view().lists(mark, priority))
         };
         let in_gsub = || {
-            gsub.as_ref().is_some_and(|g| {
-                lists_feature(
-                    g.script_list(),
-                    &g.features(),
-                    g.language_tags(),
-                    mark,
-                    priority,
-                )
-            })
+            gsub.as_ref()
+                .is_some_and(|g| g.layout_view().lists(mark, priority))
         };
         mark_enabled && (in_gpos() || in_gsub())
     };
@@ -770,7 +773,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // One `FontAdvances` serves the whole call: the origins, the
     // fallback spaces, and the `stch` stretch below ask it too, and it
     // keeps each glyph's phantom-point advance once computed.
-    let advances = position::FontAdvances::new(face, coords, is_vertical)?;
+    let instance_cache = warm.then(|| font.caches().instance());
+    let advances = position::FontAdvances::new(face, coords, is_vertical, instance_cache)?;
     if is_vertical {
         // VVAR carries per-glyph vertical-advance deltas; applies
         // only when the font is variable and the user requested

@@ -33,6 +33,7 @@ use crate::ot::syllabic::cat::{
     VBLW, VPRE, VPST, VS, ZWJ, ZWNJ,
 };
 use crate::ot::syllabic::machine::{alt, one, opt, seq, star, Machine, Pat, Syllable};
+use crate::sync::OnceBox;
 
 fn j() -> Pat {
     one(&[ZWJ, ZWNJ])
@@ -124,15 +125,19 @@ fn broken_cluster() -> Pat {
 }
 
 /// Splits Myanmar categories into syllables (`find_syllables_myanmar`).
+/// The grammar is compiled once.
 pub(super) fn find_syllables(cats: &[u8]) -> Vec<Syllable> {
-    let machine = Machine::new(
-        vec![
-            (consonant_syllable(), syllable::CONSONANT),
-            (one(&[ZWJ, ZWNJ, SMPST]), syllable::NON_MYANMAR),
-            (broken_cluster(), syllable::BROKEN),
-        ],
-        syllable::NON_MYANMAR,
-    );
+    static MACHINE: OnceBox<Machine> = OnceBox::new();
+    let machine = MACHINE.get_or_init(|| {
+        Machine::new(
+            vec![
+                (consonant_syllable(), syllable::CONSONANT),
+                (one(&[ZWJ, ZWNJ, SMPST]), syllable::NON_MYANMAR),
+                (broken_cluster(), syllable::BROKEN),
+            ],
+            syllable::NON_MYANMAR,
+        )
+    });
     machine.scan(cats)
 }
 

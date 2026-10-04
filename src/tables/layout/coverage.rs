@@ -60,6 +60,12 @@ enum Format {
     Format2,
 }
 
+// The coverage lookups are the innermost step of every GSUB and GPOS
+// walk, called once or twice per glyph per subtable. Left to the
+// inliner they stopped being inlined into the PairPos path once the
+// lookup accelerators added callers, which cost a kerned run about 15%,
+// so they are inlined always.
+#[allow(clippy::inline_always)]
 impl<'a> Coverage<'a> {
     /// Parses a Coverage table from its raw bytes.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
@@ -114,6 +120,7 @@ impl<'a> Coverage<'a> {
     /// Coverage index of `glyph_id`, or `None` if the glyph is not
     /// covered by this table.
     #[must_use]
+    #[inline(always)]
     pub fn index_of(&self, glyph_id: u16) -> Option<u16> {
         match self.format {
             Format::Format1 => self.index_format1(glyph_id),
@@ -123,15 +130,36 @@ impl<'a> Coverage<'a> {
 
     /// True if the table covers `glyph_id`.
     #[must_use]
+    #[inline(always)]
     pub fn contains(&self, glyph_id: u16) -> bool {
         self.index_of(glyph_id).is_some()
     }
 
+    /// Calls `f(first, last)` for every glyph array entry (as a range
+    /// of one) or range record, in table order. Every glyph
+    /// [`Self::index_of`] can find lies in one of them, sorted or not.
+    pub(crate) fn for_each_range(&self, mut f: impl FnMut(u16, u16)) {
+        for i in 0..self.count {
+            match self.format {
+                Format::Format1 => {
+                    let g = self.glyph_at(i);
+                    f(g, g);
+                }
+                Format::Format2 => {
+                    let (start, end, _) = self.range_at(i);
+                    f(start, end);
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
     fn glyph_at(&self, i: u16) -> u16 {
         let off = self.body_off + i as usize * 2;
         u16::from_be_bytes([self.data[off], self.data[off + 1]])
     }
 
+    #[inline(always)]
     fn range_at(&self, i: u16) -> (u16, u16, u16) {
         let off = self.body_off + i as usize * 6;
         let start = u16::from_be_bytes([self.data[off], self.data[off + 1]]);
@@ -140,6 +168,7 @@ impl<'a> Coverage<'a> {
         (start, end, start_cov)
     }
 
+    #[inline(always)]
     fn index_format1(&self, glyph_id: u16) -> Option<u16> {
         if self.count == 0 {
             return None;
@@ -158,6 +187,7 @@ impl<'a> Coverage<'a> {
         None
     }
 
+    #[inline(always)]
     fn index_format2(&self, glyph_id: u16) -> Option<u16> {
         if self.count == 0 {
             return None;

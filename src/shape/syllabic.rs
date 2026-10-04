@@ -15,7 +15,7 @@
 
 use alloc::vec::Vec;
 
-use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked};
+use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked, gsub_lookup_may_apply};
 use super::joiners::FeatureFlags;
 use super::LookupBudget;
 use crate::buffer::Glyph;
@@ -66,6 +66,13 @@ impl<'a> SyllabicGsub<'a> {
         );
     }
 
+    /// True when lookup `index` may change `glyphs`: false when none of
+    /// them can start one of its subtables, so applying it would leave
+    /// the run as it is.
+    pub(crate) fn may_apply(&self, index: u16, glyphs: &[Glyph]) -> bool {
+        gsub_lookup_may_apply(self.gsub, index, glyphs)
+    }
+
     /// Applies lookup `index` to `glyphs`, with the feature's joiner
     /// handling. The lookup applies at a glyph only when `applies`
     /// accepts it. With `per_syllable`, it matches only glyphs whose
@@ -82,6 +89,9 @@ impl<'a> SyllabicGsub<'a> {
     ) -> Vec<bool> {
         if glyphs.is_empty() {
             return Vec::new();
+        }
+        if !self.may_apply(index, glyphs) {
+            return alloc::vec![false; glyphs.len()];
         }
         let mask: Vec<bool> = glyphs.iter().map(applies).collect();
         let flags = FeatureFlags {
