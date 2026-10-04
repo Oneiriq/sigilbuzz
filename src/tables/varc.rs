@@ -56,7 +56,7 @@ use alloc::vec::Vec;
 use crate::error::{Error, Result};
 use crate::tables::layout::Coverage;
 use crate::tables::multi_var_store::{decode_tuple_values, read_cff2_index, MultiVarStore};
-use crate::tables::parse::{hb_roundf, Reader};
+use crate::tables::parse::{abs_f64, floor_f64, hb_roundf, Reader};
 
 /// A parsed `VARC` table.
 #[derive(Debug, Clone)]
@@ -910,24 +910,110 @@ impl Default for Decomposed {
 }
 
 impl Decomposed {
-    /// The affine the boring-expansion spec composes:
+    /// The affine HarfBuzz's `hb_transform_decomposed_t::to_transform`
+    /// builds, op for op in `f32`, with the angles in radians as
+    /// HarfBuzz takes them (half-turns times `f32` π):
     ///
     /// ```text
-    ///   T(tx + tcx, ty + tcy) * R(rotation * π) * S(sx, sy) *
-    ///   Skew(-skewX * π, skewY * π) * T(-tcx, -tcy)
+    ///   translate(tx + tcx, ty + tcy), rotate(rotation),
+    ///   scale(sx, sy), skew(-skewX, skewY), translate(-tcx, -tcy)
     /// ```
+    ///
+    /// Returned in `[xx, xy, yx, yy, tx, ty]` order.
     fn to_affine(&self) -> [f32; 6] {
-        compose_affine(
-            self.tx,
-            self.ty,
-            self.rotation,
-            self.sx,
-            self.sy,
-            self.skew_x,
-            self.skew_y,
-            self.tcx,
-            self.tcy,
-        )
+        let pi = core::f32::consts::PI;
+        let mut t = Affine::IDENTITY;
+        t.translate(self.tx + self.tcx, self.ty + self.tcy);
+        t.rotate(self.rotation * pi);
+        t.scale(self.sx, self.sy);
+        t.skew(-(self.skew_x * pi), self.skew_y * pi);
+        t.translate(-self.tcx, -self.tcy);
+        [t.xx, t.xy, t.yx, t.yy, t.x0, t.y0]
+    }
+}
+
+/// HarfBuzz's `hb_transform_t<float>`, with the operations
+/// [`Decomposed::to_affine`] uses, each skipping the cases HarfBuzz
+/// skips and summing in HarfBuzz's order.
+#[derive(Clone, Copy)]
+struct Affine {
+    xx: f32,
+    yx: f32,
+    xy: f32,
+    yy: f32,
+    x0: f32,
+    y0: f32,
+}
+
+impl Affine {
+    const IDENTITY: Self = Self {
+        xx: 1.0,
+        yx: 0.0,
+        xy: 0.0,
+        yy: 1.0,
+        x0: 0.0,
+        y0: 0.0,
+    };
+
+    fn translate(&mut self, x: f32, y: f32) {
+        if x == 0.0 && y == 0.0 {
+            return;
+        }
+        self.x0 += self.xx * x + self.xy * y;
+        self.y0 += self.yx * x + self.yy * y;
+    }
+
+    /// `self` times `b`: `b` applied first.
+    fn multiply(&mut self, b: Self) {
+        let a = *self;
+        *self = Self {
+            xx: a.xx * b.xx + a.xy * b.yx,
+            yx: a.yx * b.xx + a.yy * b.yx,
+            xy: a.xx * b.xy + a.xy * b.yy,
+            yy: a.yx * b.xy + a.yy * b.yy,
+            x0: a.xx * b.x0 + a.xy * b.y0 + a.x0,
+            y0: a.yx * b.x0 + a.yy * b.y0 + a.y0,
+        };
+    }
+
+    fn rotate(&mut self, radians: f32) {
+        if radians == 0.0 {
+            return;
+        }
+        let (s, c) = sincos(radians);
+        self.multiply(Self {
+            xx: c,
+            yx: s,
+            xy: -s,
+            yy: c,
+            x0: 0.0,
+            y0: 0.0,
+        });
+    }
+
+    fn scale(&mut self, sx: f32, sy: f32) {
+        if sx == 1.0 && sy == 1.0 {
+            return;
+        }
+        self.xx *= sx;
+        self.yx *= sx;
+        self.xy *= sy;
+        self.yy *= sy;
+    }
+
+    fn skew(&mut self, skew_x: f32, skew_y: f32) {
+        if skew_x == 0.0 && skew_y == 0.0 {
+            return;
+        }
+        let tan_or_zero = |radians: f32| if radians == 0.0 { 0.0 } else { tan(radians) };
+        self.multiply(Self {
+            xx: 1.0,
+            yx: tan_or_zero(skew_y),
+            xy: tan_or_zero(skew_x),
+            yy: 1.0,
+            x0: 0.0,
+            y0: 0.0,
+        });
     }
 }
 
@@ -1089,100 +1175,71 @@ fn decode_axis_indices(data: &[u8]) -> Vec<u32> {
     out
 }
 
-/// Builds the affine matrix from VARC's transform fields. Matches the
-/// boring-expansion-spec composition order:
-///
-/// ```text
-///   T(tx + tcx, ty + tcy) * R(rotation * π) *
-///   S(sx, sy) * Skew(-skewX * π, skewY * π) * T(-tcx, -tcy)
-/// ```
-///
-/// Returned in `[xx, xy, yx, yy, tx_eff, ty_eff]` row-major form.
-#[allow(clippy::too_many_arguments)]
-fn compose_affine(
-    tx: f32,
-    ty: f32,
-    rotation: f32,
-    sx: f32,
-    sy: f32,
-    skew_x: f32,
-    skew_y: f32,
-    tcx: f32,
-    tcy: f32,
-) -> [f32; 6] {
-    // core has no sin or cos without std, so `sincos_pi` evaluates a
-    // Taylor polynomial instead of calling libm.
-    let (cos_r, sin_r) = sincos_pi(rotation);
-    let (cos_skx, sin_skx) = sincos_pi(-skew_x);
-    let (cos_sky, sin_sky) = sincos_pi(skew_y);
-
-    // Skew matrix:
-    //   [ 1, tan(skewY*π) ]
-    //   [ tan(-skewX*π), 1 ]
-    // Implemented as cos/sin to avoid blowing up at ±π/2.
-    // Practically, skews in fonts stay well clear of ±π/2 so the
-    // tan form is fine; we compute via sin/cos for stability.
-    let tan_skx = sin_skx / cos_skx;
-    let tan_sky = sin_sky / cos_sky;
-
-    // Build M = R * S * Skew. S applied to skew first:
-    //   [ sx, 0 ]   [ 1, tan_skx ]   [ sx, sx*tan_skx ]
-    //   [ 0, sy ] * [ tan_sky, 1 ] = [ sy*tan_sky, sy ]
-    let m_xx = sx;
-    let m_xy = sx * tan_skx;
-    let m_yx = sy * tan_sky;
-    let m_yy = sy;
-
-    // Rotation * M:
-    //   [ cos, -sin ]   [ m_xx, m_xy ]
-    //   [ sin,  cos ] * [ m_yx, m_yy ]
-    let r_xx = cos_r * m_xx - sin_r * m_yx;
-    let r_xy = cos_r * m_xy - sin_r * m_yy;
-    let r_yx = sin_r * m_xx + cos_r * m_yx;
-    let r_yy = sin_r * m_xy + cos_r * m_yy;
-
-    // Effective translation:
-    //   p' = R*M*(p - tcenter) + (tcenter + translate)
-    //   tx_eff = -(r_xx*tcx + r_xy*tcy) + tcx + tx
-    //   ty_eff = -(r_yx*tcx + r_yy*tcy) + tcy + ty
-    let tx_eff = -(r_xx * tcx + r_xy * tcy) + tcx + tx;
-    let ty_eff = -(r_yx * tcx + r_yy * tcy) + tcy + ty;
-
-    [r_xx, r_xy, r_yx, r_yy, tx_eff, ty_eff]
+/// `sinf` and `cosf` of `radians`, as HarfBuzz's `hb_sincos` takes
+/// them from libm: worked out in `f64` and rounded to `f32`, within an
+/// `f32` rounding of the exact values at any angle a glyph uses. `core`
+/// has no sine or cosine without `std`. An angle that is not finite
+/// gives NaN.
+fn sincos(radians: f32) -> (f32, f32) {
+    let (s, c) = sincos_f64(f64::from(radians));
+    (s as f32, c as f32)
 }
 
-/// `sin(x*π)` and `cos(x*π)`. Tight enough for glyph composites.
-/// VARC's F4.12 fields stay within `[-8, 8)`, but variation deltas can
-/// push an angle anywhere, including infinity. Implemented via a
-/// Taylor series for `no_std`-friendliness.
-fn sincos_pi(x: f32) -> (f32, f32) {
-    // Reduce to [-1, 1] (i.e. [-π, π]).
-    let mut t = x;
-    // For large or infinite angles the loops below would run for a
-    // long time or forever, so take the remainder first. `%` is exact
-    // and so is each loop step below 2^25, so both paths give the same
-    // angle wherever the loops finish. Clearing the sign of a zero
-    // remainder matches what the loops produce.
-    // A range check instead of `abs`, which core lacks before Rust 1.85.
-    if !(-16.0..=16.0).contains(&t) {
-        t %= 2.0;
-        if t == 0.0 {
-            t = 0.0;
-        }
+/// `tanf` of `radians`, from [`sincos_f64`] as [`sincos`] works it out.
+fn tan(radians: f32) -> f32 {
+    let (s, c) = sincos_f64(f64::from(radians));
+    (s / c) as f32
+}
+
+/// `sin(x)` and `cos(x)`: `x` brought into `[-π/4, π/4]` by the nearest
+/// quarter turn (π/2 in two parts, so the remainder keeps its
+/// precision), a Taylor polynomial there, accurate to about 1e-14, and
+/// the quarter turn put back by swapping and negating. Deltas can push
+/// an angle anywhere: past 2^30 radians it is first taken modulo 2π,
+/// so the quarter-turn count stays exact and no loop can spin.
+fn sincos_f64(x: f64) -> (f64, f64) {
+    const FRAC_2_PI: f64 = core::f64::consts::FRAC_2_PI;
+    // π/2 = PIO2_HI + PIO2_LO.
+    const PIO2_HI: f64 = core::f64::consts::FRAC_PI_2;
+    const PIO2_LO: f64 = 6.123_233_995_736_766e-17;
+    if !x.is_finite() {
+        return (f64::NAN, f64::NAN);
     }
-    while t > 1.0 {
-        t -= 2.0;
+    let x = if abs_f64(x) > 1_073_741_824.0 {
+        x % core::f64::consts::TAU
+    } else {
+        x
+    };
+    let quarter = floor_f64(x * FRAC_2_PI + 0.5);
+    let r = (x - quarter * PIO2_HI) - quarter * PIO2_LO;
+    let z = r * r;
+    // sin r = r - r^3/3! + ... - r^15/15!; cos r = 1 - r^2/2! + ... + r^16/16!.
+    let sin = r
+        * (1.0
+            + z * (-1.0 / 6.0
+                + z * (1.0 / 120.0
+                    + z * (-1.0 / 5040.0
+                        + z * (1.0 / 362_880.0
+                            + z * (-1.0 / 39_916_800.0
+                                + z * (1.0 / 6_227_020_800.0
+                                    + z * (-1.0 / 1_307_674_368_000.0))))))));
+    let cos = 1.0
+        + z * (-0.5
+            + z * (1.0 / 24.0
+                + z * (-1.0 / 720.0
+                    + z * (1.0 / 40_320.0
+                        + z * (-1.0 / 3_628_800.0
+                            + z * (1.0 / 479_001_600.0
+                                + z * (-1.0 / 87_178_291_200.0
+                                    + z * (1.0 / 20_922_789_888_000.0))))))));
+    // `quarter` is a whole number below 2^30 in size, so the cast is
+    // exact, and its low two bits pick the quadrant.
+    match (quarter as i64) & 3 {
+        0 => (sin, cos),
+        1 => (cos, -sin),
+        2 => (-sin, -cos),
+        _ => (-cos, sin),
     }
-    while t < -1.0 {
-        t += 2.0;
-    }
-    // y = t * π
-    let y = t * core::f32::consts::PI;
-    // 9-term Taylor expansion good to ~1e-6 over [-π, π].
-    let y2 = y * y;
-    let sin = y * (1.0 - y2 / 6.0 + y2 * y2 / 120.0 - y2 * y2 * y2 / 5040.0);
-    let cos = 1.0 - y2 / 2.0 + y2 * y2 / 24.0 - y2 * y2 * y2 / 720.0 + y2 * y2 * y2 * y2 / 40320.0;
-    (cos, sin)
 }
 
 #[cfg(test)]

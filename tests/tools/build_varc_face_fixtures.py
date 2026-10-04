@@ -21,7 +21,9 @@ composites:
 - a component the coverage names past the end of the glyph records,
   which HarfBuzz draws as nothing;
 - a region that constrains no axis, whose deltas HarfBuzz applies at
-  the default instance too, since its font holds a zero per axis there.
+  the default instance too, since its font holds a zero per axis there;
+- rotations of 90, 135, 180, 270 and -135 degrees about a center 500
+  units away, one varied past a half turn, and a skew of 72 degrees.
 
 The VARC table is written byte by byte with the encoders of
 build_varc_morx_parity_fixtures.py. tests/tools/varc_face_expected.py
@@ -117,6 +119,7 @@ SUBTABLES = [
         bytes([0x00, 5]),                        # 0: RA's value only
         b"",                                     # 1: nothing
         tv([2, -3]),                             # 2: full
+        tv([1024, -512]),                        # 3: a rotation, F4.12 units
     ]),
     # outer 3: axis values, regions RB, RAN.
     ([RB, RAN], [
@@ -167,6 +170,8 @@ VARC_NAMES = [
     "x_user",
     # a region without axes, which holds at the default instance too
     "k_const", "k_cond", "k_outer",
+    # rotations past a quarter turn about a far center, and a large skew
+    "rot_90", "rot_135", "rot_180", "rot_270", "rot_m135", "rot_var", "skew_big",
 ]
 # Covered by the VARC coverage, past the glyph records: last in the
 # glyph order, so last in the coverage.
@@ -257,6 +262,14 @@ def make(g):
     rec["k_const"] = C(box, transform_var=vi(4, 0), fields=dict(TX=0, TY=0))
     rec["k_cond"] = C(tri, cond=6) + C(box, fields=dict(TX=300))
     rec["k_outer"] = C(g["k_const"], fields=dict(TY=200)) + C(g["k_cond"], fields=dict(TX=400))
+
+    # Rotations about a center 500 units away, where an angle off by a
+    # little moves the box a lot; one varies past a half turn.
+    for name, rot in [("rot_90", 2048), ("rot_135", 3072), ("rot_180", 4096),
+                      ("rot_270", 6144), ("rot_m135", -3072)]:
+        rec[name] = C(box, fields=dict(ROT=rot, CX=-400, CY=-300))
+    rec["rot_var"] = C(tri, transform_var=vi(2, 3), fields=dict(ROT=3072, CX=-400, CY=-300))
+    rec["skew_big"] = C(box, fields=dict(SKX=1638, SKY=-1229, CX=300, CY=-200))
 
     # A component VARC covers but has no record for.
     rec["x_user"] = C(g[NO_RECORD], fields=dict(TX=50)) + C(tri, fields=dict(TX=250))
