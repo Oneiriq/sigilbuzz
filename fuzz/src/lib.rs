@@ -106,7 +106,20 @@ pub fn axis_coords(face: &Face<'_>, knobs: &mut Knobs<'_>) -> Vec<f32> {
 pub fn shape_samples(face: Face<'_>, knobs: &mut Knobs<'_>, extra: Option<&str>) {
     let coords = axis_coords(&face, knobs);
     let size = f32::from(knobs.byte()) + 1.0;
-    let font = Font::new(face, size).with_coords(&coords);
+    // Half the time the instance comes from user-space values.
+    let font = if knobs.byte() & 1 == 1 {
+        let variations: Vec<([u8; 4], f32)> = match face.fvar() {
+            Ok(Some(fvar)) => fvar
+                .axes()
+                .iter()
+                .map(|a| (a.tag, a.default_value + knobs.coord() * 500.0))
+                .collect(),
+            _ => Vec::new(),
+        };
+        Font::new(face, size).with_variations(&variations)
+    } else {
+        Font::new(face, size).with_coords(&coords)
+    };
     let mut features = Vec::new();
     for _ in 0..(knobs.byte() % 6) {
         let i = usize::from(knobs.byte()) % FEATURE_TAGS.len();

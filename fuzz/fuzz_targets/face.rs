@@ -94,4 +94,10 @@ fn exercise(face: &Face<'_>, knobs: &mut Knobs<'_>) {
         let _ = face.svg_document(gid);
         let _ = face.colr_paint(gid);
     }
+    // A run of outlines with the tables read once draws each glyph as
+    // the face draws it, errors included.
+    let outlines = face.glyph_outlines(&coords);
+    for gid in glyph_ids(face, knobs) {
+        assert_eq!(outlines.outline(gid), face.glyph_outline_at_coords(gid, &coords));
+    }
 }
