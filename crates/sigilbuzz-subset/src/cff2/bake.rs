@@ -7,11 +7,11 @@ use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use super::{
     bake_token_budget, biased_subr, charge_token, decode_operand_f64, encode_charstring_number_f64,
-    parse_cff2, serialise_cff2_top_dict, BlendCache, MAX_BAKE_DEPTH, OP_BLEND, OP_CALLGSUBR,
-    OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO, OP_HMOVETO,
-    OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE, OP_RLINETO,
-    OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO, OP_VSINDEX,
-    OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
+    parse_cff2, serialise_cff2_top_dict, BlendCache, MAX_BAKE_DEPTH, MAX_STACK, OP_BLEND,
+    OP_CALLGSUBR, OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO,
+    OP_HMOVETO, OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE,
+    OP_RLINETO, OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO,
+    OP_VSINDEX, OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
 };
 use crate::cff::{
     emit_fd_select_auto, encode_index_cff2, patch_dict_offset, serialise_font_dict,
@@ -334,6 +334,11 @@ impl<'a> Baker<'a> {
             if b0 >= 32 || b0 == OP_SHORTINT {
                 let (val, len) = decode_operand_f64(code, pos)
                     .ok_or(SubsetError::Unsupported("CFF2 bake: operand truncated"))?;
+                if self.stack.len() >= MAX_STACK {
+                    return Err(SubsetError::Unsupported(
+                        "CFF2 bake: operand stack past 513 operands",
+                    ));
+                }
                 self.stack.push(val);
                 pos += len;
                 continue;
@@ -452,6 +457,12 @@ impl<'a> Baker<'a> {
             .and_then(|total_deltas| total_deltas.checked_add(n))
             .ok_or(UNDERFLOW)?;
         let start = self.stack.len().checked_sub(needed).ok_or(UNDERFLOW)?;
+        // The deltas were charged as they were pushed; each value the
+        // blend works out is charged here, so blends that leave the same
+        // values again and again (no regions) cost what they do.
+        self.budget = self.budget.checked_sub(n).ok_or(SubsetError::Unsupported(
+            "CFF2 bake: charstring work budget exceeded",
+        ))?;
         let (masters, deltas) = self
             .stack
             .get_mut(start..)

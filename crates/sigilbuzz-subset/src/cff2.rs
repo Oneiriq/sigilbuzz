@@ -357,6 +357,10 @@ const OP_HVCURVETO: u8 = 31;
 
 const MAX_BAKE_DEPTH: u8 = 10;
 
+/// Operands a CFF2 charstring may stack: the CFF2 limit, which
+/// HarfBuzz's interpreter enforces too.
+const MAX_STACK: usize = 513;
+
 /// Minimum number of charstring tokens (operand pushes plus operators,
 /// counted inside inlined subroutines too) one bake may process.
 const MIN_BAKE_TOKENS: usize = 1 << 22;

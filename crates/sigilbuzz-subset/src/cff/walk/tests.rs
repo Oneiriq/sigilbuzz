@@ -453,3 +453,32 @@ fn cff1_clears_the_stack_at_blend_and_vsindex() {
     ]);
     walk_cff1(&charstring, &[], &[]).expect("walk");
 }
+
+#[test]
+fn a_blend_charges_the_values_it_leaves() {
+    // Without regions `512 blend` leaves its 512 values where they are,
+    // so it could run again and again for two tokens. It charges the
+    // 512 values: 512 pushes, the count, the operator and 512 more.
+    let mut charstring = int(0).repeat(512);
+    charstring.extend_from_slice(&int(512));
+    charstring.push(OP_BLEND);
+    for budget in [1026, 1025] {
+        let mut walk = CharstringWalk::new(&[], Some(BlendRegions::new(None)), budget);
+        let mut fd = walk.fd(&[], 0);
+        let r = walk.glyph(&mut fd, &charstring);
+        assert_eq!(r.is_ok(), budget == 1026, "budget {budget}");
+    }
+    // A long run of them spends a table-sized budget.
+    let mut repeated = int(0).repeat(512);
+    for _ in 0..10_000 {
+        repeated.extend_from_slice(&int(512));
+        repeated.push(OP_BLEND);
+    }
+    let mut walk = CharstringWalk::new(
+        &[],
+        Some(BlendRegions::new(None)),
+        walk_budget(repeated.len()),
+    );
+    let mut fd = walk.fd(&[], 0);
+    assert_eq!(walk.glyph(&mut fd, &repeated).unwrap_err(), WORK_EXCEEDED);
+}

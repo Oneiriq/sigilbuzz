@@ -33,9 +33,10 @@
 //! by the body that calls it, so the push can be rewritten in place.
 //!
 //! The walk charges one unit of `budget` for every operand and operator
-//! it reads, inside subroutines too, and fails once the budget is
-//! spent. Subroutines that call each other many times can describe far
-//! more work than the table's size.
+//! it reads, inside subroutines too, and one for each value a `blend`
+//! leaves, and fails once the budget is spent. Subroutines that call
+//! each other many times can describe far more work than the table's
+//! size.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -510,6 +511,10 @@ impl<'a> CharstringWalk<'a> {
         let deltas = n.checked_mul(regions).ok_or(SHORT)?;
         let total = deltas.checked_add(n).ok_or(SHORT)?;
         let start = glyph.stack.len().checked_sub(total).ok_or(SHORT)?;
+        // The deltas were charged as they were pushed; the `n` values
+        // the blend leaves are charged here, so blends that leave the
+        // same values again and again (no regions) cost what they do.
+        self.budget = self.budget.checked_sub(n).ok_or(WORK_EXCEEDED)?;
         glyph.stack.truncate(start + n);
         for operand in glyph.stack.get_mut(start..).unwrap_or_default() {
             operand.push = None;

@@ -452,3 +452,37 @@ fn bake_starts_at_the_private_dict_vsindex() {
     want.push(21);
     assert_eq!(parsed.char_strings[1], want.as_slice());
 }
+
+#[test]
+fn bake_charges_each_blended_value() {
+    // A subtable without regions: `500 blend` leaves its 500 values, and
+    // 9,000 of them would round 4.5 million values for 18,000 tokens.
+    // Each value is charged, so the table-sized budget runs out.
+    let ivs = store_with_region_counts(&[0]);
+    let mut cs1 = pushes(&[0; 500]);
+    for _ in 0..9_000 {
+        cs1.extend_from_slice(&pushes(&[500]));
+        cs1.push(16); // blend
+    }
+    cs1.extend_from_slice(&pushes(&[0, 0]));
+    cs1.push(21); // rmoveto
+    let cs0: &[u8] = &[];
+    let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], Some(&ivs));
+    let r = bake_at_coords(&cff, &[0.5]);
+    assert_eq!(
+        r.unwrap_err(),
+        SubsetError::Unsupported("CFF2 bake: charstring work budget exceeded")
+    );
+}
+
+#[test]
+fn bake_stacks_at_most_513_operands() {
+    let cs0: &[u8] = &[];
+    for (count, ok) in [(513, true), (514, false)] {
+        let mut cs1 = pushes(&alloc::vec![0; count]);
+        cs1.push(5); // rlineto takes them
+        let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], None);
+        let r = bake_at_coords(&cff, &[]);
+        assert_eq!(r.is_ok(), ok, "{count} operands: {r:?}");
+    }
+}

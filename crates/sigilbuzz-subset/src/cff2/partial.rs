@@ -8,11 +8,11 @@ use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use super::{
     bake_token_budget, biased_subr, charge_token, charstring_number_bytes, decode_operand_f32,
-    parse_cff2, serialise_cff2_top_dict, MAX_BAKE_DEPTH, OP_BLEND, OP_CALLGSUBR, OP_CALLSUBR,
-    OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO, OP_HMOVETO, OP_HSTEM,
-    OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE, OP_RLINETO, OP_RMOVETO,
-    OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO, OP_VSINDEX, OP_VSTEM,
-    OP_VSTEMHM, OP_VVCURVETO,
+    parse_cff2, serialise_cff2_top_dict, MAX_BAKE_DEPTH, MAX_STACK, OP_BLEND, OP_CALLGSUBR,
+    OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO, OP_HMOVETO,
+    OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE, OP_RLINETO,
+    OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO, OP_VSINDEX,
+    OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
 };
 use crate::cff::{
     emit_fd_select_auto, encode_index_cff2, patch_dict_offset, serialise_font_dict,
@@ -315,10 +315,6 @@ pub(super) fn bake_cff2_partial_within(
 
     Ok((out, rewriter.budget))
 }
-
-/// Operands a CFF2 charstring may stack: the CFF2 limit, which
-/// HarfBuzz's interpreter enforces too.
-const MAX_STACK: usize = 513;
 
 /// One token of the charstring tail the baker can still edit: an
 /// operand push or an operator, as the bytes it is written with.
