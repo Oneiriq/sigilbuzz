@@ -185,6 +185,11 @@ fn composite_of(records: &[Vec<u8>]) -> Vec<u8> {
 /// (0, 0), (10, 0), (10, 10) that wght 900 moves 3 right and its top
 /// 3 up.
 fn one_axis_font(glyphs: &[Vec<u8>]) -> Vec<u8> {
+    one_axis_font_with(glyphs, 1)
+}
+
+/// [`one_axis_font`] with `tuples` copies of glyph 1's tuple.
+fn one_axis_font_with(glyphs: &[Vec<u8>], tuples: u16) -> Vec<u8> {
     let n = glyphs.len() as u16;
     let mut glyf = Vec::new();
     let mut loca = Vec::new();
@@ -206,12 +211,16 @@ fn one_axis_font(glyphs: &[Vec<u8>]) -> Vec<u8> {
         tuple.extend_from_slice(&v.to_be_bytes());
     }
     let mut data = Vec::new();
-    be16(&mut data, 1); // one tuple, no shared points
-    be16(&mut data, 10); // data offset
-    be16(&mut data, tuple.len() as u16);
-    be16(&mut data, 0x8000); // embedded peak
-    be16(&mut data, 0x4000); // wght 1
-    data.extend_from_slice(&tuple);
+    be16(&mut data, tuples); // no shared points
+    be16(&mut data, 4 + 6 * tuples); // data offset
+    for _ in 0..tuples {
+        be16(&mut data, tuple.len() as u16);
+        be16(&mut data, 0x8000); // embedded peak
+        be16(&mut data, 0x4000); // wght 1
+    }
+    for _ in 0..tuples {
+        data.extend_from_slice(&tuple);
+    }
     let mut gvar = Vec::new();
     for v in [1u16, 0, 1, 0] {
         be16(&mut gvar, v);
@@ -315,7 +324,7 @@ fn a_huge_component_tree_bakes_each_glyph_once() {
     }
     let (bake, warnings) = bake_at_900(&one_axis_font(&glyphs));
     assert!(warnings.is_empty(), "{warnings:?}");
-    let (computed, drawn) = bake.extent_work;
+    let (computed, drawn, _) = bake.extent_work;
     // The triangle, every level, and every top glyph, once each.
     assert_eq!(computed, u64::from(1 + LEVELS + TOPS));
     assert_eq!(drawn, 0);
@@ -362,7 +371,7 @@ fn skewed_and_matched_composites_draw_within_one_budget() {
     matched[2..10].copy_from_slice(&[0, 1, 0, 2, 0, 3, 0, 4]);
     glyphs.push(matched);
     let (bake, warnings) = bake_at_900(&one_axis_font(&glyphs));
-    let (_, drawn) = bake.extent_work;
+    let (_, drawn, _) = bake.extent_work;
     assert_eq!(
         drawn, 1,
         "only the small skewed composite is drawn: {warnings:?}"
@@ -405,4 +414,92 @@ fn instructions_ride_through_and_a_glyph_without_contours_is_empty() {
         (metrics[2].advance, metrics[2].lsb, metrics[2].bounds),
         (500, -7, None)
     );
+}
+
+#[test]
+fn every_glyph_of_a_deep_shared_chain_is_walked_once() {
+    // Glyphs 2 to 67 form a chain 66 composites deep, each also drawing
+    // the triangle 20 times; glyphs 68 to 167 each draw the top of the
+    // chain. The chain's two top links nest more than 64 levels and
+    // keep their source boxes, and so does every glyph drawing them;
+    // each glyph is still worked out once.
+    const DEPTH: u16 = 66;
+    const TOPS: u16 = 100;
+    let mut glyphs = vec![Vec::new(), triangle(&[])];
+    for k in 0..DEPTH {
+        let mut records: Vec<Vec<u8>> = (0..20).map(|_| record(XY, 1, 1, 0, &[], false)).collect();
+        let next = if k + 1 < DEPTH { 3 + k } else { 1 };
+        records.push(record(XY, next, 0, 0, &[], true));
+        glyphs.push(composite_of(&records));
+    }
+    for _ in 0..TOPS {
+        glyphs.push(composite_of(&[record(XY, 2, 0, 0, &[], true)]));
+    }
+    let (bake, warnings) = bake_at_900(&one_axis_font(&glyphs));
+    let (computed, drawn, _) = bake.extent_work;
+    assert_eq!(computed, u64::from(1 + DEPTH + TOPS));
+    assert_eq!(drawn, 0);
+    let deep: Vec<_> = warnings
+        .iter()
+        .filter(|w| w.context == "glyf composite recursion exceeded cap")
+        .collect();
+    assert_eq!(deep.len(), usize::from(2 + TOPS), "{warnings:?}");
+    // The third link nests 64 levels and its box is worked out; the
+    // second keeps its source box.
+    assert_eq!(baked_box(&bake, 4), [3, 0, 14, 13]);
+    assert_eq!(baked_box(&bake, 3), [0, 0, 0, 0]);
+}
+
+#[test]
+fn the_depth_cap_does_not_depend_on_glyph_order() {
+    // A chain of 70 composites over the triangle, stored leaf first and
+    // then root first: either way the 6 links nesting more than 64
+    // levels keep their source boxes, and the rest are worked out.
+    const LINKS: u16 = 70;
+    for root_first in [false, true] {
+        let mut glyphs = vec![Vec::new(), triangle(&[])];
+        // The link at height `h` (1 for the one over the triangle).
+        let gid_of = |h: u16| if root_first { 2 + LINKS - h } else { 1 + h };
+        let mut links = vec![Vec::new(); usize::from(LINKS)];
+        for h in 1..=LINKS {
+            let child = if h == 1 { 1 } else { gid_of(h - 1) };
+            links[usize::from(gid_of(h) - 2)] = composite_of(&[record(XY, child, 1, 0, &[], true)]);
+        }
+        glyphs.extend(links);
+        let (bake, warnings) = bake_at_900(&one_axis_font(&glyphs));
+        assert_eq!(warnings.len(), 6, "root first {root_first}: {warnings:?}");
+        assert_eq!(baked_box(&bake, gid_of(64)), [3 + 64, 0, 13 + 64, 13]);
+        assert_eq!(baked_box(&bake, gid_of(65)), [0, 0, 0, 0]);
+        assert_eq!(bake.extent_work.0, u64::from(1 + LINKS));
+    }
+}
+
+#[test]
+fn draws_are_charged_for_the_tuples_they_decode() {
+    // The triangle has 300 tuples; glyph 2 draws it 100 times by offset
+    // and glyphs 3 to 52 each skew glyph 2. A draw of one of those
+    // decodes the triangle's tuples 100 times: 240,503 units of the
+    // 1,048,576 budget, so 4 are drawn and the other 46 take the box
+    // around their components' boxes.
+    let skew = [1.0, 0.0, 0.5, 1.0];
+    let mut glyphs = vec![Vec::new(), triangle(&[])];
+    let records: Vec<Vec<u8>> = (0..100)
+        .map(|i| record(XY, 1, i, 0, &[], i == 99))
+        .collect();
+    glyphs.push(composite_of(&records));
+    for _ in 0..50 {
+        glyphs.push(composite_of(&[record(
+            XY | COMP_WE_HAVE_A_TWO_BY_TWO,
+            2,
+            0,
+            0,
+            &skew,
+            true,
+        )]));
+    }
+    let (bake, warnings) = bake_at_900(&one_axis_font_with(&glyphs, 300));
+    let (computed, drawn, spent) = bake.extent_work;
+    assert_eq!((computed, drawn), (52, 4));
+    assert_eq!(spent, 4 * 240_503);
+    assert_eq!(warnings.len(), 46, "{warnings:?}");
 }

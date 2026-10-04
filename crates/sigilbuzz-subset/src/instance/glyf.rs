@@ -40,7 +40,7 @@ use crate::gvar_partial::GlyphPoints;
 use crate::util::round_half_up;
 use crate::warnings::Warnings;
 use crate::SubsetError;
-use extents::{Extents, NoExtent};
+use extents::{Extents, NoExtent, TupleCounts};
 
 // ---------------------------------------------------------------------------
 // glyf + loca bake
@@ -70,10 +70,11 @@ pub(super) struct GlyfLocaBake {
     /// points. `None` when the source has no `gvar`: nothing moves the
     /// outlines, and the advances come from `HVAR` and `VVAR` instead.
     pub(super) metrics: Option<Vec<GlyphMetrics>>,
-    /// Extents worked out and composites drawn through the core walk,
-    /// for the tests that bound the bake's work.
+    /// Extents worked out, composites drawn through the core walk, and
+    /// the draw budget they spent, for the tests that bound the bake's
+    /// work.
     #[cfg(test)]
-    pub(super) extent_work: (u64, u64),
+    pub(super) extent_work: (u64, u64, u64),
 }
 
 /// The tables one glyph bake reads.
@@ -88,6 +89,8 @@ struct BakeCtx<'a, 'f> {
     warnings: &'a Warnings,
     /// The extents of the glyphs composites draw, each worked out once.
     extents: Extents,
+    /// Each glyph's `gvar` tuple count, for what drawing it costs.
+    tuples: TupleCounts<'f>,
 }
 
 /// Bakes every glyph of `face` at the post-avar `coords`.
@@ -115,6 +118,7 @@ pub(super) fn bake_glyf_loca(
         vmtx: vmtx.as_ref(),
         warnings,
         extents: Extents::new(num_glyphs),
+        tuples: TupleCounts::new(gvar.as_ref().and_then(|_| face.table_bytes(tag::GVAR).ok())),
     };
 
     let mut new_bodies: Vec<Vec<u8>> = Vec::with_capacity(num_glyphs as usize);
@@ -132,7 +136,11 @@ pub(super) fn bake_glyf_loca(
         long_loca,
         metrics: gvar.is_some().then_some(metrics),
         #[cfg(test)]
-        extent_work: (cx.extents.computed.get(), cx.extents.drawn.get()),
+        extent_work: (
+            cx.extents.computed.get(),
+            cx.extents.drawn.get(),
+            cx.extents.spent(),
+        ),
     })
 }
 

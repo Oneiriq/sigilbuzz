@@ -1,5 +1,5 @@
 //! The bounding boxes of composite glyphs at the instance coordinates,
-//! with bounded work.
+//! with the work of the whole bake bounded.
 //!
 //! A composite's box is the extremes of its outline drawn at the
 //! instance, as HarfBuzz's instancer takes it. Drawing every composite
@@ -15,15 +15,19 @@
 //! - A composite with a component placed by matching points, or with a
 //!   rotation or skew, is drawn through
 //!   [`sigilbuzz::tables::Glyf::outline_at_coords`]. The draws of one
-//!   bake share a budget, [`DRAW_BUDGET`], counted in the glyphs and
-//!   points they visit. Once a draw would overrun it, a skewed
-//!   composite takes the box around its transformed components' boxes,
-//!   and one placed by matching points keeps its source box; both are
-//!   reported.
+//!   bake share one budget, [`DRAW_BUDGET`], charged with what each
+//!   draw does: every glyph it visits, with its points and its `gvar`
+//!   tuples (see [`Extent::cost`]). Once a draw would overrun it, a
+//!   skewed composite takes the box around its transformed components'
+//!   boxes, and one placed by matching points keeps its source box;
+//!   both are reported.
 //!
-//! A composite more than [`MAX_DEPTH`] levels deep, or one that reaches
-//! itself, has no extent, as it cannot be drawn; it keeps its source box
-//! and is reported.
+//! A composite whose components nest more than [`MAX_DEPTH`] levels
+//! below it, or one that reaches itself, has no extent, as it cannot be
+//! drawn; it keeps its source box and is reported. Both are properties
+//! of the glyph, not of the order the bake reaches it in: each glyph is
+//! worked out once, its height kept with its extent, and the walk keeps
+//! its own stack, so a long chain of composites costs one step a glyph.
 
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -36,12 +40,15 @@ use super::{read_component_records, BakeCtx, CompRecord, SimpleGlyph};
 use crate::util::round_half_up;
 
 /// Composite nesting a draw allows, as in the core outline walk and in
-/// HarfBuzz.
+/// HarfBuzz: a glyph whose components nest deeper cannot be drawn.
 const MAX_DEPTH: u8 = 64;
 
-/// The glyphs and points the composites one bake draws may visit in
-/// all, summed over the draws.
+/// The work the composites one bake draws may do in all, summed over
+/// the draws, in the units of [`Extent::cost`].
 pub(super) const DRAW_BUDGET: u64 = 1 << 20;
+
+/// Phantom points `gvar` adds to every glyph's own points.
+const PHANTOM_POINTS: u64 = 4;
 
 /// What the bake knows about one glyph drawn at the instance.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,11 +56,13 @@ pub(super) struct Extent {
     /// The extremes `(xMin, yMin, xMax, yMax)` of the drawn points,
     /// unrounded; `None` when nothing is drawn.
     pub(super) bounds: Option<[f32; 4]>,
-    /// Glyph records a draw visits (the glyph and every component, all
-    /// the way down), saturating.
-    visits: u64,
-    /// Contour points a draw lays down, saturating.
-    points: u64,
+    /// The work a core draw of the glyph does, saturating: for the
+    /// glyph and every component all the way down, one unit, its own
+    /// points (a composite's are its components), and for each of its
+    /// `gvar` tuples the axis count plus its points and phantom points.
+    /// That is at least what the core walk spends decoding the tuples
+    /// of every glyph it visits.
+    cost: u64,
     /// Composite levels below the glyph: 0 for a simple or empty glyph.
     height: u8,
 }
@@ -61,8 +70,7 @@ pub(super) struct Extent {
 impl Extent {
     const EMPTY: Self = Self {
         bounds: None,
-        visits: 1,
-        points: 0,
+        cost: 1,
         height: 0,
     };
 }
@@ -70,12 +78,10 @@ impl Extent {
 /// Why a glyph has no extent.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NoExtent {
-    /// The glyph's data or a component's cannot be read, or the glyph
-    /// reaches itself. A property of the glyph, so it is kept.
+    /// The glyph's data or a component's cannot be read, the glyph
+    /// reaches itself, or drawing it is past the budget.
     Broken(Error),
-    /// The walk went more than [`MAX_DEPTH`] levels down from the glyph
-    /// it started at. A property of that walk, not of the glyphs on the
-    /// way, so it is not kept for them.
+    /// Its components nest more than [`MAX_DEPTH`] levels below it.
     TooDeep,
 }
 
@@ -85,7 +91,23 @@ enum Slot {
     Unknown,
     /// Being worked out: reaching it again means a cycle.
     Busy,
-    Known(Result<Extent, Error>),
+    Known(Result<Extent, NoExtent>),
+}
+
+/// A composite on the walk's stack: its components, and the first one
+/// not yet known.
+struct Frame {
+    gid: u16,
+    components: Vec<CompRecord>,
+    next: usize,
+}
+
+/// How starting on a glyph went.
+enum Start {
+    /// Its extent is known now (or it has none).
+    Done,
+    /// A composite, whose components the walk takes first.
+    Composite(Vec<CompRecord>),
 }
 
 /// The extents of a bake's glyphs, each worked out once.
@@ -93,8 +115,7 @@ pub(super) struct Extents {
     slots: RefCell<Vec<Slot>>,
     /// Draw budget left.
     draws_left: Cell<u64>,
-    /// Extents worked out (each glyph at most once, but for walks cut
-    /// off by depth).
+    /// Extents worked out: at most one per glyph.
     pub(super) computed: Cell<u64>,
     /// Composites drawn through the core outline walk.
     pub(super) drawn: Cell<u64>,
@@ -110,93 +131,166 @@ impl Extents {
         }
     }
 
+    /// The draw budget spent so far.
+    #[cfg(test)]
+    pub(super) fn spent(&self) -> u64 {
+        DRAW_BUDGET - self.draws_left.get()
+    }
+
     /// The extent of glyph `gid` drawn on its own.
     pub(super) fn of(&self, cx: &BakeCtx<'_, '_>, gid: u16) -> Result<Extent, NoExtent> {
-        self.at_depth(cx, gid, 0)
-    }
-
-    /// The extent of glyph `gid`, `depth` levels below the glyph the
-    /// walk started at.
-    fn at_depth(&self, cx: &BakeCtx<'_, '_>, gid: u16, depth: u8) -> Result<Extent, NoExtent> {
-        if depth > MAX_DEPTH {
-            return Err(NoExtent::TooDeep);
+        let mut stack: Vec<Frame> = Vec::new();
+        if let Start::Composite(components) = self.start(cx, gid) {
+            stack.push(Frame {
+                gid,
+                components,
+                next: 0,
+            });
         }
-        let i = usize::from(gid);
-        let slot = self.slots.borrow().get(i).cloned();
-        match slot {
-            // A component past the last glyph draws nothing.
-            None => return Ok(Extent::EMPTY),
-            Some(Slot::Known(known)) => return known.map_err(NoExtent::Broken),
-            Some(Slot::Busy) => {
-                return Err(NoExtent::Broken(Error::Malformed {
-                    offset: 0,
-                    context: "glyf composite reaches itself",
-                }))
+        while let Some(top) = stack.last_mut() {
+            // Step over the components already known, down into the
+            // first that is not.
+            let mut down = None;
+            let mut failed = None;
+            while let Some(c) = top.components.get(top.next) {
+                match self.slot(c.glyph) {
+                    // A component past the last glyph draws nothing.
+                    None | Some(Slot::Known(Ok(_))) => top.next += 1,
+                    Some(Slot::Known(Err(e))) => {
+                        failed = Some(e);
+                        break;
+                    }
+                    Some(Slot::Busy) => {
+                        failed = Some(NoExtent::Broken(Error::Malformed {
+                            offset: 0,
+                            context: "glyf composite reaches itself",
+                        }));
+                        break;
+                    }
+                    Some(Slot::Unknown) => {
+                        down = Some(c.glyph);
+                        break;
+                    }
+                }
             }
-            Some(Slot::Unknown) => {}
+            if let Some(e) = failed {
+                let gid = top.gid;
+                stack.pop();
+                self.set(gid, Slot::Known(Err(e)));
+            } else if let Some(child) = down {
+                if let Start::Composite(components) = self.start(cx, child) {
+                    stack.push(Frame {
+                        gid: child,
+                        components,
+                        next: 0,
+                    });
+                }
+            } else if let Some(frame) = stack.pop() {
+                let found = self.finish(cx, frame.gid, &frame.components);
+                self.set(frame.gid, Slot::Known(found));
+            }
         }
-        self.set(i, Slot::Busy);
-        self.computed.set(self.computed.get() + 1);
-        let found = self.compute(cx, gid, depth);
-        // A walk cut off by depth says nothing about this glyph on its
-        // own: it is worked out again when reached another way.
-        let slot = match &found {
-            Ok(extent) => Slot::Known(Ok(*extent)),
-            Err(NoExtent::Broken(e)) => Slot::Known(Err(e.clone())),
-            Err(NoExtent::TooDeep) => Slot::Unknown,
-        };
-        self.set(i, slot);
-        found
+        match self.slot(gid) {
+            Some(Slot::Known(known)) => known,
+            _ => Ok(Extent::EMPTY),
+        }
     }
 
-    fn set(&self, i: usize, slot: Slot) {
-        if let Some(s) = self.slots.borrow_mut().get_mut(i) {
+    fn slot(&self, gid: u16) -> Option<Slot> {
+        self.slots.borrow().get(usize::from(gid)).cloned()
+    }
+
+    fn set(&self, gid: u16, slot: Slot) {
+        if let Some(s) = self.slots.borrow_mut().get_mut(usize::from(gid)) {
             *s = slot;
         }
     }
 
-    fn compute(&self, cx: &BakeCtx<'_, '_>, gid: u16, depth: u8) -> Result<Extent, NoExtent> {
+    /// Starts on glyph `gid`, whose slot is unknown or past the end: a
+    /// simple or empty glyph is worked out at once; a composite is
+    /// marked busy and its components handed back.
+    fn start(&self, cx: &BakeCtx<'_, '_>, gid: u16) -> Start {
+        match self.slot(gid) {
+            None | Some(Slot::Known(_) | Slot::Busy) => return Start::Done,
+            Some(Slot::Unknown) => {}
+        }
+        self.computed.set(self.computed.get() + 1);
         let broken = |context| NoExtent::Broken(Error::Malformed { offset: 0, context });
         let body = match cx.loca.range(gid) {
-            Some((s, e)) if s != e => cx
-                .glyf_bytes
-                .get(s as usize..e as usize)
-                .ok_or_else(|| broken("glyf range from loca falls outside glyf table"))?,
-            _ => &[][..],
+            Some((s, e)) if s != e => cx.glyf_bytes.get(s as usize..e as usize),
+            _ => Some(&[][..]),
         };
-        if body.len() < 10 {
-            return Ok(Extent::EMPTY);
-        }
-        let nc = i16::from_be_bytes([body[0], body[1]]);
+        let Some(body) = body else {
+            self.set(
+                gid,
+                Slot::Known(Err(broken("glyf range from loca falls outside glyf table"))),
+            );
+            return Start::Done;
+        };
+        let nc = body
+            .first_chunk::<10>()
+            .map_or(0, |h| i16::from_be_bytes([h[0], h[1]]));
         if nc == 0 {
-            return Ok(Extent::EMPTY);
+            self.set(gid, Slot::Known(Ok(Extent::EMPTY)));
+            return Start::Done;
         }
         if nc > 0 {
-            let glyph =
-                SimpleGlyph::decode(body).map_err(|_| broken("glyf simple glyph truncated"))?;
-            let points = glyph.points();
-            let deltas = cx.deltas(gid, &points, &glyph.end_pts);
-            let mut bounds: Option<[f32; 4]> = None;
-            for (p, d) in points.iter().zip(&deltas) {
-                add_point(&mut bounds, p.0 as f32 + d.0, p.1 as f32 + d.1);
-            }
-            return Ok(Extent {
-                bounds,
-                visits: 1,
-                points: points.len() as u64,
-                height: 0,
-            });
+            let found = match SimpleGlyph::decode(body) {
+                Ok(glyph) => {
+                    let points = glyph.points();
+                    let deltas = cx.deltas(gid, &points, &glyph.end_pts);
+                    let mut bounds: Option<[f32; 4]> = None;
+                    for (p, d) in points.iter().zip(&deltas) {
+                        add_point(&mut bounds, p.0 as f32 + d.0, p.1 as f32 + d.1);
+                    }
+                    Ok(Extent {
+                        bounds,
+                        cost: own_cost(cx, gid, points.len()),
+                        height: 0,
+                    })
+                }
+                Err(_) => Err(broken("glyf simple glyph truncated")),
+            };
+            self.set(gid, Slot::Known(found));
+            return Start::Done;
         }
-        let components =
-            read_component_records(body).map_err(|_| broken("glyf composite truncated"))?;
-        let mut extent = Extent::EMPTY;
+        match read_component_records(body) {
+            Ok(components) => {
+                self.set(gid, Slot::Busy);
+                Start::Composite(components)
+            }
+            Err(_) => {
+                self.set(gid, Slot::Known(Err(broken("glyf composite truncated"))));
+                Start::Done
+            }
+        }
+    }
+
+    /// The extent of composite `gid` from its `components`, every one
+    /// of which has its extent.
+    fn finish(
+        &self,
+        cx: &BakeCtx<'_, '_>,
+        gid: u16,
+        components: &[CompRecord],
+    ) -> Result<Extent, NoExtent> {
+        let mut extent = Extent {
+            bounds: None,
+            cost: own_cost(cx, gid, components.len()),
+            height: 0,
+        };
         let mut children = Vec::with_capacity(components.len());
-        for c in &components {
-            let child = self.at_depth(cx, c.glyph, depth + 1)?;
-            extent.visits = extent.visits.saturating_add(child.visits);
-            extent.points = extent.points.saturating_add(child.points);
+        for c in components {
+            let child = match self.slot(c.glyph) {
+                Some(Slot::Known(known)) => known?,
+                _ => Extent::EMPTY,
+            };
+            extent.cost = extent.cost.saturating_add(child.cost);
             extent.height = extent.height.max(child.height.saturating_add(1));
             children.push(child);
+        }
+        if extent.height > MAX_DEPTH {
+            return Err(NoExtent::TooDeep);
         }
         if components.iter().all(CompRecord::keeps_axes) {
             let points: Vec<(i32, i32)> = components.iter().map(CompRecord::gvar_point).collect();
@@ -213,24 +307,23 @@ impl Extents {
             }
             return Ok(extent);
         }
-        extent.bounds = self.drawn_bounds(cx, gid, &components, &children, &extent)?;
+        extent.bounds = self.drawn_bounds(cx, gid, components, &children, extent.cost)?;
         Ok(extent)
     }
 
     /// The bounds of composite `gid`, whose components are not all
-    /// placed by an axis-keeping offset, from a core draw while the
-    /// budget lasts. Past it, a composite placed by offsets takes the
-    /// box around its components' transformed boxes; one placed by
-    /// matching points has no exact bounds to give.
+    /// placed by an axis-keeping offset, from a core draw costing `cost`
+    /// while the budget lasts. Past it, a composite placed by offsets
+    /// takes the box around its components' transformed boxes; one
+    /// placed by matching points has no exact bounds to give.
     fn drawn_bounds(
         &self,
         cx: &BakeCtx<'_, '_>,
         gid: u16,
         components: &[CompRecord],
         children: &[Extent],
-        extent: &Extent,
+        cost: u64,
     ) -> Result<Option<[f32; 4]>, NoExtent> {
-        let cost = extent.visits.saturating_add(extent.points);
         if let Some(left) = self.draws_left.get().checked_sub(cost) {
             self.draws_left.set(left);
             self.drawn.set(self.drawn.get() + 1);
@@ -270,6 +363,92 @@ impl Extents {
             }
         }
         Ok(bounds)
+    }
+}
+
+/// The work a core draw does on glyph `gid` itself, which has `points`
+/// points of its own (a composite's are its components): one unit, the
+/// points, and for each of its `gvar` tuples the axis count plus the
+/// points and phantom points.
+fn own_cost(cx: &BakeCtx<'_, '_>, gid: u16, points: usize) -> u64 {
+    let points = points as u64;
+    let per_tuple = cx
+        .tuples
+        .axis_count
+        .saturating_add(points)
+        .saturating_add(PHANTOM_POINTS);
+    1u64.saturating_add(points)
+        .saturating_add(cx.tuples.of(gid).saturating_mul(per_tuple))
+}
+
+/// Each glyph's `gvar` tuple count, read from the table's bytes: the
+/// part of a draw's cost that the glyph's points do not show.
+#[derive(Debug, Default)]
+pub(super) struct TupleCounts<'f> {
+    data: &'f [u8],
+    axis_count: u64,
+    glyph_count: u16,
+    long_offsets: bool,
+    data_array_off: usize,
+}
+
+impl<'f> TupleCounts<'f> {
+    /// The counts of the `gvar` table `data`; none when there is no
+    /// table or its header cannot be read.
+    pub(super) fn new(data: Option<&'f [u8]>) -> Self {
+        let Some(data) = data else {
+            return Self::default();
+        };
+        let u16_at = |at: usize| {
+            data.get(at..at + 2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        };
+        let u32_at = |at: usize| {
+            data.get(at..at + 4)
+                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        let (Some(axis_count), Some(glyph_count), Some(flags), Some(data_array_off)) =
+            (u16_at(4), u16_at(12), u16_at(14), u32_at(16))
+        else {
+            return Self::default();
+        };
+        Self {
+            data,
+            axis_count: u64::from(axis_count),
+            glyph_count,
+            long_offsets: flags & 1 != 0,
+            data_array_off: data_array_off as usize,
+        }
+    }
+
+    /// The tuple count of glyph `gid`; 0 when it has no variation data
+    /// or the count cannot be read.
+    fn of(&self, gid: u16) -> u64 {
+        if gid >= self.glyph_count {
+            return 0;
+        }
+        let offset = |i: usize| -> Option<usize> {
+            if self.long_offsets {
+                let at = 20 + 4 * i;
+                let b = self.data.get(at..at + 4)?;
+                Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            } else {
+                let at = 20 + 2 * i;
+                let b = self.data.get(at..at + 2)?;
+                Some(usize::from(u16::from_be_bytes([b[0], b[1]])) * 2)
+            }
+        };
+        let i = usize::from(gid);
+        let (Some(start), Some(end)) = (offset(i), offset(i + 1)) else {
+            return 0;
+        };
+        if end <= start {
+            return 0;
+        }
+        let at = self.data_array_off.saturating_add(start);
+        self.data
+            .get(at..at.saturating_add(2))
+            .map_or(0, |b| u64::from(u16::from_be_bytes([b[0], b[1]]) & 0x0FFF))
     }
 }
 
