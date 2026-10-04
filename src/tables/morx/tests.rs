@@ -659,3 +659,89 @@ fn morx_chained_insertions_stay_bounded() {
     assert_eq!(out.len(), origins.len());
     assert!(out.len() <= MAX_LEN_MIN, "run grew to {}", out.len());
 }
+
+// -----------------------------------------------------------------
+// Type 1: contextual substitution, as HarfBuzz runs it. Every glyph
+// of these runs falls in the out-of-bounds class (1).
+// -----------------------------------------------------------------
+
+/// Contextual entry `(newState, flags, markIndex, currentIndex)`.
+fn ctx_entry(new_state: u16, flags: u16, mark: u16, current: u16) -> Vec<u8> {
+    [new_state, flags, mark, current]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect()
+}
+
+/// A substitution table: an unsized array of u32 offsets from its
+/// start, one per lookup, then the lookups.
+fn substitution_table(lookups: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = 4 * lookups.len();
+    for l in lookups {
+        out.extend_from_slice(&(at as u32).to_be_bytes());
+        at += l.len();
+    }
+    for l in lookups {
+        out.extend_from_slice(l);
+    }
+    out
+}
+
+fn contextual_morx(states: &[[u16; 4]], entries: &[Vec<u8>], lookups: &[Vec<u8>]) -> Vec<u8> {
+    let refs: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+    let table = substitution_table(lookups);
+    let body = state_body(1, states, &refs, &[&table]);
+    wrap_in_chain(&[&subtable(TYPE_CONTEXTUAL, &body)])
+}
+
+#[test]
+fn contextual_substitution_table_is_an_unsized_offset_array() {
+    // Two lookups. The table starts with their offsets, 8 and 8 plus
+    // the first lookup, with no count before them; reading a u16
+    // count there found 0 tables and substituted nothing.
+    let lookups = [
+        build_lookup_format6(&[(5, 50)]),
+        build_lookup_format6(&[(5, 51), (6, 61)]),
+    ];
+    for (index, expected) in [(0u16, [50, 6]), (1, [51, 61])] {
+        let entries = [ctx_entry(0, 0, 0xFFFF, index)];
+        let bytes = contextual_morx(&[[0, 0, 0, 0]], &entries, &lookups);
+        let m = Morx::parse(&bytes).unwrap();
+        assert_eq!(m.apply(&[5, 6]).0, expected, "lookup {index}");
+    }
+    // An index past the offsets substitutes nothing.
+    let entries = [ctx_entry(0, 0, 0xFFFF, 9)];
+    let bytes = contextual_morx(&[[0, 0, 0, 0]], &entries, &lookups);
+    assert_eq!(Morx::parse(&bytes).unwrap().apply(&[5, 6]).0, [5, 6]);
+}
+
+#[test]
+fn contextual_end_of_text_substitutes_only_after_a_mark() {
+    // A glyph takes entry 1 to state 1, whose end-of-text entry (2)
+    // substitutes the current glyph. HarfBuzz (after CoreText) does
+    // that only when a mark was set, and then on the last glyph.
+    let lookups = [build_lookup_format6(&[(5, 50), (6, 60)])];
+    let states = [[0, 1, 0, 0], [2, 1, 0, 0]];
+    for (mark_flag, expected) in [(0, [5, 6]), (FLAG_CTX_SET_MARK, [5, 60])] {
+        let entries = [
+            ctx_entry(0, 0, 0xFFFF, 0xFFFF),
+            ctx_entry(1, mark_flag, 0xFFFF, 0xFFFF),
+            ctx_entry(0, 0, 0xFFFF, 0),
+        ];
+        let bytes = contextual_morx(&states, &entries, &lookups);
+        let m = Morx::parse(&bytes).unwrap();
+        assert_eq!(m.apply(&[5, 6]).0, expected, "mark flag {mark_flag:#x}");
+    }
+}
+
+#[test]
+fn contextual_mark_starts_on_the_first_glyph() {
+    // A mark substitution before any SetMark replaces glyph 0, as in
+    // HarfBuzz, where the mark index starts at zero.
+    let lookups = [build_lookup_format6(&[(5, 50)])];
+    let entries = [ctx_entry(0, 0, 0, 0xFFFF)];
+    let bytes = contextual_morx(&[[0, 0, 0, 0]], &entries, &lookups);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.apply(&[5, 5, 5]).0, [50, 5, 5]);
+}
