@@ -175,7 +175,8 @@ impl<'a> Face<'a> {
     /// given.
     ///
     /// A glyph the font's `VARC` table covers is drawn from its
-    /// components, as HarfBuzz draws it:
+    /// components, as HarfBuzz draws it (a `VARC` table that does not
+    /// parse counts as absent, as HarfBuzz drops it):
     ///
     /// - Each component is drawn at its own coords, which start from
     ///   the coords of the glyph it belongs to, or from the font's
@@ -201,7 +202,7 @@ impl<'a> Face<'a> {
         coords: &[f32],
     ) -> Result<Option<Outline>> {
         let coords = f2dot14_coords(coords);
-        if let Some(varc) = self.varc()? {
+        if let Some(varc) = self.drawable_varc() {
             let mut out = Outline::new();
             if VarcDraw::new(self, &varc, &coords).draw(glyph_id, &mut out)? {
                 return Ok(Some(out));

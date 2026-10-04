@@ -24,7 +24,8 @@ use crate::tables::{tag, Cff, Cff2, Glyf, Gvar, Hmtx, Loca, Outline, OutlineSink
 /// them: the `CFF2` or `CFF ` table, or `glyf` with `loca`, `gvar` and
 /// the metrics its phantom points read, and `VARC`. Each glyph comes out
 /// exactly as [`Face::glyph_outline_at_coords`] draws it, errors
-/// included: a table that does not read fails every glyph that needs it.
+/// included: a table that does not read fails every glyph that needs it,
+/// except `VARC`, which counts as absent then, as for the face.
 ///
 /// It caches through cells that are not thread-safe, so it is `Send` but
 /// not `Sync`: build one per thread.
@@ -48,7 +49,8 @@ pub struct GlyphOutlines<'a> {
     face: Face<'a>,
     /// The coords as shaping reads them, rounded to F2DOT14.
     coords: Vec<f32>,
-    varc: OnceCell<Result<Option<Varc<'a>>>>,
+    /// The face's `VARC`, `None` when it has none or it does not parse.
+    varc: OnceCell<Option<Varc<'a>>>,
     tables: OnceCell<Result<Tables<'a>>>,
 }
 
@@ -111,11 +113,7 @@ impl<'a> GlyphOutlines<'a> {
     /// The errors [`Face::glyph_outline_at_coords`] returns for the
     /// glyph.
     pub fn draw<S: OutlineSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
-        let varc = self
-            .varc
-            .get_or_init(|| self.face.varc())
-            .as_ref()
-            .map_err(Clone::clone)?;
+        let varc = self.varc.get_or_init(|| self.face.drawable_varc());
         // A VARC composite is drawn by the walk the face draws it with:
         // its components carry coords of their own, so its leaves come
         // from tables the walk reads for them.

@@ -38,8 +38,10 @@ pub(in crate::shape) struct ExtentsTables<'a> {
     /// [`Face::phantom_vmtx`]). A `vmtx` that does not parse counts as
     /// absent, as HarfBuzz's sanitizer drops it.
     vmtx: OnceCell<Result<Vmtx<'a>>>,
-    /// `VARC`, whose composites take precedence over `CFF2` and `CFF `.
-    varc: OnceCell<Result<Option<Varc<'a>>>>,
+    /// `VARC`, whose composites take precedence over `CFF2` and `CFF `;
+    /// `None` when the font has none or it does not parse, as the face's
+    /// outlines read it.
+    varc: OnceCell<Option<Varc<'a>>>,
     /// The CFF table a glyph's outline comes from, `None` when the font
     /// draws its glyphs some other way.
     cff: OnceCell<Option<Result<CffTable<'a>>>>,
@@ -86,11 +88,7 @@ impl<'a> ExtentsTables<'a> {
         if !has_cff {
             return Ok(None);
         }
-        let varc = self
-            .varc
-            .get_or_init(|| face.varc())
-            .as_ref()
-            .map_err(Clone::clone)?;
+        let varc = self.varc.get_or_init(|| face.drawable_varc());
         let cff = self.cff.get_or_init(|| {
             if face.record(tag::CFF2).is_some() {
                 Some(
