@@ -259,7 +259,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let face_cache = warm.then(|| font.caches().face());
     let gsub = face.gsub()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
-        let cache = face_cache.map(|c| c.gsub(g.lookup_list().len()));
+        let cache = face_cache.map(|c| c.gsub(g.lookup_list().len(), g.table_len()));
         Some(
             g.with_language_tags(language_tags)
                 .with_cluster_level(level)
@@ -270,7 +270,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     });
     let gpos = face.gpos()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
-        let cache = face_cache.map(|c| c.gpos(g.lookup_list().len()));
+        let cache = face_cache.map(|c| c.gpos(g.lookup_list().len(), g.table_len()));
         Some(
             g.with_language_tags(language_tags)
                 .with_feature_variation(variation)

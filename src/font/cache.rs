@@ -149,17 +149,17 @@ impl FaceCache {
     }
 
     /// What the font keeps for its GSUB, which has `lookup_count`
-    /// lookups.
-    pub(crate) fn gsub(&self, lookup_count: u16) -> &LayoutCache {
+    /// lookups in `table_len` bytes.
+    pub(crate) fn gsub(&self, lookup_count: u16, table_len: usize) -> &LayoutCache {
         self.gsub
-            .get_or_init(|| LayoutCache::new(LayoutTable::Gsub, lookup_count))
+            .get_or_init(|| LayoutCache::new(LayoutTable::Gsub, lookup_count, table_len))
     }
 
     /// What the font keeps for its GPOS, which has `lookup_count`
-    /// lookups.
-    pub(crate) fn gpos(&self, lookup_count: u16) -> &LayoutCache {
+    /// lookups in `table_len` bytes.
+    pub(crate) fn gpos(&self, lookup_count: u16, table_len: usize) -> &LayoutCache {
         self.gpos
-            .get_or_init(|| LayoutCache::new(LayoutTable::Gpos, lookup_count))
+            .get_or_init(|| LayoutCache::new(LayoutTable::Gpos, lookup_count, table_len))
     }
 
     fn heap_bytes(&self) -> usize {

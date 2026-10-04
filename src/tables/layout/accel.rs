@@ -19,13 +19,16 @@
 //! view without the font's cache, a lookup reads its subtables' primary
 //! coverages directly instead ([`DirectAccel`]): a font shaped once,
 //! which many callers build per run, would spend more building digests
-//! than they save. Building reads each subtable's primary coverage once, with a
-//! work budget per lookup: past it, a subtable gets a digest that admits
-//! every glyph, so a hostile font that points thousands of subtables at
-//! one huge coverage costs no more than the subtables themselves.
+//! than they save. Building reads each subtable's primary coverage once,
+//! under two work budgets: one per lookup, and one per table
+//! proportional to the table's size. Past either, a subtable gets a
+//! digest that admits every glyph, so a hostile font that points
+//! thousands of subtables or lookups at one huge coverage costs no more
+//! than reading its table a few times.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::coverage::Coverage;
 use super::lookup_list::Lookup;
@@ -128,6 +131,13 @@ const MIN_COVERAGE_BUDGET: usize = 1 << 14;
 /// Coverage entries per subtable the budget grows by.
 const COVERAGE_BUDGET_PER_SUBTABLE: usize = 64;
 
+/// Coverage entries all of one table's accelerators may read together:
+/// a few times what fits in the table (an entry takes at least two
+/// bytes), and at least 64 Ki.
+fn table_coverage_budget(table_len: usize) -> usize {
+    table_len.saturating_mul(2).saturating_add(1 << 16)
+}
+
 /// One lookup's accelerator: the digest of every glyph a subtable of
 /// it can start at, and each subtable's own digest, by subtable index.
 #[derive(Debug)]
@@ -137,8 +147,14 @@ pub(crate) struct LookupAccel {
 }
 
 impl LookupAccel {
-    /// Builds the accelerator of `lookup`, a lookup of `table`.
-    pub(crate) fn build(table: LayoutTable, lookup: &Lookup<'_>) -> Self {
+    /// Builds the accelerator of `lookup`, a lookup of `table`, reading
+    /// at most what the lookup's budget and `table_budget`, which the
+    /// table's other lookups share, leave.
+    pub(crate) fn build(
+        table: LayoutTable,
+        lookup: &Lookup<'_>,
+        table_budget: &AtomicUsize,
+    ) -> Self {
         let count = usize::from(lookup.subtable_count());
         let mut budget =
             MIN_COVERAGE_BUDGET.max(count.saturating_mul(COVERAGE_BUDGET_PER_SUBTABLE));
@@ -148,7 +164,7 @@ impl LookupAccel {
                 let d = lookup
                     .subtable_bytes(i)
                     .and_then(|bytes| primary_coverage(table, lookup.lookup_type(), bytes))
-                    .and_then(|cov| coverage_digest(&cov, &mut budget))
+                    .and_then(|cov| coverage_digest(&cov, &mut budget, table_budget))
                     .unwrap_or(Digest::FULL);
                 digest.union(&d);
                 d
@@ -304,15 +320,18 @@ impl Accel<'_, '_> {
 pub(crate) struct LookupAccels {
     table: LayoutTable,
     lookups: Box<[OnceBox<LookupAccel>]>,
+    /// Coverage entries the accelerators may still read.
+    budget: AtomicUsize,
 }
 
 impl LookupAccels {
-    /// Room for the `lookup_count` lookups of a `table` table, none
-    /// built yet.
-    pub(crate) fn new(table: LayoutTable, lookup_count: u16) -> Self {
+    /// Room for the `lookup_count` lookups of a `table` table of
+    /// `table_len` bytes, none built yet.
+    pub(crate) fn new(table: LayoutTable, lookup_count: u16, table_len: usize) -> Self {
         Self {
             table,
             lookups: (0..lookup_count).map(|_| OnceBox::new()).collect(),
+            budget: AtomicUsize::new(table_coverage_budget(table_len)),
         }
     }
 
@@ -321,7 +340,9 @@ impl LookupAccels {
     /// lookups, its coverages are read for this one use.
     pub(crate) fn get<'a>(&self, index: u16, lookup: &Lookup<'a>) -> Accel<'_, 'a> {
         match self.lookups.get(usize::from(index)) {
-            Some(slot) => Accel::Built(slot.get_or_init(|| LookupAccel::build(self.table, lookup))),
+            Some(slot) => Accel::Built(
+                slot.get_or_init(|| LookupAccel::build(self.table, lookup, &self.budget)),
+            ),
             None => Accel::Direct(DirectAccel::new(self.table, lookup)),
         }
     }
@@ -368,10 +389,11 @@ pub(crate) struct LayoutCache {
 }
 
 impl LayoutCache {
-    /// An empty cache for a `table` table of `lookup_count` lookups.
-    pub(crate) fn new(table: LayoutTable, lookup_count: u16) -> Self {
+    /// An empty cache for a `table` table of `lookup_count` lookups and
+    /// `table_len` bytes.
+    pub(crate) fn new(table: LayoutTable, lookup_count: u16, table_len: usize) -> Self {
         Self {
-            accels: LookupAccels::new(table, lookup_count),
+            accels: LookupAccels::new(table, lookup_count, table_len),
             maps: FeatureMaps::new(),
             plans: StagePlans::new(),
         }
@@ -398,11 +420,28 @@ pub(crate) fn accel_for<'c, 'a>(
 }
 
 /// The digest of `cov`'s glyphs, or `None` when reading them all would
-/// overrun `budget` (the caller then admits every glyph). Spends the
-/// entries read.
-fn coverage_digest(cov: &Coverage<'_>, budget: &mut usize) -> Option<Digest> {
+/// overrun `budget` or `table_budget` (the caller then admits every
+/// glyph). Spends the entries read from both.
+fn coverage_digest(
+    cov: &Coverage<'_>,
+    budget: &mut usize,
+    table_budget: &AtomicUsize,
+) -> Option<Digest> {
     let entries = usize::from(cov.len());
-    *budget = budget.checked_sub(entries)?;
+    let left = budget.checked_sub(entries)?;
+    // Spend from the shared budget with a compare-and-swap loop, so two
+    // threads building accelerators of one table cannot both take its
+    // last entries.
+    let mut shared = table_budget.load(Ordering::Relaxed);
+    loop {
+        let rest = shared.checked_sub(entries)?;
+        match table_budget.compare_exchange_weak(shared, rest, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => break,
+            Err(now) => shared = now,
+        }
+    }
+    *budget = left;
     let mut d = Digest::EMPTY;
     cov.for_each_range(|first, last| d.add_range(first, last));
     Some(d)
@@ -569,7 +608,7 @@ mod tests {
         let data = lookup_list(1, &[single(&[10, 20]), single(&[700]), vec![0, 9]]);
         let list = LookupList::parse(&data).unwrap();
         let lookup = list.get(0).unwrap();
-        let accel = LookupAccel::build(LayoutTable::Gsub, &lookup);
+        let accel = LookupAccel::build(LayoutTable::Gsub, &lookup, &AtomicUsize::new(usize::MAX));
         assert!(accel.subtable_may_have(0, 10));
         assert!(accel.subtable_may_have(0, 20));
         assert!(!accel.subtable_may_have(0, 700));
@@ -582,7 +621,11 @@ mod tests {
         assert_eq!(*accel.digest(), Digest::FULL);
         let data = lookup_list(1, &[single(&[10, 20]), single(&[700])]);
         let list = LookupList::parse(&data).unwrap();
-        let accel = LookupAccel::build(LayoutTable::Gsub, &list.get(0).unwrap());
+        let accel = LookupAccel::build(
+            LayoutTable::Gsub,
+            &list.get(0).unwrap(),
+            &AtomicUsize::new(usize::MAX),
+        );
         assert!(!accel.digest().may_have(11));
         assert!(!accel.digest().may_have(5000));
     }
@@ -596,9 +639,32 @@ mod tests {
         let subs: Vec<Vec<u8>> = (0..10).map(|_| sub.clone()).collect();
         let data = lookup_list(1, &subs);
         let list = LookupList::parse(&data).unwrap();
-        let accel = LookupAccel::build(LayoutTable::Gsub, &list.get(0).unwrap());
+        let accel = LookupAccel::build(
+            LayoutTable::Gsub,
+            &list.get(0).unwrap(),
+            &AtomicUsize::new(usize::MAX),
+        );
         assert!(!accel.subtable_may_have(0, 65_001));
         assert!(accel.subtable_may_have(9, 65_001));
+    }
+
+    #[test]
+    fn a_table_budget_bounds_reads_across_lookups() {
+        // Every lookup reads the same 4000-entry coverage; once the
+        // table's budget is spent, later lookups admit every glyph.
+        let glyphs: Vec<u16> = (0..4000).map(|g| g * 2).collect();
+        let data = lookup_list(1, &[single(&glyphs)]);
+        let list = LookupList::parse(&data).unwrap();
+        let lookup = list.get(0).unwrap();
+        let budget = AtomicUsize::new(10_000);
+        let first = LookupAccel::build(LayoutTable::Gsub, &lookup, &budget);
+        let second = LookupAccel::build(LayoutTable::Gsub, &lookup, &budget);
+        let third = LookupAccel::build(LayoutTable::Gsub, &lookup, &budget);
+        assert!(!first.subtable_may_have(0, 65_001));
+        assert!(!second.subtable_may_have(0, 65_001));
+        assert!(third.subtable_may_have(0, 65_001));
+        assert_eq!(budget.load(Ordering::Relaxed), 2000);
+        assert_eq!(table_coverage_budget(1000), 2000 + (1 << 16));
     }
 
     #[test]
@@ -606,7 +672,7 @@ mod tests {
         let data = lookup_list(1, &[single(&[10]), single(&[3000])]);
         let list = LookupList::parse(&data).unwrap();
         let lookup = list.get(0).unwrap();
-        let accels = LookupAccels::new(LayoutTable::Gsub, 3);
+        let accels = LookupAccels::new(LayoutTable::Gsub, 3, data.len());
         assert_eq!(accels.built(), 0);
         let first = accel_for(None, LayoutTable::Gsub, 0, &lookup);
         assert!(matches!(first, Accel::Direct(_)));

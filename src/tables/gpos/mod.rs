@@ -222,6 +222,11 @@ impl<'a> Gpos<'a> {
         self
     }
 
+    /// The table's length in bytes.
+    pub(crate) const fn table_len(&self) -> usize {
+        self.data.len()
+    }
+
     /// What feature resolution (`crate::ot::layout_select`) reads of
     /// this view.
     pub(crate) fn layout_view(&self) -> LayoutView<'a> {

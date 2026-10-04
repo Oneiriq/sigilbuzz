@@ -1236,7 +1236,7 @@ mod tests {
                 tags.extend(unknown);
                 for record in records {
                     let features = ActiveFeatures::new(list, record);
-                    let cache = LayoutCache::new(table, count);
+                    let cache = LayoutCache::new(table, count, 1 << 20);
                     for languages in languages {
                         let walk = LayoutView {
                             script_list,
