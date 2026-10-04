@@ -587,3 +587,34 @@ fn cid_global_calls_local_unused_fd_drops_duplicate() {
     // Exactly one duplicate should remain (the one for FD 0).
     assert_eq!(parsed.global_subrs.len(), 1);
 }
+
+#[test]
+fn cid_cross_fd_global_mask_is_sized_by_the_callers_stems() {
+    // Each glyph declares nine stems and calls global 0, which holds a
+    // two-byte hint mask and then calls local 0: a cross-FD global.
+    // Read on its own, its mask is empty and its first byte, 9, a
+    // reserved opcode.
+    let mut g0 = alloc::vec![OP_HINTMASK, 9, 9];
+    g0.extend_from_slice(&encode_int_operand(-107));
+    g0.extend_from_slice(&[OP_CALLSUBR, OP_RETURN]);
+    let local: Vec<u8> = alloc::vec![139, 139, OP_RMOVETO, OP_RETURN];
+    let mut cs0: Vec<u8> = (0..18).map(|v| (139 + v) as u8).collect();
+    cs0.push(18); // hstemhm
+    cs0.extend_from_slice(&encode_int_operand(-107));
+    cs0.extend_from_slice(&[OP_CALLGSUBR, OP_ENDCHAR]);
+    let cs1 = cs0.clone();
+    let charstrings: Vec<&[u8]> = alloc::vec![cs0.as_slice(), cs1.as_slice()];
+    let globals: Vec<&[u8]> = alloc::vec![g0.as_slice()];
+    let per_fd_locals: Vec<Vec<&[u8]>> =
+        alloc::vec![alloc::vec![local.as_slice()], alloc::vec![local.as_slice()]];
+    let cff =
+        build_synthetic_cid_cff1_with_subrs(&charstrings, &[0u8, 1], &globals, &per_fd_locals);
+
+    let new_cff = subset_non_identity(&cff, &[0u16, 1]).unwrap();
+    let parsed = parse_cff1(&new_cff).unwrap();
+    // One duplicate of the global per FD, each with its mask intact.
+    assert_eq!(parsed.global_subrs.len(), 2);
+    for body in &parsed.global_subrs {
+        assert_eq!(body, &g0.as_slice());
+    }
+}

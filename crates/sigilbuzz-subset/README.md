@@ -28,7 +28,9 @@ For TrueType fonts:
 
 CFF and CFF2 fonts are supported too, including CID-keyed CFF. When glyphs are dropped,
 the `CFF ` or `CFF2` table is rebuilt around the kept ones, and every other table follows
-the same rules as above. A `CFF2` table keeps its own variation data. A kept `CFF ` glyph
+the same rules as above. A `CFF2` table keeps its own variation data. Each kept glyph runs
+through its subroutines the way `hb-subset` reads it, so hinted fonts subset whole: a hint
+mask counts the stems its glyph declared anywhere, and blended `CFF2` stem hints count. A kept `CFF ` glyph
 drawn by `seac` (an accented character) keeps its base and accent glyphs. `hb-subset`
 does the same for a seac in the glyph's own charstring; this subsetter also follows one
 that a subroutine ends, which sigilbuzz draws.

@@ -13,6 +13,13 @@
 //!   transitive local + global subroutine keep-set for a kept-gid
 //!   charstring slice.
 //!
+//! These two read each body on its own, so they cannot size a hint
+//! mask whose stems a caller declared, or a CFF2 `blend` whose region
+//! count lives in the variation store. The subset orchestration below
+//! runs each kept glyph through its subroutine calls instead (the
+//! `walk` module), as HarfBuzz's subsetter does, and renumbers the
+//! call sites that walk finds.
+//!
 //! # Emitter primitives
 //!
 //! - [`encode_index`]: serializes a CFF INDEX (header + offsets +
@@ -36,9 +43,10 @@
 //! [`subset_non_identity`] is the orchestration that wires the
 //! analysis layer + emitter primitives end-to-end. It dispatches by
 //! source shape: non-CID CFF1 sources walk the single-Private path
-//! (Top DICT walk, kept-charstring + transitive subroutine keep-set,
-//! renumber-in-place, layout in deterministic order: Header / Name
-//! INDEX / Top DICT INDEX / String INDEX / Global Subr INDEX /
+//! (Top DICT walk, the subroutines the kept charstrings reach,
+//! renumbered at the call sites the walk finds, layout in
+//! deterministic order: Header / Name INDEX / Top DICT INDEX /
+//! String INDEX / Global Subr INDEX /
 //! Encoding / charset / CharStrings INDEX / Private DICT / Local Subr
 //! INDEX, then deferred-offset placeholder patches). CID-keyed sources
 //! (FDArray + FDSelect present in the source Top DICT) route through
@@ -70,6 +78,7 @@ mod cid;
 mod emit;
 mod reader;
 mod seac;
+mod walk;
 
 pub use charstring::{
     compute_kept_subrs, encode_int_operand, renumber_charstring, renumber_subr_call,
@@ -90,8 +99,10 @@ pub(crate) use reader::{
 pub(crate) use seac::SeacClosure;
 
 use charset::{extract_kept_charset_sids, extract_kept_encoding_codes};
+pub(crate) use charstring::rewrite_calls;
 use cid::subset_cid_keyed;
 use reader::{parse_cff1, OP_CHARSET, OP_ENCODING};
+pub(crate) use walk::{walk_budget, BlendRegions, CharstringWalk, FdWalk};
 
 // ----------------------------------------------------------------------------
 // Top DICT / Private DICT serializers.
@@ -226,7 +237,8 @@ pub(crate) fn serialise_private_dict(
 /// Rebuilds a non-identity CFF1 table for the kept-gid subset.
 ///
 /// Wires together the Top DICT walker + capture-offsets, the
-/// CharStrings INDEX rebuild with in-place subr renumber, the local +
+/// CharStrings INDEX rebuild with subr renumbering at the call sites
+/// the charstring walk finds, the local +
 /// global Subr INDEX rebuilds, and the section-layout placeholder-patch
 /// driver. Charset and Encoding are rebuilt via [`emit_charset_auto`]
 /// and [`emit_encoding_auto`] when the source uses an explicit
@@ -271,9 +283,18 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
         .map(|&g| parsed.char_strings[g as usize])
         .collect();
 
-    // Subroutine keep-set (transitive closure).
-    let (kept_local_idx, kept_global_idx) =
-        compute_kept_subrs(&kept_charstrings, &parsed.local_subrs, &parsed.global_subrs)?;
+    // Run every kept glyph through its subroutine calls: the
+    // subroutines reached are the ones kept, and each body's call
+    // sites are found with its masks sized by the stems its callers
+    // declared (see `walk`).
+    let mut walk = CharstringWalk::new(&parsed.global_subrs, None, walk_budget(cff_bytes.len()));
+    let mut fd_walk = walk.fd(&parsed.local_subrs, 0);
+    let mut charstring_calls: Vec<Vec<SubrCall>> = Vec::with_capacity(kept_charstrings.len());
+    for cs in &kept_charstrings {
+        charstring_calls.push(walk.glyph(&mut fd_walk, cs)?);
+    }
+    let kept_local_idx = fd_walk.kept_locals();
+    let kept_global_idx = walk.kept_globals();
 
     // Build old -> new renumber tables.
     let mut local_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.local_subrs.len()];
@@ -287,56 +308,45 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
 
     let new_local_count = kept_local_idx.len();
     let new_global_count = kept_global_idx.len();
-    let old_local_count = parsed.local_subrs.len();
-    let old_global_count = parsed.global_subrs.len();
 
-    // Rewrite each kept charstring (cloned, then mutated).
-    let mut new_charstrings: Vec<Vec<u8>> = kept_charstrings.iter().map(|s| s.to_vec()).collect();
-    for cs in &mut new_charstrings {
-        renumber_charstring(
-            cs,
-            old_local_count,
-            old_global_count,
+    // Rewrite each kept charstring and subroutine (cloned, then
+    // mutated) at the call sites the walk found in it.
+    let renumber = |body: &[u8], calls: &[SubrCall]| {
+        rewrite_calls(
+            body,
+            calls,
             new_local_count,
             new_global_count,
             &local_renumber,
             &global_renumber,
-        )?;
-    }
-
-    // Rewrite each kept local subr.
-    let mut new_local_subrs: Vec<Vec<u8>> = kept_local_idx
+            |_| None,
+        )
+    };
+    let new_charstrings: Vec<Vec<u8>> = kept_charstrings
         .iter()
-        .map(|&i| parsed.local_subrs[i as usize].to_vec())
-        .collect();
-    for sub in &mut new_local_subrs {
-        renumber_charstring(
-            sub,
-            old_local_count,
-            old_global_count,
-            new_local_count,
-            new_global_count,
-            &local_renumber,
-            &global_renumber,
-        )?;
-    }
-
-    // Rewrite each kept global subr.
-    let mut new_global_subrs: Vec<Vec<u8>> = kept_global_idx
+        .zip(&charstring_calls)
+        .map(|(cs, calls)| renumber(cs, calls))
+        .collect::<Result<_, _>>()?;
+    let new_local_subrs: Vec<Vec<u8>> = kept_local_idx
         .iter()
-        .map(|&i| parsed.global_subrs[i as usize].to_vec())
-        .collect();
-    for sub in &mut new_global_subrs {
-        renumber_charstring(
-            sub,
-            old_local_count,
-            old_global_count,
-            new_local_count,
-            new_global_count,
-            &local_renumber,
-            &global_renumber,
-        )?;
-    }
+        .map(|&i| {
+            let i = i as usize;
+            renumber(
+                parsed.local_subrs[i],
+                fd_walk.local_calls(i).unwrap_or_default(),
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    let new_global_subrs: Vec<Vec<u8>> = kept_global_idx
+        .iter()
+        .map(|&i| {
+            let i = i as usize;
+            renumber(
+                parsed.global_subrs[i],
+                walk.global_calls(i).unwrap_or_default(),
+            )
+        })
+        .collect::<Result<_, _>>()?;
 
     // Charset rebuild: required whenever there's at least one kept
     // glyph past gid 0.

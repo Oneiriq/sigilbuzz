@@ -2,11 +2,28 @@
 //! charset readers.
 
 use super::charstring::{
-    compute_cross_fd_globals, decode_operand, OP_CALLGSUBR, OP_CALLSUBR, OP_ENDCHAR, OP_ESCAPE,
+    cross_fd_globals, decode_operand, OP_CALLGSUBR, OP_CALLSUBR, OP_ENDCHAR, OP_ESCAPE,
     OP_HINTMASK, OP_HSTEM, OP_RETURN, OP_RMOVETO, OP_SHORTINT,
 };
 use super::reader::read_index;
 use super::*;
+
+/// The cross-FD mask of `global_subrs`, each body scanned on its own
+/// against `local_count` locals.
+fn compute_cross_fd_globals(
+    global_subrs: &[&[u8]],
+    local_count: usize,
+) -> Result<Vec<bool>, SubsetError> {
+    let n = global_subrs.len();
+    let calls = global_subrs
+        .iter()
+        .map(|body| scan_subr_calls(body, local_count, n))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(cross_fd_globals(
+        n,
+        calls.iter().enumerate().map(|(i, c)| (i, c.as_slice())),
+    ))
+}
 
 mod cid;
 mod emit;

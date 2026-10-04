@@ -10,6 +10,11 @@ use super::*;
 /// the charstrings don't reference them, so the rewriter has to
 /// drop them.
 fn build_synthetic_cff1(charstrings: &[&[u8]]) -> Vec<u8> {
+    build_synthetic_cff1_with_locals(charstrings, &[&[11u8 /* OP_RETURN */]])
+}
+
+/// [`build_synthetic_cff1`] with the local subrs `local_subrs`.
+fn build_synthetic_cff1_with_locals(charstrings: &[&[u8]], local_subrs: &[&[u8]]) -> Vec<u8> {
     // Glyph 0 is .notdef. Encode as a minimal endchar charstring.
     let notdef: Vec<u8> = alloc::vec![14u8 /* OP_ENDCHAR */];
     let mut all_cs: Vec<Vec<u8>> = alloc::vec![notdef];
@@ -33,12 +38,10 @@ fn build_synthetic_cff1(charstrings: &[&[u8]]) -> Vec<u8> {
 
     let cs_index = encode_index(&cs_refs);
 
-    // Private DICT carries op 19 (Subrs) referencing one local subr
-    // (an empty `RETURN` body) so the orchestration has subrs to
-    // drop. Body uses a 5-byte placeholder offset that we patch
-    // later.
-    let local_subrs: Vec<&[u8]> = alloc::vec![&[11u8 /* OP_RETURN */] as &[u8]];
-    let local_subr_index = encode_index(&local_subrs);
+    // Private DICT carries op 19 (Subrs) referencing the local subrs
+    // so the orchestration has subrs to drop. Body uses a 5-byte
+    // placeholder offset that we patch later.
+    let local_subr_index = encode_index(local_subrs);
 
     // Build Top DICT with placeholder offsets for charset (15),
     // Encoding (16), CharStrings (17), Private (18=size+off pair).
@@ -283,4 +286,33 @@ fn orchestration_renumbers_callsubr_when_local_subrs_kept() {
     assert_eq!(kept_cs.len(), cs.len());
     assert_eq!(kept_cs[1], 10); // OP_CALLSUBR preserved.
     assert_eq!(kept_cs[2], 14); // OP_ENDCHAR preserved.
+}
+
+#[test]
+fn orchestration_sizes_a_mask_in_a_subroutine_by_the_callers_stems() {
+    // Glyph 1 declares nine stems and calls local 0, whose hint mask
+    // therefore takes two bytes; local 0 then calls local 2. Local 1
+    // is never called. Read on its own, local 0's mask is empty and
+    // its first byte, 9, a reserved opcode.
+    let mut cs1: Vec<u8> = (0..18).map(|v| (139 + v) as u8).collect();
+    cs1.push(18); // hstemhm
+    cs1.extend_from_slice(&encode_int_operand(-107)); // local 0
+    cs1.extend_from_slice(&[OP_CALLSUBR, OP_ENDCHAR]);
+    let mut local_0 = alloc::vec![OP_HINTMASK, 9, 9];
+    local_0.extend_from_slice(&encode_int_operand(2 - 107)); // local 2
+    local_0.extend_from_slice(&[OP_CALLSUBR, OP_RETURN]);
+    let local_1: &[u8] = &[OP_RETURN];
+    let local_2: &[u8] = &[139, 139, OP_RMOVETO, OP_RETURN];
+    let cff = build_synthetic_cff1_with_locals(&[&cs1], &[&local_0, local_1, local_2]);
+
+    let new_cff = subset_non_identity(&cff, &[0, 1]).unwrap();
+    let parsed = parse_cff1(&new_cff).unwrap();
+    assert_eq!(parsed.char_strings[1], cs1.as_slice());
+    // Locals 0 and 2 survive as 0 and 1; local 0's call is renumbered
+    // in place.
+    assert_eq!(parsed.local_subrs.len(), 2);
+    let mut renumbered = local_0.clone();
+    renumbered[3..4].copy_from_slice(&encode_int_operand(1 - 107));
+    assert_eq!(parsed.local_subrs[0], renumbered.as_slice());
+    assert_eq!(parsed.local_subrs[1], local_2);
 }

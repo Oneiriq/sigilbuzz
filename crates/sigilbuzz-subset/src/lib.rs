@@ -70,6 +70,10 @@
 //! for CFF2 charstrings, which fail the instance. Real fonts use at
 //! most about 12.5% of any budget, so none of this applies to them.
 //!
+//! [`subset`] runs every kept glyph of a `CFF ` or `CFF2` table through
+//! its subroutine calls (see "For CFF and CFF2 fonts" below), charging
+//! 64 tokens per byte of the table, plus 2^22, and fails past that.
+//!
 //! # What happens to each table
 //!
 //! For TrueType (`glyf`) fonts:
@@ -122,6 +126,13 @@
 //!
 //! - A kept `CFF ` glyph whose charstring ends in the seac form of
 //!   `endchar` keeps the base and accent glyphs it draws.
+//! - Each kept glyph runs through its subroutine calls as HarfBuzz's
+//!   subsetter interprets it: a hint mask takes one bit per stem the
+//!   glyph declared, in its charstring or any subroutine, a CFF2
+//!   `blend` drops as many deltas as its store's regions give (so
+//!   blended stem hints count), and subroutines nest at most 10 deep.
+//!   The subroutines reached are kept and renumbered where they are
+//!   called; a renumbered call that no longer fits its push grows.
 //! - If every glyph survives, the font passes through and only the SFNT
 //!   directory is rebuilt. Every table is copied unchanged except
 //!   `kern`, `kerx`, and `morx`, and the layout tables (`BASE`

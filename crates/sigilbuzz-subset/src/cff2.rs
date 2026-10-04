@@ -8,10 +8,11 @@
 //! a font carries a single FontDict. The [`parse_cff2`] reader
 //! synthesizes the implicit "every gid -> FD 0" mapping in that case.
 //!
-//! The Type 2 charstring scanner from [`crate::cff`] already accepts
-//! both flavors: it stops at `OP_RETURN` / `OP_ENDCHAR` /
-//! end-of-stream, and recognizes `vsindex` / `blend` so CFF2-specific
-//! ops don't confuse the operand-stack tracking. The byte-level emitter
+//! The subsetter's charstring walk from [`crate::cff`] runs both
+//! flavors: it stops at `OP_RETURN` / `OP_ENDCHAR` / end-of-stream, and
+//! for CFF2 runs `vsindex` and `blend` against the VariationStore's
+//! region counts, starting from the `vsindex` each Private DICT sets,
+//! so blended stem hints size the hint masks. The byte-level emitter
 //! primitives ([`crate::cff::encode_index`],
 //! [`crate::cff::encode_dict_int`], [`crate::cff::renumber_charstring`])
 //! are shared with CFF1. CFF2's smaller surface (no Name / String /
@@ -130,6 +131,9 @@ struct ParsedCff2<'a> {
     /// DICTs that name the same Private DICT share one parse.
     per_fd_private: Vec<&'a [u8]>,
     per_fd_local_subrs: Vec<Rc<Vec<&'a [u8]>>>,
+    /// Per-FD: the `vsindex` the Private DICT sets (0 when it sets
+    /// none), which a charstring blends with until it picks another.
+    per_fd_vsindex: Vec<u16>,
     /// Per-FD: the first Font DICT that names the same Private DICT
     /// (its own index when none before it does). A bake writes each
     /// Private DICT once, however many Font DICTs name it.
@@ -216,6 +220,7 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     // name one Private DICT; it and its Local Subrs are read once.
     let mut per_fd_private: Vec<&[u8]> = Vec::with_capacity(fd_array.len());
     let mut per_fd_local_subrs: Vec<Rc<Vec<&[u8]>>> = Vec::with_capacity(fd_array.len());
+    let mut per_fd_vsindex: Vec<u16> = Vec::with_capacity(fd_array.len());
     let mut private_of: Vec<usize> = Vec::with_capacity(fd_array.len());
     let mut first_fd_of: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     for (i, fd_bytes) in fd_array.iter().enumerate() {
@@ -246,8 +251,14 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
             }
             (None, _) => (&[][..], Rc::default(), i),
         };
+        let vsindex = if first == i {
+            private_vsindex(priv_bytes)?
+        } else {
+            per_fd_vsindex.get(first).copied().unwrap_or(0)
+        };
         per_fd_private.push(priv_bytes);
         per_fd_local_subrs.push(locals);
+        per_fd_vsindex.push(vsindex);
         private_of.push(first);
     }
 
@@ -289,10 +300,29 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
         fd_array,
         per_fd_private,
         per_fd_local_subrs,
+        per_fd_vsindex,
         private_of,
         fd_select,
         vstore_blob,
     })
+}
+
+/// The `vsindex` a CFF2 Private DICT sets: the last operand of its last
+/// `vsindex` operator (22), clamped to `0..=65535` as the core reads
+/// it, or 0 when it has none.
+fn private_vsindex(private: &[u8]) -> Result<u16, SubsetError> {
+    if private.is_empty() {
+        return Ok(0);
+    }
+    let mut vsindex = 0;
+    for entry in walk_dict(private)? {
+        if entry.op == 22 {
+            if let Some(v) = entry.operands.last().and_then(|o| o.int_value) {
+                vsindex = u16::try_from(v.max(0)).unwrap_or(u16::MAX);
+            }
+        }
+    }
+    Ok(vsindex)
 }
 
 // Type 2 op codes consumed by the baker. Duplicates of crate::cff
