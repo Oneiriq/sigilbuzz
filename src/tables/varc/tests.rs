@@ -501,7 +501,9 @@ fn delta_sets_hold_one_tuple_per_region() {
     assert_eq!(t(&[1.0, 0.0]), (10.0, 20.0));
     assert_eq!(t(&[0.0, 1.0]), (-3.0, 5.0));
     assert_eq!(t(&[0.5, 1.0]), (2.0, 15.0));
-    // A delta set that ends before it fills both tuples adds nothing.
+    // A delta set that ends before it fills both tuples adds the values
+    // it holds, as HarfBuzz does: region 0's tuple, then the first value
+    // of region 1's.
     let short = build_store(
         &[&[(0, 0.0, 1.0, 1.0)], &[(1, 0.0, 1.0, 1.0)]],
         &[&[0x02, 10, 20, 7]],
@@ -509,7 +511,14 @@ fn delta_sets_hold_one_tuple_per_region() {
     let c = first(&record, Some(&short), None, &[1.0, 1.0]);
     assert_eq!(
         (c.components[0].transform[4], c.components[0].transform[5]),
-        (0.0, 0.0)
+        (17.0, 20.0)
+    );
+    // At axis 1 alone only region 1 counts: the reader skips region
+    // 0's tuple, and region 1's holds one value.
+    let c = first(&record, Some(&short), None, &[0.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (7.0, 0.0)
     );
     // Extra values past the last tuple are ignored.
     let long = build_store(
@@ -520,6 +529,34 @@ fn delta_sets_hold_one_tuple_per_region() {
     assert_eq!(
         (c.components[0].transform[4], c.components[0].transform[5]),
         (7.0, 25.0)
+    );
+}
+
+#[test]
+fn a_run_cut_short_ends_one_tuple_at_its_control_byte() {
+    // Region 0's tuple starts with a run of two words that the one
+    // byte after it cannot hold. HarfBuzz's reader gives up on that
+    // tuple past the control byte, and region 1's tuple starts at the
+    // next byte, read as a control byte: one i8, 5.
+    let store = build_store(
+        &[&[(0, 0.0, 1.0, 1.0)], &[(1, 0.0, 1.0, 1.0)]],
+        &[&[0x41, 0x00, 0x05]],
+    );
+    let flags = VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y;
+    let mut record = vec![flags as u8, 0x00, 0x05, 0x00];
+    record.extend_from_slice(&0i16.to_be_bytes());
+    record.extend_from_slice(&0i16.to_be_bytes());
+    let c = first(&record, Some(&store), None, &[1.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (5.0, 0.0)
+    );
+    // Skipping region 0 (scalar zero) stops at the same control byte,
+    // so region 1 reads the same way.
+    let c = first(&record, Some(&store), None, &[0.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (5.0, 0.0)
     );
 }
 

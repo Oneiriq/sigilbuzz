@@ -570,9 +570,12 @@ impl<'a> Varc<'a> {
                 let (Some(default), Some(index)) = (be_u16(data, 2), be_u32(data, 4)) else {
                     return false;
                 };
-                let mut value = [f32::from(default as i16)];
-                // Out of delta budget the value is unknown, so it fails.
-                self.add_deltas(index, &mut value, eval) && value[0] > 0.0
+                // HarfBuzz sums the deltas on their own, then adds the
+                // sum to the default value. Out of delta budget the value
+                // is unknown, so the condition fails.
+                let mut delta = [0.0];
+                self.add_deltas(index, &mut delta, eval)
+                    && f32::from(default as i16) + delta[0] > 0.0
             }
             Some(format @ (3 | 4)) => {
                 let Some(&count) = data.get(2) else {

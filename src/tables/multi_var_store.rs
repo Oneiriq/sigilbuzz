@@ -398,9 +398,11 @@ impl<'a> MultiVarStore<'a> {
     /// region (region 0's tuple, then region 1's, ...), as the spec,
     /// fontTools and HarfBuzz lay it out. Values past the last region's
     /// tuple are ignored, as in HarfBuzz. A stream that ends before it
-    /// fills every tuple is malformed and adds nothing; HarfBuzz adds
-    /// the values it does find, so such a set varies only some of the
-    /// fields it names there.
+    /// fills every tuple adds the values it holds, as HarfBuzz's
+    /// `MultiItemVariationStore::get_delta` does: a region's tuple stops
+    /// where the stream does, and a run whose values do not fit the
+    /// bytes left ends that region's tuple after its control byte, so
+    /// the next region's tuple starts at the byte after it.
     ///
     /// Returns `None` when `outer` or `inner` is out of range, or when
     /// the delta set is too short to hold `value_count` values even for
@@ -429,7 +431,14 @@ impl<'a> MultiVarStore<'a> {
     /// `MultiItemVariationStore::get_delta` adds them to the values it
     /// varies: each region's scalar times its tuple, added in place.
     /// Regions whose scalar is zero are skipped. Does nothing when the
-    /// indices are out of range or the set is too short for its tuples.
+    /// indices are out of range.
+    ///
+    /// A set that ends early adds what it holds, read as HarfBuzz's
+    /// `TupleValues::fetcher_t` reads it: a region's tuple stops where
+    /// the stream does, and a run whose values do not fit the bytes left
+    /// ends that region's tuple (or the skip past regions whose scalar
+    /// is zero) after its control byte, so the next region's tuple
+    /// starts at the byte after that control byte.
     pub(crate) fn add_deltas(&self, outer: u16, inner: u32, coords: &[f32], out: &mut [f32]) {
         let Some(slot) = self.subtable_slot(outer) else {
             return;
@@ -477,10 +486,6 @@ impl<'a> MultiVarStore<'a> {
         let Some(&raw) = sub.delta_sets.get(inner as usize) else {
             return;
         };
-        let needed = out.len().saturating_mul(sub.region_indexes.len());
-        if !TupleFetcher::new(raw).holds(needed) {
-            return;
-        }
         let mut values = TupleFetcher::new(raw);
         let mut skip = 0usize;
         for &scalar in scalars {
@@ -495,8 +500,10 @@ impl<'a> MultiVarStore<'a> {
 }
 
 /// Reads a `TupleValues` stream lazily, as HarfBuzz's
-/// `TupleValues::fetcher_t` does: a run that does not fit the
-/// remaining bytes ends the stream, and reads past the end add nothing.
+/// `TupleValues::fetcher_t` does: reads past the end add nothing, and a
+/// run whose values do not fit the remaining bytes stops the read that
+/// reached it after its control byte, so the next read takes the byte
+/// after that control byte as a control byte.
 struct TupleFetcher<'a> {
     data: &'a [u8],
     /// Values left in the current run.
@@ -514,8 +521,9 @@ impl<'a> TupleFetcher<'a> {
         }
     }
 
-    /// Starts the next run if the current one is used up. False once
-    /// the stream has ended.
+    /// Starts the next run if the current one is used up. False when
+    /// the stream has ended, or when the next run does not fit the bytes
+    /// after its control byte, which is then used up.
     fn ensure_run(&mut self) -> bool {
         if self.run > 0 {
             return true;
@@ -523,6 +531,7 @@ impl<'a> TupleFetcher<'a> {
         let Some((&control, rest)) = self.data.split_first() else {
             return false;
         };
+        self.data = rest;
         let run = usize::from(control & 0x3F) + 1;
         let width = match control & 0xC0 {
             0x80 => 0,
@@ -531,10 +540,8 @@ impl<'a> TupleFetcher<'a> {
             _ => 4,
         };
         if rest.len() < run * width {
-            self.data = &[];
             return false;
         }
-        self.data = rest;
         self.run = run;
         self.width = width;
         true
@@ -558,21 +565,6 @@ impl<'a> TupleFetcher<'a> {
         };
         self.data = rest;
         value
-    }
-
-    /// Whether the stream holds at least `n` values, every run fitting
-    /// its bytes.
-    fn holds(mut self, n: usize) -> bool {
-        let mut seen = 0usize;
-        while seen < n {
-            if !self.ensure_run() {
-                return false;
-            }
-            seen += self.run;
-            self.data = &self.data[self.run * self.width..];
-            self.run = 0;
-        }
-        true
     }
 
     fn skip(&mut self, mut n: usize) {

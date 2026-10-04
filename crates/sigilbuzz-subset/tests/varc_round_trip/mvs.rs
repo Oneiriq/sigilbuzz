@@ -108,8 +108,9 @@ fn build_mvs_varc() -> Vec<u8> {
     };
 
     // MVS: 2 subtables, 5 entries each = 10 total. Each delta set is
-    // a single i8 zero (0x00, 0x00): `0x00` ctrl = run of 1 i8, `0x00`
-    // payload. Two bytes per entry.
+    // one i8: `0x00` ctrl = run of 1 i8, then the value, `i` for entry
+    // `i` of subtable 0 and `10 + i` for subtable 1. Two bytes per
+    // entry.
     let mvs_subtables: Vec<(Vec<u16>, Vec<Vec<u8>>)> = vec![
         (vec![0], (0..5).map(|i| vec![0x00_u8, i as u8]).collect()),
         (
@@ -471,17 +472,26 @@ fn varc_subset_prunes_mvs_and_remaps_var_idx_orphan_free() {
         // gid 1 has 3 components, gid 2 has 3 components.
         assert_eq!(comp.components.len(), 3, "gid {old} component count");
         // Translation values survive (verifies the var-idx splice did
-        // not corrupt the trailing transform fields).
+        // not corrupt the trailing transform fields), and each component
+        // still reads its own delta set. A set holds one value for the
+        // two translations, so at axis 0 = 1 its value moves X, as
+        // HarfBuzz reads a set that ends early, and Y keeps its stored
+        // value: gid 1 names (0,0) (0,1) (0,2), whose values are 0 1 2;
+        // gid 2 names (0,3) (0,4) (1,0), whose values are 3 4 10.
+        let (stored, deltas): (f32, [f32; 3]) = if old == 1 {
+            (1.0, [0.0, 1.0, 2.0])
+        } else {
+            (4.0, [3.0, 4.0, 10.0])
+        };
         for (i, c) in comp.components.iter().enumerate() {
-            let tx_expected = if old == 1 {
-                f32::from((i + 1) as i16)
-            } else {
-                f32::from((i + 4) as i16)
-            };
+            let ty_expected = stored + i as f32;
+            let tx_expected = ty_expected + deltas[i];
             assert!(
-                (c.transform[4] - tx_expected).abs() < 1e-3,
-                "gid {old} comp {i} tx {} expected {tx_expected}",
+                (c.transform[4] - tx_expected).abs() < 1e-3
+                    && (c.transform[5] - ty_expected).abs() < 1e-3,
+                "gid {old} comp {i} translate ({}, {}) expected ({tx_expected}, {ty_expected})",
                 c.transform[4],
+                c.transform[5],
             );
         }
     }
