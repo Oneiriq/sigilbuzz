@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 
 use super::{parse_cff2, serialise_cff2_top_dict, ParsedCff2};
 use crate::cff::{
-    emit_fd_select_auto, encode_index_cff2, kept_fd_positions, patch_dict_offset, rewrite_calls,
-    serialise_font_dict, serialise_private_dict, walk_budget, walk_dict, BlendRegions,
-    CharstringWalk, FdWalk, SubrCall,
+    emit_fd_select_auto, encode_index_cff2, kept_fd_positions, kept_position, patch_dict_offset,
+    rewrite_calls, serialise_font_dict, serialise_private_dict, walk_budget, walk_dict,
+    BlendRegions, CharstringWalk, FdWalk, Remap, SubrCall,
 };
 use crate::SubsetError;
 
@@ -145,48 +145,33 @@ fn emit(
 ) -> Result<Vec<u8>, SubsetError> {
     let per_fd_kept_local: Vec<Vec<u32>> = fds.iter().map(FdWalk::kept_locals).collect();
     let kept_global_idx = walk.kept_globals();
-    let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
-    for (new_i, &old_i) in kept_global_idx.iter().enumerate() {
-        global_renumber[old_i as usize] = Some(new_i as u32);
-    }
-    let new_global_count = kept_global_idx.len();
-
-    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> =
-        Vec::with_capacity(kept_fds_sorted.len());
-    for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
-        let local_count = parsed.per_fd_local_subrs[old_fd as usize].len();
-        let mut renumber: Vec<Option<u32>> = alloc::vec![None; local_count];
-        for (new_i, &old_i) in per_fd_kept_local[i].iter().enumerate() {
-            renumber[old_i as usize] = Some(new_i as u32);
-        }
-        per_fd_local_renumber.push(renumber);
-    }
+    let new_global = |old: usize| kept_position(&kept_global_idx, old);
+    let global = Remap {
+        old_count: parsed.global_subrs.len(),
+        new_count: kept_global_idx.len(),
+        new_index: &new_global,
+    };
+    let local_maps: Vec<_> = per_fd_kept_local
+        .iter()
+        .map(|kept| move |old: usize| kept_position(kept, old))
+        .collect();
+    let local_remap = |fd_pos: usize| Remap {
+        old_count: parsed.per_fd_local_subrs[usize::from(kept_fds_sorted[fd_pos])].len(),
+        new_count: per_fd_kept_local[fd_pos].len(),
+        new_index: &local_maps[fd_pos],
+    };
 
     // Step 5: rewrite each kept charstring and subroutine at the call
     // sites the walk found in it.
-    let renumber = |body: &[u8],
-                    calls: &[SubrCall],
-                    new_local_count: usize,
-                    local_renumber: &[Option<u32>]| {
-        rewrite_calls(
-            body,
-            calls,
-            new_local_count,
-            new_global_count,
-            local_renumber,
-            &global_renumber,
-            |_| None,
-        )
-    };
     let fd_pos_of = kept_fd_positions(kept_fds_sorted);
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
-        let new_fd_pos = fd_pos_of[usize::from(kept_fd_old[i])];
-        new_charstrings.push(renumber(
+        let local = local_remap(fd_pos_of[usize::from(kept_fd_old[i])]);
+        new_charstrings.push(rewrite_calls(
             parsed.char_strings[gid as usize],
             &charstring_calls[i],
-            per_fd_kept_local[new_fd_pos].len(),
-            &per_fd_local_renumber[new_fd_pos],
+            &local,
+            &global,
         )?);
     }
 
@@ -194,28 +179,34 @@ fn emit(
     let mut new_per_fd_local_subrs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(kept_fds_sorted.len());
     for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
         let fd_local_subrs_old = &parsed.per_fd_local_subrs[old_fd as usize];
-        let kept_local_idx = &per_fd_kept_local[i];
-        let mut new_locals: Vec<Vec<u8>> = Vec::with_capacity(kept_local_idx.len());
-        for &idx in kept_local_idx {
-            new_locals.push(renumber(
+        let local = local_remap(i);
+        let mut new_locals: Vec<Vec<u8>> = Vec::with_capacity(per_fd_kept_local[i].len());
+        for &idx in &per_fd_kept_local[i] {
+            new_locals.push(rewrite_calls(
                 fd_local_subrs_old[idx as usize],
                 fds[i].local_calls(idx as usize).unwrap_or_default(),
-                kept_local_idx.len(),
-                &per_fd_local_renumber[i],
+                &local,
+                &global,
             )?);
         }
         new_per_fd_local_subrs.push(new_locals);
     }
 
-    // Renumber globals: pass an empty local table; calls into locals
+    // Renumber globals: pass an empty local pool; calls into locals
     // from globals would cross-FD-collide and surface a hard error.
+    let no_local = |_: usize| None;
+    let no_locals = Remap {
+        old_count: 0,
+        new_count: 0,
+        new_index: &no_local,
+    };
     let mut new_global_subrs: Vec<Vec<u8>> = Vec::with_capacity(kept_global_idx.len());
     for &g in &kept_global_idx {
-        new_global_subrs.push(renumber(
+        new_global_subrs.push(rewrite_calls(
             parsed.global_subrs[g as usize],
             walk.global_calls(g as usize).unwrap_or_default(),
-            0,
-            &[],
+            &no_locals,
+            &global,
         )?);
     }
 

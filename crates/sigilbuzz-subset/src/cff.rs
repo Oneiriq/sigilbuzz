@@ -99,7 +99,7 @@ pub(crate) use reader::{
 pub(crate) use seac::SeacClosure;
 
 use charset::{extract_kept_charset_sids, extract_kept_encoding_codes};
-pub(crate) use charstring::rewrite_calls;
+pub(crate) use charstring::{kept_position, rewrite_calls, Remap};
 use cid::subset_cid_keyed;
 use reader::{parse_cff1, OP_CHARSET, OP_ENCODING};
 pub(crate) use walk::{walk_budget, BlendRegions, CharstringWalk, FdWalk};
@@ -296,32 +296,23 @@ pub fn subset_non_identity(cff_bytes: &[u8], kept_gids: &[u16]) -> Result<Vec<u8
     let kept_local_idx = fd_walk.kept_locals();
     let kept_global_idx = walk.kept_globals();
 
-    // Build old -> new renumber tables.
-    let mut local_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.local_subrs.len()];
-    for (new_i, &old_i) in kept_local_idx.iter().enumerate() {
-        local_renumber[old_i as usize] = Some(new_i as u32);
-    }
-    let mut global_renumber: Vec<Option<u32>> = alloc::vec![None; parsed.global_subrs.len()];
-    for (new_i, &old_i) in kept_global_idx.iter().enumerate() {
-        global_renumber[old_i as usize] = Some(new_i as u32);
-    }
-
-    let new_local_count = kept_local_idx.len();
-    let new_global_count = kept_global_idx.len();
-
-    // Rewrite each kept charstring and subroutine (cloned, then
-    // mutated) at the call sites the walk found in it.
-    let renumber = |body: &[u8], calls: &[SubrCall]| {
-        rewrite_calls(
-            body,
-            calls,
-            new_local_count,
-            new_global_count,
-            &local_renumber,
-            &global_renumber,
-            |_| None,
-        )
+    // Each kept subroutine's new index is its position among the kept.
+    let new_local = |old: usize| kept_position(&kept_local_idx, old);
+    let new_global = |old: usize| kept_position(&kept_global_idx, old);
+    let local = Remap {
+        old_count: parsed.local_subrs.len(),
+        new_count: kept_local_idx.len(),
+        new_index: &new_local,
     };
+    let global = Remap {
+        old_count: parsed.global_subrs.len(),
+        new_count: kept_global_idx.len(),
+        new_index: &new_global,
+    };
+
+    // Rewrite each kept charstring and subroutine at the call sites the
+    // walk found in it.
+    let renumber = |body: &[u8], calls: &[SubrCall]| rewrite_calls(body, calls, &local, &global);
     let new_charstrings: Vec<Vec<u8>> = kept_charstrings
         .iter()
         .zip(&charstring_calls)

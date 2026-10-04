@@ -724,9 +724,33 @@ fn new_raw_operand(
         .map_err(|_| SubsetError::Unsupported("CFF renumber: new raw operand out of i32 range"))
 }
 
+/// How the subroutines of one kind (the locals of one Font DICT, or the
+/// globals) are renumbered in a subset.
+pub(crate) struct Remap<'r> {
+    /// The count of the source INDEX, whose bias a call's number holds.
+    pub(crate) old_count: usize,
+    /// The count of the rebuilt INDEX, whose bias a new number takes.
+    pub(crate) new_count: usize,
+    /// The new index of a source subroutine, `None` when it is dropped.
+    pub(crate) new_index: &'r dyn Fn(usize) -> Option<u32>,
+}
+
+/// The new index of source subroutine `old` when `kept` (ascending) lists
+/// the kept ones in their new order: its position in `kept`.
+pub(crate) fn kept_position(kept: &[u32], old: usize) -> Option<u32> {
+    let old = u32::try_from(old).ok()?;
+    kept.binary_search(&old).ok().map(|i| i as u32)
+}
+
 /// The body `body` with the subroutine number of each call in `calls`,
-/// call sites found in it in byte order, renumbered against the
-/// old-to-new maps (see [`renumber_charstring_with_cross_fd`]).
+/// call sites found in it in byte order, renumbered through `local` and
+/// `global`.
+///
+/// A call's source subroutine is worked out again from the number it
+/// pushes and the bias of `local.old_count` or `global.old_count`, not
+/// taken from the call: one global subroutine body serves every Font
+/// DICT, and the bias of its local calls is the bias of the local INDEX
+/// of the Font DICT that runs it.
 ///
 /// A new number that fits the width of the push it replaces is padded
 /// to that width, so the body keeps its size. One that cannot be, a
@@ -737,14 +761,13 @@ fn new_raw_operand(
 pub(crate) fn rewrite_calls(
     body: &[u8],
     calls: &[SubrCall],
-    new_local_count: usize,
-    new_global_count: usize,
-    local_renumber: &[Option<u32>],
-    global_renumber: &[Option<u32>],
-    cross_fd_override: impl Fn(usize) -> Option<u32>,
+    local: &Remap<'_>,
+    global: &Remap<'_>,
 ) -> Result<Vec<u8>, SubsetError> {
     const BAD_SITE: SubsetError =
         SubsetError::Unsupported("CFF charstring call sites out of order");
+    const DROPPED: SubsetError =
+        SubsetError::Unsupported("CFF charstring calls dropped subroutine");
     let mut out = Vec::with_capacity(body.len());
     let mut pos = 0;
     for call in calls {
@@ -754,14 +777,20 @@ pub(crate) fn rewrite_calls(
         if end > body.len() {
             return Err(BAD_SITE);
         }
-        let new_raw = new_raw_operand(
-            call,
-            new_local_count,
-            new_global_count,
-            local_renumber,
-            global_renumber,
-            &cross_fd_override,
-        )?;
+        let remap = match call.kind {
+            SubrKind::Local => local,
+            SubrKind::Global => global,
+        };
+        let old = i64::from(call.raw_operand) + i64::from(subr_bias(remap.old_count));
+        let old = usize::try_from(old)
+            .ok()
+            .filter(|&i| i < remap.old_count)
+            .ok_or(DROPPED)?;
+        let new = (remap.new_index)(old).ok_or(DROPPED)?;
+        let new_raw = i64::from(new) - i64::from(subr_bias(remap.new_count));
+        let new_raw = i32::try_from(new_raw).map_err(|_| {
+            SubsetError::Unsupported("CFF renumber: new raw operand out of i32 range")
+        })?;
         match encode_int_operand_at_width(new_raw, call.operand_byte_len) {
             Ok(padded) if padded.len() == call.operand_byte_len => out.extend_from_slice(&padded),
             _ => out.extend_from_slice(&encode_int_operand(new_raw)),
