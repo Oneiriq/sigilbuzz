@@ -16,6 +16,7 @@ use super::region::axis_support_scalar;
 use super::*;
 
 mod axes;
+mod defaults;
 mod glyphs;
 mod projection;
 mod stores;

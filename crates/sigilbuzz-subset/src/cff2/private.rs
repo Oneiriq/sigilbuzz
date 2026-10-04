@@ -14,7 +14,9 @@
 //! - A partial instance keeps each `blend`, its deltas cut to the
 //!   regions the projected store keeps and scaled by the pinned axes,
 //!   as the charstrings' blends are (see [`super::partial`]), and points
-//!   `vsindex` at the subtable's new index.
+//!   `vsindex` at the subtable's new index. The deltas of regions on the
+//!   pinned axes only move into the default values, where a renderer at
+//!   the new default reads them.
 //!
 //! An entry no `blend` feeds keeps its bytes.
 
@@ -95,7 +97,7 @@ pub(super) fn bake_private(
 pub(super) fn project_private(
     entries: Vec<DictEntry>,
     src_ivs: &ItemVariationStore<'_>,
-    survivors: &[Option<CffSubtableSurvivors>],
+    survivors: &[CffSubtableSurvivors],
 ) -> Result<Vec<DictEntry>, SubsetError> {
     let mut out = Vec::with_capacity(entries.len());
     // Raw operands of the entry being built, blends already rewritten.
@@ -108,10 +110,13 @@ pub(super) fn project_private(
             OP_VSINDEX => {
                 vsindex = index_operand(&stack)?;
                 stack.clear();
-                if let Some(s) = survivors.get(usize::from(vsindex)).and_then(Option::as_ref) {
+                if let Some(new_outer) = survivors
+                    .get(usize::from(vsindex))
+                    .and_then(|s| s.new_outer)
+                {
                     out.push(DictEntry {
                         op: OP_VSINDEX,
-                        operands: alloc::vec![int_operand(i32::from(s.new_outer))],
+                        operands: alloc::vec![int_operand(i32::from(new_outer))],
                     });
                 }
             }
@@ -124,9 +129,21 @@ pub(super) fn project_private(
                 // What the blend sits on stays in front of it.
                 pending.extend(stack.iter().map(raw_operand));
                 stack.clear();
-                let survivor = survivors.get(usize::from(vsindex)).and_then(Option::as_ref);
-                pending.extend(defaults.iter().map(|&d| number_operand(d, true)));
+                let survivor = survivors.get(usize::from(vsindex));
+                // The deltas of regions on the pinned axes only move into
+                // the defaults.
+                let mut defaults = defaults;
                 if let Some(s) = survivor {
+                    for (i, d) in defaults.iter_mut().enumerate() {
+                        for &(slot, scalar) in &s.folded {
+                            let delta =
+                                deltas.get(i * old_k + usize::from(slot)).ok_or(MALFORMED)?;
+                            *d += delta * f64::from(scalar);
+                        }
+                    }
+                }
+                pending.extend(defaults.iter().map(|&d| number_operand(d, true)));
+                if let Some(s) = survivor.filter(|s| s.new_outer.is_some()) {
                     for i in 0..n {
                         for &(slot, scalar) in &s.surviving {
                             let d = deltas.get(i * old_k + usize::from(slot)).ok_or(MALFORMED)?;

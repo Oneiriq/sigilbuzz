@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::ivs::{offset32, project_ivs_with, shifted, PinnedOnly, Projection, RegionRemap};
+use super::ivs::{offset32, project_ivs_with, shifted, Projection, RegionRemap};
 use super::AxisPin;
 use crate::read;
 use crate::SubsetError;
@@ -203,7 +203,7 @@ pub(super) fn bake_hvar_partial(
     coords: &[f32],
     pins: &[AxisPin],
 ) -> Result<Vec<u8>, SubsetError> {
-    bake_hvar_partial_with(hvar_bytes, coords, pins, PinnedOnly::Keep)
+    bake_hvar_partial_with(hvar_bytes, coords, pins)
 }
 
 /// Re-emits HVAR with its embedded IVS partial-projected through
@@ -212,10 +212,9 @@ pub(super) fn bake_hvar_partial(
 /// header is 20 bytes: the version, then Offset32s to the store and to
 /// the advance, LSB and RSB maps.
 ///
-/// `pinned_only` says what becomes of a region on the pinned axes
-/// only: kept when `hmtx` stays at the source's default, dropped when
-/// it moved to the pinned location. Regions that project alike merge,
-/// as in HarfBuzz's instancer.
+/// Regions on the pinned axes only are dropped: the caller bakes
+/// `hmtx` at the new default, where their deltas are. Regions that
+/// project alike merge, as in HarfBuzz's instancer.
 ///
 /// A malformed HVAR is a parse error; the caller drops the table (no
 /// advance variation, safe but slightly degraded) and reports it.
@@ -223,19 +222,13 @@ pub(super) fn bake_hvar_partial_with(
     hvar_bytes: &[u8],
     coords: &[f32],
     pins: &[AxisPin],
-    pinned_only: PinnedOnly,
 ) -> Result<Vec<u8>, SubsetError> {
     bake_metrics_var_partial(
         hvar_bytes,
         20,
         coords,
         pins,
-        Projection {
-            pinned_only,
-            merge: true,
-            keep_outer_zero: false,
-            keep_itemless: false,
-        },
+        Projection::MERGED,
         "partial instancing: HVAR exceeds 4 GiB",
     )
 }
@@ -244,25 +237,19 @@ pub(super) fn bake_hvar_partial_with(
 /// DeltaSetIndexMap rewritten. VVAR's header is 24 bytes (4 ver + 5
 /// x o32: ivs / advance-height / tsb / bsb / vorg). The vorg map
 /// shares the IVS rows with the others; we rewrite it through the
-/// same remap. `pinned_only` works as in [`bake_hvar_partial_with`],
-/// for `vmtx` and `VORG`.
+/// same remap. Regions on the pinned axes only are dropped, as in
+/// [`bake_hvar_partial_with`], for `vmtx` and `VORG`.
 pub(super) fn bake_vvar_partial_with(
     vvar_bytes: &[u8],
     coords: &[f32],
     pins: &[AxisPin],
-    pinned_only: PinnedOnly,
 ) -> Result<Vec<u8>, SubsetError> {
     bake_metrics_var_partial(
         vvar_bytes,
         24,
         coords,
         pins,
-        Projection {
-            pinned_only,
-            merge: true,
-            keep_outer_zero: false,
-            keep_itemless: false,
-        },
+        Projection::MERGED,
         "partial instancing: VVAR exceeds 4 GiB",
     )
 }
@@ -275,7 +262,9 @@ pub(super) fn bake_vvar_partial_with(
 /// references rows by direct (outer, inner) in each value record,
 /// no DeltaSetIndexMap. Rows pointing at collapsed subtables get
 /// rewritten to `(new_subtable_count, 0)` (out-of-range; resolves to
-/// zero delta).
+/// zero delta). The regions on the pinned axes only go; their deltas
+/// move into the fields themselves (see
+/// [`super::metrics::mvar_defaults`]).
 ///
 /// The MVAR header has `valueRecordSize >= 8`; we preserve the
 /// source's record_size and only patch the first 8 bytes of each
@@ -323,7 +312,7 @@ pub(super) fn bake_mvar_partial(
         }
         .into());
     };
-    let (new_ivs, remap) = project_ivs_with(store, coords, pins, Projection::KEEP_MERGED)
+    let (new_ivs, remap) = project_ivs_with(store, coords, pins, Projection::MERGED)
         .map_err(|e| shifted(e, store_off))?;
     let new_subtable_count = read::u16_at(&new_ivs, 6, "ItemVariationStore truncated")?;
 

@@ -47,6 +47,29 @@
 //! [`InstancedOutput::warnings`]. Tables an instance passes through
 //! unchanged are not read, so they are neither checked nor reported.
 //!
+//! # Work budgets
+//!
+//! A small font can describe far more work than its size: shared
+//! subroutines, composite trees, tuples that each infer every point of
+//! a glyph, records that share a variation row or a condition set. Each
+//! costly part of [`instance()`] charges a budget scaled to the size of
+//! the data it reads, with a fixed floor for small fonts:
+//!
+//! - the `glyf` bake: 8 units per byte of `glyf` and `gvar`, plus 2^22;
+//! - the partial `gvar` rewrite: 8 units of inference and 16 decoded
+//!   deltas per byte of `gvar`, plus 2^20 each;
+//! - each variation store's rows: 8 units per byte of the store, plus
+//!   2^20;
+//! - CFF2 charstrings: 64 tokens per byte of `CFF2`, plus 2^22 (a
+//!   partial instance also charges a token for each blend default it
+//!   moves);
+//! - layout walks (GPOS, GDEF carets, `BASE`, FeatureVariations): 2^24.
+//!
+//! Past a budget the instance degrades and warns rather than failing
+//! (see [`InstancedOutput::warnings`] for what each one leaves), except
+//! for CFF2 charstrings, which fail the instance. Real fonts use at
+//! most about 12.5% of any budget, so none of this applies to them.
+//!
 //! # What happens to each table
 //!
 //! For TrueType (`glyf`) fonts:

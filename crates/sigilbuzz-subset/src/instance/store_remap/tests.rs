@@ -387,3 +387,36 @@ fn the_corpus_varies_with_weight() {
         .iter()
         .any(|text| shape(&source, 300.0, text) != shape(&source, 900.0, text)));
 }
+
+#[test]
+fn values_and_carets_take_the_deltas_of_pinned_only_regions() {
+    // Pinning axis 0 at 1 leaves region 0 (subtable 0's only region)
+    // with no peak on the kept axis: it would apply at every kept
+    // coordinate but the default, where shapers apply no variations.
+    // Its delta (30) moves into the values that name row (0, 0), and
+    // the row goes; row (1, 1) on the kept axis is renumbered alone.
+    let gdef = gdef_with_varied_carets();
+    let map = GidMap::from_kept(&[0, 1, 2, 3, 4, 5]);
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let (bake, remap) =
+        bake_gdef_bytes_partial(&gdef, &map, &[1.0, 0.0], &pins, &Warnings::default()).unwrap();
+    let GdefBake::Rebuilt(out) = bake else {
+        panic!("expected a rebuilt GDEF");
+    };
+    assert_eq!(carets(&out), vec![(130, None), (200, Some((0, 1)))]);
+    let remap = remap.expect("a store remap");
+    assert_eq!(remap.folded(0, 0), 30);
+    assert_eq!(remap.folded(1, 1), 0);
+
+    // Placement on row (0, 0), advance on row (1, 1).
+    let mut gpos = gpos_with_rows(&[(0, 0), (1, 1)]);
+    remap_gpos_variation_indices(&mut gpos, &remap);
+    assert_eq!(gpos_rows(&gpos), vec![None, Some((0, 1))]);
+    assert_eq!((u16_at(&gpos, 28), u16_at(&gpos, 30)), (30, 0));
+    // A field the walk reaches twice takes the delta once.
+    let mut twice = gpos_sharing_a_table_between_subtables();
+    put(&mut twice, 56, 0); // the shared table names row (0, 0)
+    put(&mut twice, 58, 0);
+    remap_gpos_variation_indices(&mut twice, &remap);
+    assert_eq!((u16_at(&twice, 30), u16_at(&twice, 46)), (30, 30));
+}

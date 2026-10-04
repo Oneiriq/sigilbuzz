@@ -299,13 +299,8 @@ fn implicit_advances_keep_reading_the_first_subtable() {
     );
     let hvar = build_hvar_no_maps(&ivs);
     let pins = [AxisPin::Pin, AxisPin::Keep];
-    let dropped = super::super::metrics_var::bake_hvar_partial_with(
-        &hvar,
-        &[1.0, 0.0],
-        &pins,
-        super::super::ivs::PinnedOnly::Drop,
-    )
-    .expect("bake");
+    let dropped =
+        super::super::metrics_var::bake_hvar_partial_with(&hvar, &[1.0, 0.0], &pins).expect("bake");
     let parsed = sigilbuzz::tables::Hvar::parse(&dropped).unwrap();
     for gid in 0..2 {
         for kept in [0.0, 1.0] {
@@ -313,24 +308,14 @@ fn implicit_advances_keep_reading_the_first_subtable() {
             assert!(d.abs() < 1e-3, "gid {gid} at {kept}: {d}");
         }
     }
-    // Keeping the pinned-only regions keeps their deltas.
-    let kept = bake_hvar_partial(&hvar, &[1.0, 0.0], &pins).expect("bake");
-    let parsed = sigilbuzz::tables::Hvar::parse(&kept).unwrap();
-    assert!((parsed.advance_delta(1, &[1.0]) - 100.0).abs() < 1e-3);
-
     // VVAR reads its advance heights the same way.
     let mut vvar = Vec::new();
     vvar.extend_from_slice(&[0, 1, 0, 0]);
     vvar.extend_from_slice(&24u32.to_be_bytes()); // ivs offset = header end
     vvar.extend_from_slice(&[0; 16]); // no maps
     vvar.extend_from_slice(&ivs);
-    let dropped = super::super::metrics_var::bake_vvar_partial_with(
-        &vvar,
-        &[1.0, 0.0],
-        &pins,
-        super::super::ivs::PinnedOnly::Drop,
-    )
-    .expect("bake");
+    let dropped =
+        super::super::metrics_var::bake_vvar_partial_with(&vvar, &[1.0, 0.0], &pins).expect("bake");
     let parsed = sigilbuzz::tables::Vvar::parse(&dropped).unwrap();
     for gid in 0..2 {
         for kept in [0.0, 1.0] {
@@ -654,4 +639,42 @@ fn bake_ivs_partial_keeps_cff2_subtables_without_rows() {
     let store = sigilbuzz::tables::variation_store::ItemVariationStore::parse(&out).unwrap();
     assert_eq!(store.subtable_count(), 1);
     assert_eq!(store.variation_region_count(0), Some(1));
+}
+
+#[test]
+fn regions_on_the_pinned_axes_only_fold_into_each_row() {
+    // Region 0 on axis 0 alone, region 1 on axis 1 alone. Pinning axis
+    // 0 at 0.5 drops region 0 from the store and reports half its
+    // deltas per row, for the caller to add to its defaults.
+    let ivs = build_ivs2(
+        &[
+            [(0.0, 1.0, 1.0), (0.0, 0.0, 0.0)],
+            [(0.0, 0.0, 0.0), (0.0, 1.0, 1.0)],
+        ],
+        &[
+            (
+                alloc::vec![0, 1],
+                alloc::vec![alloc::vec![100, 7], alloc::vec![-40, 3]],
+            ),
+            (alloc::vec![0], alloc::vec![alloc::vec![12]]),
+        ],
+    );
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let (out, remap) = super::super::ivs::project_ivs_with(
+        &ivs,
+        &[0.5, 0.0],
+        &pins,
+        super::super::ivs::Projection::MERGED,
+    )
+    .unwrap();
+    assert_eq!(remap.folded(0, 0), 50.0);
+    assert_eq!(remap.folded(0, 1), -20.0);
+    // Subtable 1 had region 0 alone: it goes, and its row folds.
+    assert_eq!(remap.lookup(1, 0), None);
+    assert_eq!(remap.folded(1, 0), 6.0);
+    let store = sigilbuzz::tables::variation_store::ItemVariationStore::parse(&out).unwrap();
+    assert_eq!(store.region_count(), 1);
+    assert_eq!(store.delta(0, 0, &[1.0]), 7.0);
+    assert_eq!(store.delta(0, 1, &[1.0]), 3.0);
+    assert_eq!(store.delta(0, 0, &[0.0]), 0.0, "nothing at the new default");
 }

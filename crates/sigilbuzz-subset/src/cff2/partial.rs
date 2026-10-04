@@ -7,12 +7,12 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use super::{
-    bake_token_budget, biased_subr, charge_token, decode_operand_f32, encode_charstring_number,
-    parse_cff2, read_u16_at, read_u32_at, serialise_cff2_top_dict, MAX_BAKE_DEPTH, OP_BLEND,
-    OP_CALLGSUBR, OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO,
-    OP_HMOVETO, OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE,
-    OP_RLINETO, OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO,
-    OP_VSINDEX, OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
+    bake_token_budget, biased_subr, charge_token, charstring_number_bytes, decode_operand_f32,
+    parse_cff2, serialise_cff2_top_dict, MAX_BAKE_DEPTH, OP_BLEND, OP_CALLGSUBR, OP_CALLSUBR,
+    OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO, OP_HMOVETO, OP_HSTEM,
+    OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE, OP_RLINETO, OP_RMOVETO,
+    OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO, OP_VSINDEX, OP_VSTEM,
+    OP_VSTEMHM, OP_VVCURVETO,
 };
 use crate::cff::{
     emit_fd_select_auto, encode_index_cff2, patch_dict_offset, serialise_font_dict,
@@ -24,15 +24,42 @@ use crate::SubsetError;
 // Partial-instancing CFF2 bake.
 // ----------------------------------------------------------------------------
 
-/// Per-source-subtable surviving slot info for the CFF2 partial-bake
-/// charstring rewrite.
+/// What the partial bake does with the slots of one source VarStore
+/// subtable: the same projection the trimmed VarStore was built with.
+#[derive(Default)]
 pub(super) struct CffSubtableSurvivors {
-    /// New outer index in the trimmed VarStore.
-    pub(super) new_outer: u16,
+    /// New outer index in the trimmed VarStore; `None` when no region
+    /// with a peak on a kept axis survives, so its blends go.
+    pub(super) new_outer: Option<u16>,
     /// Surviving slots in source-slot order: `(source_slot, scalar)`.
     /// Source delta at `source_slot` becomes `scalar * delta` in the
     /// rewritten blend.
-    pub(super) surviving: alloc::vec::Vec<(u16, f32)>,
+    pub(super) surviving: Vec<(u16, f32)>,
+    /// Slots whose regions lie on the pinned axes only: `scalar *
+    /// delta` moves into the blend's default value, where a renderer
+    /// at the new default (which applies no variations) reads it.
+    pub(super) folded: Vec<(u16, f32)>,
+}
+
+/// The surviving and folded slots of every source subtable, from the
+/// projection `remap` of the VarStore.
+fn subtable_survivors(remap: &crate::instance::RegionRemap) -> Vec<CffSubtableSurvivors> {
+    (0..remap.subtable_count())
+        .map(|outer| {
+            let layout = remap.layout(outer);
+            CffSubtableSurvivors {
+                new_outer: remap.new_outer(outer),
+                // The CFF2 projection does not merge: one slot a column.
+                surviving: layout.map_or_else(Vec::new, |l| {
+                    l.columns
+                        .iter()
+                        .filter_map(|c| c.first().copied())
+                        .collect()
+                }),
+                folded: layout.map_or_else(Vec::new, |l| l.folded.clone()),
+            }
+        })
+        .collect()
 }
 
 /// Re-emits a CFF2 table with its `VariationStore` partially trimmed
@@ -56,14 +83,28 @@ pub(super) struct CffSubtableSurvivors {
 ///
 /// # Errors
 ///
-/// Returns [`SubsetError::Unsupported`] when the source is malformed,
-/// when its VarStore parse fails, or when a charstring references a
-/// dropped subroutine.
+/// Returns [`SubsetError::Unsupported`] when the source is malformed
+/// (a charstring that stacks more than the 513 operands CFF2 allows
+/// included), when its VarStore parse fails, when a charstring
+/// references a dropped subroutine, or when the charstrings run out
+/// the token budget.
 pub(crate) fn bake_cff2_partial(
     cff_bytes: &[u8],
     coords: &[f32],
     pins: &[crate::instance::AxisPin],
 ) -> Result<Vec<u8>, SubsetError> {
+    let budget = bake_token_budget(cff_bytes.len());
+    bake_cff2_partial_within(cff_bytes, coords, pins, budget).map(|(out, _)| out)
+}
+
+/// [`bake_cff2_partial`] with a charstring budget of `budget` tokens:
+/// the baked table and the tokens left of the budget.
+pub(super) fn bake_cff2_partial_within(
+    cff_bytes: &[u8],
+    coords: &[f32],
+    pins: &[crate::instance::AxisPin],
+    budget: usize,
+) -> Result<(Vec<u8>, usize), SubsetError> {
     let parsed = parse_cff2(cff_bytes)?;
     let n_glyphs = parsed.char_strings.len();
     if n_glyphs == 0 {
@@ -74,26 +115,21 @@ pub(crate) fn bake_cff2_partial(
     // can't blend without a VarStore). Re-emit the source as-is so the
     // caller's table-list always gets a deterministic CFF2 buffer.
     let Some(vstore_blob) = parsed.vstore_blob else {
-        return Ok(cff_bytes.to_vec());
+        return Ok((cff_bytes.to_vec(), budget));
     };
     let src_ivs_bytes = vstore_blob.get(2..).ok_or(SubsetError::Unsupported(
         "CFF2 VariationStore blob too short",
     ))?;
 
-    // Build the trimmed IVS via the IVS-bearing-table primitive.
-    let (new_ivs_bytes, _remap) = crate::instance::bake_ivs_partial(src_ivs_bytes, coords, pins)
+    // Build the trimmed IVS via the IVS-bearing-table primitive. Its
+    // remap says, per source subtable, which slots survive and which
+    // fold into the default values, so the blends follow the store
+    // exactly.
+    let (new_ivs_bytes, remap) = crate::instance::bake_ivs_partial(src_ivs_bytes, coords, pins)
         .ok_or(SubsetError::Unsupported(
             "CFF2 VarStore partial bake failed",
         ))?;
-
-    // Compute per-source-subtable surviving-slot info for the
-    // charstring rewrite. We re-walk the source IVS rather than
-    // extending bake_ivs_partial's return shape. The walk is cheap
-    // (O(subtables * regions)) and keeps the IVS-bearing-table API
-    // narrow.
-    let survivors = compute_subtable_survivors(src_ivs_bytes, coords, pins).ok_or(
-        SubsetError::Unsupported("CFF2 VarStore region projection failed"),
-    )?;
+    let survivors = subtable_survivors(&remap);
 
     // Source IVS handle for blend stack arithmetic
     // (variation_region_count tells us how many deltas the source
@@ -103,12 +139,7 @@ pub(crate) fn bake_cff2_partial(
 
     // Per-FD: rewrite each charstring with subr inlining + blend
     // rewrite.
-    let mut rewriter = PartialBaker::new(
-        &src_ivs,
-        &survivors,
-        &parsed.global_subrs,
-        bake_token_budget(cff_bytes.len()),
-    );
+    let mut rewriter = PartialBaker::new(&src_ivs, &survivors, &parsed.global_subrs, budget);
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(n_glyphs);
     for (gid, cs) in parsed.char_strings.iter().enumerate() {
         let fd = parsed
@@ -282,110 +313,47 @@ pub(crate) fn bake_cff2_partial(
         }
     }
 
-    Ok(out)
+    Ok((out, rewriter.budget))
 }
 
-/// Walks the source IVS to build per-source-subtable surviving-slot
-/// info for the partial CFF2 bake. Mirrors the per-region/per-subtable
-/// projection inside [`crate::instance::bake_ivs_partial`] but
-/// surfaces the per-subtable shape the charstring rewrite needs.
-///
-/// Returns one entry per source subtable: `Some(survivors)` when the
-/// subtable contains at least one surviving region (its blend ops can
-/// re-emit), or `None` when every region drops (blend ops against
-/// this subtable degenerate to a no-op).
-///
-/// Returns `None` (the outer `Option`) on malformed input: every
-/// length and offset matches what `bake_ivs_partial` accepts.
-fn compute_subtable_survivors(
-    ivs_bytes: &[u8],
-    coords: &[f32],
-    pins: &[crate::instance::AxisPin],
-) -> Option<Vec<Option<CffSubtableSurvivors>>> {
-    if read_u16_at(ivs_bytes, 0)? != 1 {
-        return None;
-    }
-    let region_list_off = read_u32_at(ivs_bytes, 2)? as usize;
-    let subtable_count = usize::from(read_u16_at(ivs_bytes, 6)?);
-    let subtable_offsets: Vec<usize> = ivs_bytes
-        .get(8..)?
-        .get(..subtable_count * 4)?
-        .chunks_exact(4)
-        .map(|off| u32::from_be_bytes([off[0], off[1], off[2], off[3]]) as usize)
-        .collect();
+/// Operands a CFF2 charstring may stack: the CFF2 limit, which
+/// HarfBuzz's interpreter enforces too.
+const MAX_STACK: usize = 513;
 
-    let axis_count = usize::from(read_u16_at(ivs_bytes, region_list_off)?);
-    let region_count = usize::from(read_u16_at(ivs_bytes, region_list_off.checked_add(2)?)?);
-    if pins.len() != axis_count || coords.len() != axis_count {
-        return None;
-    }
-    // The count reads above put `region_list_off + 4` inside the data.
-    let region_size = axis_count * 6;
-    let regions = ivs_bytes
-        .get(region_list_off + 4..)?
-        .get(..region_count.checked_mul(region_size)?)?;
-
-    // Project each region onto Keep axes; track new index + scalar.
-    // None -> dropped at pin coords.
-    let mut region_remap: Vec<Option<(u16, f32)>> = Vec::with_capacity(region_count);
-    let mut next_new_idx: u16 = 0;
-    for ri in 0..region_count {
-        let base = ri * region_size;
-        let region: Vec<(f32, f32, f32)> = (0..axis_count)
-            .map(|axis_i| {
-                let off = base + axis_i * 6;
-                (
-                    read_f2dot14_at(regions, off),
-                    read_f2dot14_at(regions, off + 2),
-                    read_f2dot14_at(regions, off + 4),
-                )
-            })
-            .collect();
-        match crate::instance::project_region_onto_kept_axes(&region, pins, coords) {
-            Some(p) => {
-                region_remap.push(Some((next_new_idx, p.pin_scalar)));
-                next_new_idx = next_new_idx.saturating_add(1);
-            }
-            None => region_remap.push(None),
-        }
-    }
-
-    let mut per_subtable: Vec<Option<CffSubtableSurvivors>> = Vec::with_capacity(subtable_count);
-    let mut new_outer: u16 = 0;
-    for &sub_off in &subtable_offsets {
-        // The subtable's header must be readable; its item count does
-        // not matter (see below).
-        read_u16_at(ivs_bytes, sub_off)?;
-        let region_index_count = usize::from(read_u16_at(ivs_bytes, sub_off.checked_add(4)?)?);
-        // The read above put `sub_off + 6` inside the data.
-        let region_indexes = ivs_bytes
-            .get(sub_off + 6..)?
-            .get(..region_index_count * 2)?;
-        let mut surviving: Vec<(u16, f32)> = Vec::new();
-        for (slot, old_ri) in region_indexes.chunks_exact(2).enumerate() {
-            let old_ri = usize::from(u16::from_be_bytes([old_ri[0], old_ri[1]]));
-            if let Some(Some((_new_ri, scalar))) = region_remap.get(old_ri) {
-                surviving.push((slot as u16, *scalar));
-            }
-        }
-        // A CFF2 subtable holds no rows: the charstrings carry its
-        // deltas. It survives while any of its regions does.
-        if surviving.is_empty() {
-            per_subtable.push(None);
-        } else {
-            per_subtable.push(Some(CffSubtableSurvivors {
-                new_outer,
-                surviving,
-            }));
-            new_outer = new_outer.saturating_add(1);
-        }
-    }
-    Some(per_subtable)
+/// One token of the charstring tail the baker can still edit: an
+/// operand push or an operator, as the bytes it is written with.
+#[derive(Clone, Copy)]
+struct Token {
+    bytes: [u8; 5],
+    len: u8,
 }
 
-/// Reads an F2DOT14 from `data[off..]`, or 0 past the end.
-fn read_f2dot14_at(data: &[u8], off: usize) -> f32 {
-    read_u16_at(data, off).map_or(0.0, |raw| f32::from(raw as i16) / 16384.0)
+impl Token {
+    /// A token written as `raw` (at most 5 bytes: the longest push).
+    fn raw(raw: &[u8]) -> Self {
+        let mut bytes = [0; 5];
+        let len = raw.len().min(bytes.len());
+        bytes[..len].copy_from_slice(&raw[..len]);
+        Self {
+            bytes,
+            len: len as u8,
+        }
+    }
+
+    /// The push of `value`, in its shortest form.
+    fn number(value: f32) -> Self {
+        let (bytes, len) = charstring_number_bytes(value);
+        Self { bytes, len }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    /// The value this token pushes, or `None` for an operator.
+    fn value(&self) -> Option<f32> {
+        decode_operand_f32(self.as_bytes(), 0).map(|(v, _)| v)
+    }
 }
 
 // CFF2 charstring partial-rewrite baker. Walks the source charstring
@@ -400,26 +368,36 @@ fn read_f2dot14_at(data: &[u8], off: usize) -> f32 {
 // CFF2 carries empty Subr INDEXes. Cross-call vsindex tracking
 // would otherwise need stack modeling.
 //
+// Until an operator clears the operand stack, what the baker writes
+// stays in `tail` as tokens, so a blend can rewrite a master in place
+// without moving what follows it. Each step is constant work per token
+// it reads or writes. The budget is charged a token for each token the
+// bake reads (a blend reads deltas the stack can hold only once, each
+// charged when it was pushed) and for each master a blend rewrites.
+//
 // One baker serves a whole table: the region-count cache and the token
 // budget are shared across glyphs, and the per-glyph state is reset by
 // `bake_charstring`.
 struct PartialBaker<'a> {
     src_ivs: &'a ItemVariationStore<'a>,
-    survivors: &'a [Option<CffSubtableSurvivors>],
+    survivors: &'a [CffSubtableSurvivors],
     global_subrs: &'a [&'a [u8]],
     local_subrs: &'a [&'a [u8]],
+    /// Charstring bytes up to the last stack-clearing operator.
     out: Vec<u8>,
-    /// Per stack entry: byte position in `out` where this entry's push
-    /// began. Non-push values (results of a prior blend) carry the
-    /// position of the original master push that fed that blend:
-    /// the master bytes survive the truncate and remain the "anchor"
-    /// for a later blend's truncate.
-    stack_starts: Vec<usize>,
+    /// Tokens written since then, which blends can still edit.
+    tail: Vec<Token>,
+    /// Per stack entry: the index in `tail` of its push. A blend
+    /// result carries the index of the master push that fed that
+    /// blend: a blend is linear in its master, so editing that push
+    /// moves the result, and a later blend that pops the result cuts
+    /// `tail` back to it, keeping the earlier blend whole.
+    stack: Vec<usize>,
     /// Active source-vsindex (mirrors the source's running vsindex).
     src_vsindex: u16,
-    /// Last-emitted new-outer in `out`. We emit `new_outer, vsindex`
-    /// before each blend whose surviving subtable's `new_outer`
-    /// differs from the last value we wrote.
+    /// Last-emitted new-outer in the output. We emit `new_outer,
+    /// vsindex` before each blend whose surviving subtable's
+    /// `new_outer` differs from the last value we wrote.
     last_emitted_new_outer: Option<u16>,
     stem_count: usize,
     /// Source region count per `vsindex`, resolved once per table.
@@ -431,7 +409,7 @@ struct PartialBaker<'a> {
 impl<'a> PartialBaker<'a> {
     fn new(
         src_ivs: &'a ItemVariationStore<'a>,
-        survivors: &'a [Option<CffSubtableSurvivors>],
+        survivors: &'a [CffSubtableSurvivors],
         global_subrs: &'a [&'a [u8]],
         budget: usize,
     ) -> Self {
@@ -441,7 +419,8 @@ impl<'a> PartialBaker<'a> {
             global_subrs,
             local_subrs: &[],
             out: Vec::new(),
-            stack_starts: Vec::new(),
+            tail: Vec::new(),
+            stack: Vec::new(),
             src_vsindex: 0,
             last_emitted_new_outer: None,
             stem_count: 0,
@@ -457,29 +436,63 @@ impl<'a> PartialBaker<'a> {
     ) -> Result<Vec<u8>, SubsetError> {
         self.local_subrs = local_subrs;
         self.out = Vec::new();
-        self.stack_starts.clear();
+        self.tail.clear();
+        self.stack.clear();
         self.src_vsindex = 0;
         self.last_emitted_new_outer = None;
         self.stem_count = 0;
         self.run(cs, 0)?;
+        self.clear_stack();
         Ok(core::mem::take(&mut self.out))
     }
 
-    /// Pops the top operand, decodes its value from `out`, and removes
-    /// its bytes from `out`.
+    /// Writes the tail out and clears the operand stack, as every
+    /// operator but `blend`, `vsindex` and the subroutine calls does.
+    fn clear_stack(&mut self) {
+        self.stack.clear();
+        for token in self.tail.drain(..) {
+            self.out.extend_from_slice(token.as_bytes());
+        }
+    }
+
+    /// Pushes the operand written as `raw`.
+    fn push_operand(&mut self, raw: &[u8]) -> Result<(), SubsetError> {
+        if self.stack.len() >= MAX_STACK {
+            return Err(SubsetError::Unsupported(
+                "CFF2 partial bake: operand stack overflow",
+            ));
+        }
+        self.stack.push(self.tail.len());
+        self.tail.push(Token::raw(raw));
+        Ok(())
+    }
+
+    /// The value of stack entry `index`: its push, or the master push
+    /// of the blend that left it.
+    fn operand_value(&self, index: usize, bad: &'static str) -> Result<f32, SubsetError> {
+        self.stack
+            .get(index)
+            .and_then(|&at| self.tail.get(at))
+            .and_then(Token::value)
+            .ok_or(SubsetError::Unsupported(bad))
+    }
+
+    /// Pops the top operand, decodes its value, and removes its tokens
+    /// from the tail.
     fn pop_operand(
         &mut self,
         missing: &'static str,
         bad: &'static str,
     ) -> Result<f32, SubsetError> {
-        let start = self
-            .stack_starts
-            .pop()
+        let top = self
+            .stack
+            .len()
+            .checked_sub(1)
             .ok_or(SubsetError::Unsupported(missing))?;
-        let v = decode_operand_f32(&self.out, start)
-            .ok_or(SubsetError::Unsupported(bad))?
-            .0;
-        self.out.truncate(start);
+        let v = self.operand_value(top, bad)?;
+        if let Some(at) = self.stack.pop() {
+            self.tail.truncate(at);
+        }
         Ok(v)
     }
 
@@ -509,8 +522,7 @@ impl<'a> PartialBaker<'a> {
                         "CFF2 partial bake: push operand truncated"
                     }),
                 )?;
-                self.stack_starts.push(self.out.len());
-                self.out.extend_from_slice(push);
+                self.push_operand(push)?;
                 pos += len;
                 continue;
             }
@@ -557,8 +569,8 @@ impl<'a> PartialBaker<'a> {
                 OP_RETURN => {
                     // CFF2 subroutines do NOT own the caller's stack:
                     // they may leave operands on it for the caller to
-                    // consume (#198). Clearing `stack_starts` here used
-                    // to corrupt the caller's tracking and made any
+                    // consume (#198). Clearing the stack here used to
+                    // corrupt the caller's tracking and made any
                     // subr-pushes-deltas-then-returns pattern fail with
                     // "blend without count operand". Just hand control
                     // back; the inliner's caller continues from the
@@ -566,14 +578,14 @@ impl<'a> PartialBaker<'a> {
                     return Ok(());
                 }
                 OP_HSTEM | OP_VSTEM | OP_HSTEMHM | OP_VSTEMHM => {
-                    self.stem_count = self.stem_count.saturating_add(self.stack_starts.len() / 2);
-                    self.stack_starts.clear();
+                    self.stem_count = self.stem_count.saturating_add(self.stack.len() / 2);
+                    self.clear_stack();
                     self.out.push(b0);
                     pos += 1;
                 }
                 OP_HINTMASK | OP_CNTRMASK => {
-                    self.stem_count = self.stem_count.saturating_add(self.stack_starts.len() / 2);
-                    self.stack_starts.clear();
+                    self.stem_count = self.stem_count.saturating_add(self.stack.len() / 2);
+                    self.clear_stack();
                     self.out.push(b0);
                     let mask_bytes = self.stem_count.div_ceil(8);
                     let mask = code
@@ -589,7 +601,7 @@ impl<'a> PartialBaker<'a> {
                     let &b1 = code.get(pos + 1).ok_or(SubsetError::Unsupported(
                         "CFF2 partial bake: escape truncated",
                     ))?;
-                    self.stack_starts.clear();
+                    self.clear_stack();
                     self.out.push(b0);
                     self.out.push(b1);
                     pos += 2;
@@ -597,7 +609,7 @@ impl<'a> PartialBaker<'a> {
                 OP_RMOVETO | OP_HMOVETO | OP_VMOVETO | OP_RLINETO | OP_HLINETO | OP_VLINETO
                 | OP_RRCURVETO | OP_HHCURVETO | OP_VVCURVETO | OP_HVCURVETO | OP_VHCURVETO
                 | OP_RCURVELINE | OP_RLINECURVE => {
-                    self.stack_starts.clear();
+                    self.clear_stack();
                     self.out.push(b0);
                     pos += 1;
                 }
@@ -612,14 +624,14 @@ impl<'a> PartialBaker<'a> {
     }
 
     /// Rewrites the trailing `n masters | n*old_k deltas | count |
-    /// blend` block in `out` to `[vsindex] | n masters | n*new_k
+    /// blend` block in the tail to `[vsindex] | n masters | n*new_k
     /// scaled deltas | count | blend`. When the active subtable
     /// collapsed entirely (no surviving regions), drops the deltas +
     /// count entirely and emits no blend (the masters become the
     /// post-blend stack values directly, equivalent to `n, 0, blend`
     /// post-execution).
     fn apply_blend(&mut self) -> Result<(), SubsetError> {
-        // Pop the count operand and strip it from `out`. It is
+        // Pop the count operand and strip it from the tail. It is
         // re-emitted below.
         let n_raw = self.pop_operand(
             "CFF2 partial bake: blend without count operand",
@@ -644,44 +656,63 @@ impl<'a> PartialBaker<'a> {
         let underflow = SubsetError::Unsupported("CFF2 partial bake: blend stack underflow");
         let total_deltas = n.checked_mul(old_k).ok_or(underflow.clone())?;
         let delta_first_idx = self
-            .stack_starts
+            .stack
             .len()
             .checked_sub(total_deltas)
             .filter(|&first| first >= n)
             .ok_or(underflow)?;
 
-        // Decode every delta operand from out (these are still live in
-        // the byte stream; we'll truncate over them shortly).
-        let delta_starts = self.stack_starts.get(delta_first_idx..).unwrap_or_default();
-        let mut src_deltas: Vec<f32> = Vec::with_capacity(total_deltas);
-        for &start in delta_starts {
-            let v = decode_operand_f32(&self.out, start)
-                .ok_or(SubsetError::Unsupported(
-                    "CFF2 partial bake: delta decode failed",
-                ))?
-                .0;
-            src_deltas.push(v);
-        }
+        // Decode every delta operand. Each one leaves the stack here.
+        let src_deltas = (delta_first_idx..self.stack.len())
+            .map(|i| self.operand_value(i, "CFF2 partial bake: delta decode failed"))
+            .collect::<Result<Vec<f32>, SubsetError>>()?;
 
-        // Truncate `out` to the byte position before the first delta
-        // push. The n masters' bytes survive; everything from the
-        // first delta to the end of the count operand is gone. Drop
-        // the corresponding `stack_starts` entries. With no deltas
-        // (a subtable with zero regions) nothing is cut.
-        let truncate_to = delta_starts.first().copied().unwrap_or(self.out.len());
-        self.stack_starts.truncate(delta_first_idx);
-        self.out.truncate(truncate_to);
+        // Cut the tail back to the first delta push. The n masters
+        // survive; everything from the first delta to the end of the
+        // count operand is gone. With no deltas (a subtable with zero
+        // regions) nothing is cut.
+        if let Some(&first_delta) = self.stack.get(delta_first_idx) {
+            self.tail.truncate(first_delta);
+        }
+        self.stack.truncate(delta_first_idx);
 
         // Look up the surviving subtable.
-        let survivor = self
-            .survivors
-            .get(self.src_vsindex as usize)
-            .and_then(|s| s.as_ref());
-        let Some(survivor) = survivor else {
-            // Subtable collapsed: emit no blend at all. The n masters
-            // already sit in `out`. They'll be consumed by the next
+        let survivors = self.survivors;
+        let Some(survivor) = survivors.get(self.src_vsindex as usize) else {
+            // No such subtable: emit no blend at all. The n masters
+            // already sit in the tail. They'll be consumed by the next
             // outline op verbatim, equivalent to executing
             // `n, 0, blend` (count consumed, masters intact).
+            return Ok(());
+        };
+        let delta = |i: usize, slot: u16| {
+            i.checked_mul(old_k)
+                .and_then(|row| row.checked_add(usize::from(slot)))
+                .and_then(|k| src_deltas.get(k))
+                .copied()
+                .ok_or(SubsetError::Unsupported(
+                    "CFF2 partial bake: blend delta slot out of range",
+                ))
+        };
+
+        // The deltas of regions on the pinned axes only move into the
+        // masters: a renderer at the new default applies no variations,
+        // so they must be in the default values.
+        if !survivor.folded.is_empty() {
+            let first_master = delta_first_idx - n;
+            for i in 0..n {
+                let mut fold = 0.0f32;
+                for &(slot, scalar) in &survivor.folded {
+                    fold += delta(i, slot)? * scalar;
+                }
+                if fold != 0.0 {
+                    self.add_to_operand(first_master + i, fold)?;
+                }
+            }
+        }
+        let Some(new_outer) = survivor.new_outer else {
+            // Subtable collapsed: emit no blend at all; the masters
+            // stand alone, as after `n, 0, blend`.
             return Ok(());
         };
 
@@ -690,41 +721,56 @@ impl<'a> PartialBaker<'a> {
         // surviving outer is also 0 and we haven't emitted vsindex
         // yet, the prefix is a no-op.
         let need_vsindex = match self.last_emitted_new_outer {
-            Some(prev) => prev != survivor.new_outer,
-            None => survivor.new_outer != 0,
+            Some(prev) => prev != new_outer,
+            None => new_outer != 0,
         };
         if need_vsindex {
-            encode_charstring_number(f32::from(survivor.new_outer), &mut self.out);
-            self.out.push(OP_VSINDEX);
-            self.last_emitted_new_outer = Some(survivor.new_outer);
+            self.tail.push(Token::number(f32::from(new_outer)));
+            self.tail.push(Token::raw(&[OP_VSINDEX]));
+            self.last_emitted_new_outer = Some(new_outer);
         }
 
         // Emit the new deltas in source-slot order, each scaled by the
         // pin_scalar.
-        for i in 0..n {
-            for &(slot, scalar) in &survivor.surviving {
-                let src = i
-                    .checked_mul(old_k)
-                    .and_then(|row| row.checked_add(usize::from(slot)))
-                    .and_then(|k| src_deltas.get(k))
-                    .ok_or(SubsetError::Unsupported(
-                        "CFF2 partial bake: blend delta slot out of range",
-                    ))?;
-                encode_charstring_number(src * scalar, &mut self.out);
+        if !survivor.surviving.is_empty() {
+            for i in 0..n {
+                for &(slot, scalar) in &survivor.surviving {
+                    self.tail.push(Token::number(delta(i, slot)? * scalar));
+                }
             }
         }
         // Emit the count operand and blend op.
-        encode_charstring_number(n as f32, &mut self.out);
-        self.out.push(OP_BLEND);
+        self.tail.push(Token::number(n as f32));
+        self.tail.push(Token::raw(&[OP_BLEND]));
 
-        // The post-blend stack carries n result values. Their
-        // `stack_starts` are the original master push positions; the
-        // truncate above left those bytes in place. A subsequent
-        // blend that pops these masters as its own masters will
-        // truncate to the original master positions, leaving the
-        // already-emitted [masters][deltas][count][BLEND] block alone
-        // which is sound for chained blend ops that build on prior blend
-        // results.
+        // The post-blend stack carries n result values. Their stack
+        // entries are the original master pushes; the cut above left
+        // those in place. A subsequent blend that pops these masters as
+        // its own masters cuts back to the original master positions,
+        // leaving the already-emitted [masters][deltas][count][BLEND]
+        // block alone, which is sound for chained blend ops that build
+        // on prior blend results.
+        Ok(())
+    }
+
+    /// Adds `amount` to stack entry `index`. The entry is a push (its
+    /// own, or the master push of the blend that left it), and a blend
+    /// is linear in its master, so rewriting that push moves the entry
+    /// by `amount`. The push is a token of its own, so nothing after it
+    /// moves. The rewrite costs a token of the budget.
+    fn add_to_operand(&mut self, index: usize, amount: f32) -> Result<(), SubsetError> {
+        const BAD: &str = "CFF2 partial bake: blend master decode failed";
+        charge_token(
+            &mut self.budget,
+            "CFF2 partial bake: charstring work budget exceeded",
+        )?;
+        let value = self.operand_value(index, BAD)?;
+        let token = self
+            .stack
+            .get(index)
+            .and_then(|&at| self.tail.get_mut(at))
+            .ok_or(SubsetError::Unsupported(BAD))?;
+        *token = Token::number(value + amount);
         Ok(())
     }
 }

@@ -512,32 +512,34 @@ fn decode_operand_f32(data: &[u8], pos: usize) -> Option<(f32, usize)> {
 /// Encodes a numeric value as a Type 2 push, using the shortest valid
 /// form for the integer case and the 16.16 fixed form when fractional.
 fn encode_charstring_number(v: f32, out: &mut Vec<u8>) {
+    let (bytes, len) = charstring_number_bytes(v);
+    out.extend_from_slice(&bytes[..usize::from(len)]);
+}
+
+/// [`encode_charstring_number`] into a fixed buffer: the push bytes and
+/// how many of them are used (at most 5).
+fn charstring_number_bytes(v: f32) -> ([u8; 5], u8) {
     // If `v` is an exact integer in the i16 range, use an integer push.
     let rounded = v.round();
     let is_integer = (v - rounded).abs() < 1e-6;
     if is_integer && (-32768.0..=32767.0).contains(&rounded) {
         let iv = rounded as i32;
         if (-107..=107).contains(&iv) {
-            out.push((iv + 139) as u8);
+            ([(iv + 139) as u8, 0, 0, 0, 0], 1)
         } else if (108..=1131).contains(&iv) {
             let v0 = iv - 108;
-            out.push(((v0 >> 8) + 247) as u8);
-            out.push((v0 & 0xff) as u8);
+            ([((v0 >> 8) + 247) as u8, (v0 & 0xff) as u8, 0, 0, 0], 2)
         } else if (-1131..=-108).contains(&iv) {
             let v0 = -iv - 108;
-            out.push(((v0 >> 8) + 251) as u8);
-            out.push((v0 & 0xff) as u8);
+            ([((v0 >> 8) + 251) as u8, (v0 & 0xff) as u8, 0, 0, 0], 2)
         } else {
-            let bytes = (iv as i16).to_be_bytes();
-            out.push(OP_SHORTINT);
-            out.push(bytes[0]);
-            out.push(bytes[1]);
+            let [hi, lo] = (iv as i16).to_be_bytes();
+            ([OP_SHORTINT, hi, lo, 0, 0], 3)
         }
     } else {
         // 16.16 fixed.
-        let raw = (v * 65536.0).round() as i32;
-        out.push(255);
-        out.extend_from_slice(&raw.to_be_bytes());
+        let [a, b, c, d] = ((v * 65536.0).round() as i32).to_be_bytes();
+        ([255, a, b, c, d], 5)
     }
 }
 
