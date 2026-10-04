@@ -355,8 +355,8 @@ fn comment(len: usize) -> Vec<u8> {
 fn only_scan_data_backs_a_frame() {
     // A 2048x2048 grayscale frame has 65,536 blocks, so its scans need
     // at least 8,192 bytes. COM padding after the frame header used to
-    // count, so a few KB of comments let the header size about 300 MB
-    // of buffers.
+    // count, so a few KB of comments let a header size buffers that no
+    // scan data backs (a 574 KB stream of them reached 1.8 GB).
     let mut tail = comment(9000);
     tail.extend(scan(&[0]));
     tail.extend_from_slice(&[0xFF, MARKER_EOI]);
@@ -399,19 +399,19 @@ fn entropy_bytes_count_only_scan_data() {
 
 #[test]
 fn frames_past_the_pixel_limit_are_rejected() {
-    // 4097 x 4097 is just past 2^24 pixels; its 263,169 blocks are
+    // 2049 x 2049 is just past 2^22 pixels; its 66,049 blocks are
     // backed by enough scan data, so only the pixel limit stops it.
-    let mut tail = scan(&vec![0x11; 33_000]);
+    let mut tail = scan(&vec![0x11; 8300]);
     tail.extend_from_slice(&[0xFF, MARKER_EOI]);
     for marker in [MARKER_SOF0, MARKER_SOF2] {
         assert_eq!(
-            decode_jpeg(&frame_only(marker, 4097, 4097, &tail)).unwrap_err(),
+            decode_jpeg(&frame_only(marker, 2049, 2049, &tail)).unwrap_err(),
             RenderError::BadJpeg("frame larger than pixel limit")
         );
     }
-    // 4096 x 4096 is at the limit and passes it.
+    // 2048 x 2048 is at the limit and passes it.
     assert_eq!(
-        decode_jpeg(&frame_only(MARKER_SOF0, 4096, 4096, &tail)).unwrap_err(),
+        decode_jpeg(&frame_only(MARKER_SOF0, 2048, 2048, &tail)).unwrap_err(),
         RenderError::BadJpeg("missing DC Huffman table")
     );
 }

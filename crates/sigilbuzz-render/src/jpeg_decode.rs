@@ -26,8 +26,8 @@
 //!   blocks than eight per byte of entropy-coded data in the scans
 //!   after it (COM, APPn and other segments do not count) is rejected
 //!   before any sample buffer is allocated.
-//! - **At most 2^24 pixels** (4096 x 4096) per frame, which keeps one
-//!   decode near 220 MB; see `MAX_JPEG_PIXELS`.
+//! - **At most 2^22 pixels** (2048 x 2048) per frame, which keeps one
+//!   decode near 55 MB; see `MAX_JPEG_PIXELS`.
 //! - **Bounded scan work.** The scans of the stream's frame together
 //!   may visit at most 1024 coefficients per 8x8 block, which a valid
 //!   scan script never needs (each coefficient coded once and refined
@@ -96,15 +96,16 @@ const MARKER_COM: u8 = 0xFE;
 /// blow up `usize` math via a 65535x65535 SOF0.
 const MAX_JPEG_DIM: u32 = 16384;
 
-/// Most pixels a frame may hold: 2^24, 4096 x 4096. JPEG data in a
+/// Most pixels a frame may hold: 2^22, 2048 x 2048. JPEG data in a
 /// font is an sbix glyph image, drawn for one strike's ppem, and a
-/// strike that large would be sixteen times the area of a 1024 ppem
-/// one. A decode holds at most 13 bytes per pixel at once (a
-/// progressive 4:4:4 frame keeps 6 bytes of coefficients, 3 of sample
-/// planes, and 4 of RGBA output), so the cap keeps one decode near
-/// 220 MB. Without it a stream with enough entropy-coded data could ask
-/// for 16384 x 16384, about 3.5 GB.
-const MAX_JPEG_PIXELS: u64 = 1 << 24;
+/// strike that large would be four times the area of a 1024 ppem one,
+/// past any strike fonts ship. A decode holds at most 13 bytes per
+/// pixel at once (a progressive 4:4:4 frame keeps 6 bytes of
+/// coefficients, 3 of sample planes, and 4 of RGBA output), so the cap
+/// keeps one decode near 55 MB and its time well under a second. Without
+/// it a stream with enough entropy-coded data could ask for 16384 x
+/// 16384, about 3.5 GB.
+const MAX_JPEG_PIXELS: u64 = 1 << 22;
 
 /// Hard cap on Huffman table count. JPEG allows 4 of each AC/DC class,
 /// so the worst legitimate case is 8 tables.
@@ -138,7 +139,7 @@ const SCAN_WORK_PER_BLOCK: u64 = 1024;
 /// spectral selection and successive approximation, refinement scans
 /// included) modes are handled. Arithmetic coding, 16-bit precision,
 /// hierarchical mode, restart markers, a second frame, a frame past
-/// 2^24 pixels or larger than its scan data can back, and JPEG2000 /
+/// 2^22 pixels or larger than its scan data can back, and JPEG2000 /
 /// TIFF return [`RenderError::BadJpeg`].
 ///
 /// # Errors
