@@ -4,6 +4,7 @@
 
 use core::cell::OnceCell;
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::Face;
@@ -46,8 +47,9 @@ const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 pub(crate) struct VarcDraw<'w, 'a> {
     face: &'w Face<'a>,
     varc: &'w Varc<'a>,
-    /// The font's coords, rounded to F2DOT14.
-    font_coords: &'w [f32],
+    /// The font's coords, rounded to F2DOT14: one zero per `fvar` axis
+    /// at the default instance, as HarfBuzz's font holds them.
+    font_coords: Vec<f32>,
     memo: VarcMemo,
     leaves: Leaves<'a>,
     /// The glyphs whose composites are being drawn, outermost first.
@@ -59,7 +61,23 @@ pub(crate) struct VarcDraw<'w, 'a> {
 impl<'w, 'a> VarcDraw<'w, 'a> {
     /// A walk over `varc`, the `VARC` table of `face`, in a font set to
     /// `font_coords` (rounded to F2DOT14).
-    pub(crate) fn new(face: &'w Face<'a>, varc: &'w Varc<'a>, font_coords: &'w [f32]) -> Self {
+    ///
+    /// HarfBuzz gives a font with `fvar` one coord per axis even at the
+    /// default instance, and VARC applies deltas whenever the font has
+    /// coords, so there a region that holds everywhere (one that
+    /// constrains no axis) applies its deltas. Empty coords become a
+    /// zero per axis for that; a font without `fvar` keeps none.
+    pub(crate) fn new(face: &'w Face<'a>, varc: &'w Varc<'a>, font_coords: &[f32]) -> Self {
+        let font_coords = if font_coords.is_empty() {
+            let axes = face
+                .fvar()
+                .ok()
+                .flatten()
+                .map_or(0, |fvar| fvar.axes().len());
+            vec![0.0; axes]
+        } else {
+            font_coords.to_vec()
+        };
         Self {
             face,
             varc,
@@ -76,7 +94,7 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
     /// covers. Returns `Ok(false)`, drawing nothing, when it does not
     /// cover the glyph, which is then drawn from `glyf` or CFF.
     pub(crate) fn draw<S: OutlineSink>(&mut self, glyph_id: u16, sink: &mut S) -> Result<bool> {
-        let coords = self.font_coords;
+        let coords = &self.font_coords;
         let Some(composite) = self.varc.resolve(glyph_id, coords, coords, &mut self.memo) else {
             return Ok(false);
         };
@@ -144,7 +162,7 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
             if self.path.get(self.path.len() / 2) == Some(&gid) {
                 return Ok(());
             }
-            let font_coords = self.font_coords;
+            let font_coords = &self.font_coords;
             if let Some(composite) = self.varc.resolve(gid, coords, font_coords, &mut self.memo) {
                 self.path.push(gid);
                 let drawn = self.draw_composite(gid, &composite, transform, depth, sink);
@@ -451,14 +469,15 @@ mod tests {
     #[test]
     fn components_at_distinct_coords_share_one_work_budget() {
         // 600 components, each reaching glyph 4 at its own coords, whose
-        // condition and deltas cost 180,047 units there: 2 to keep the
-        // coords, 2 for the records, 2 for their coords, 40 for the And
-        // offsets, 120,001 for the Value condition (scalars, one region
-        // axis, the walk) and 60,000 for the translation. One budget per
-        // composite let every one of them spend that, 108 million units
-        // in all. Now glyph 3 (1801 units: its coords, its 600 records
-        // and their coords) and five copies of glyph 4 fit, the sixth
-        // runs out at its translation, and the rest draw nothing.
+        // condition and deltas cost 180,053 units there: 4 to keep the
+        // coords (one per axis of the font, and one), 2 for the records,
+        // 6 for their coords, 40 for the And offsets, 120,001 for the
+        // Value condition (scalars, one region axis, the walk) and 60,000
+        // for the translation. One budget per composite let every one of
+        // them spend that, 108 million units in all. Now glyph 3 (3004
+        // units: its coords, its 600 records, their axis values and their
+        // coords) and five copies of glyph 4 fit, the sixth runs out at
+        // its translation, and the rest draw nothing.
         // Axis 0 starts just past 0.5, where the condition starts to hold.
         let axis0: Vec<i16> = (0..600).map(|i| 8193 + i).collect();
         let (out, work, visits) = walk(&heavy_fan_out(&axis0));
@@ -478,13 +497,42 @@ mod tests {
 
     #[test]
     fn a_glyph_reached_again_at_the_same_coords_is_resolved_once() {
-        // 600 components reaching glyph 4 at axis 0 = 1: its 180,047
+        // 600 components reaching glyph 4 at axis 0 = 1: its 180,053
         // units are spent once, and every copy is drawn with them.
         let (out, work, visits) = walk(&heavy_fan_out(&[16384; 600]));
-        assert_eq!(work, 1 + 600 * 3 + 180_047);
+        assert_eq!(work, 4 + 600 * 5 + 180_053);
         assert_eq!(visits, 41);
         let xs = move_xs(&out);
         assert_eq!(xs.len(), 1200);
         assert!(xs.chunks(2).all(|pair| pair == [0.0, 60_000.0]));
+    }
+
+    #[test]
+    fn the_default_instance_applies_regions_without_axes() {
+        // A region that constrains no axis holds everywhere. HarfBuzz's
+        // font holds a zero per axis at the default instance, so VARC
+        // applies its deltas there: glyph 3 moves the box by 100.
+        let mut store = Vec::new();
+        store.extend_from_slice(&[0, 1, 0, 0, 0, 12, 0, 1, 0, 0, 0, 20]);
+        store.extend_from_slice(&[0, 1, 0, 0, 0, 6, 0, 0]); // one region, no axes
+        store.extend_from_slice(&[1, 0, 1, 0, 0]); // one region index: 0
+        store.extend_from_slice(&[0, 0, 0, 1, 1, 1, 3, 0x00, 100]); // one set: 100
+                                                                    // TRANSFORM_HAS_VARIATION and HAVE_TRANSLATE_X, the box, index 0.
+        let record = [0x18, 0x00, 0x01, 0x00, 0x00, 0x00];
+        let table = build_varc(&[3], &[&record], Some(&store), None);
+        let font = with_varc(
+            include_bytes!("../../tests/fixtures/varc_parity.ttf"),
+            &table,
+        );
+        let (out, _, _) = walk(&font);
+        assert_eq!(move_xs(&out), [100.0]);
+        // Coords given as zeros draw the same, and so does a font set
+        // away from the default, where the region holds too.
+        let blob = Blob::new(&font);
+        let face = Face::parse(&blob, 0).unwrap();
+        let at =
+            |coords: &[f32]| move_xs(&face.glyph_outline_at_coords(3, coords).unwrap().unwrap());
+        assert_eq!(at(&[0.0, 0.0, 0.0]), [100.0]);
+        assert_eq!(at(&[0.5]), [100.0]);
     }
 }
