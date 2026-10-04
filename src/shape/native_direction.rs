@@ -13,12 +13,15 @@
 //! script counts as LTR.
 //!
 //! The buffer's script is its first script-bearing character's, as
-//! HarfBuzz guesses it. Scripts sigilbuzz has no bucket for take their
-//! direction from their first strong bidi class instead, so an RTL
-//! script without a sigilbuzz bucket (Thaana, Samaritan, ...) still counts
-//! as RTL. HarfBuzz reports no native direction for the bidirectional
-//! scripts (Old Hungarian, Old Italic, Runic, Tifinagh), so text in
-//! them shapes in the direction asked for, never reversed.
+//! HarfBuzz guesses it. Text with no such character (only Common,
+//! Inherited, and Unknown ones, such as Arabic marks before a tatweel)
+//! keeps HarfBuzz's invalid script, whose native direction is LTR.
+//! Scripts sigilbuzz has no bucket for take their direction from their
+//! first strong bidi class instead, so an RTL script without a
+//! sigilbuzz bucket (Thaana, Samaritan, ...) still counts as RTL.
+//! HarfBuzz reports no native direction for the bidirectional scripts
+//! (Old Hungarian, Old Italic, Runic, Tifinagh), so text in them shapes
+//! in the direction asked for, never reversed.
 //!
 //! A grapheme is a character and the continuation characters after it
 //! (see `cluster::continuations`). At
@@ -62,10 +65,15 @@ const fn has_no_native_direction(ch: char) -> bool {
 /// ([`Direction::horizontal_for_script`], `None` for Tifinagh, which
 /// HarfBuzz writes either way), or for text sigilbuzz has no script
 /// bucket for, the direction of its first strong character (left to
-/// right when there is none, as for HarfBuzz's Common script). `None`
-/// when that character belongs to a script HarfBuzz gives no direction.
+/// right when there is none). `None` when that character belongs to a
+/// script HarfBuzz gives no direction. Text with no script (`script`
+/// is `None`) is left to right, as HarfBuzz's invalid script is: its
+/// tatweel or Arabic punctuation does not make it right to left.
 fn native_horizontal(script: Option<Script>, cps: &[char]) -> Option<Direction> {
-    match script.and_then(Script::iso15924_tag) {
+    let Some(script) = script else {
+        return Some(Direction::Ltr);
+    };
+    match script.iso15924_tag() {
         Some(tag) => Direction::horizontal_for_script(tag),
         _ => cps
             .iter()
@@ -193,6 +201,32 @@ mod tests {
         );
         let digits: Vec<char> = "12".chars().collect();
         assert_eq!(resolve(Direction::Rtl, None, &digits), Direction::Ltr);
+    }
+
+    #[test]
+    fn text_without_a_script_is_left_to_right() {
+        // Arabic marks before a tatweel, and Arabic punctuation: Common
+        // and Inherited characters whose bidi class is right to left.
+        // HarfBuzz's buffer keeps an invalid script, which is LTR.
+        for text in ["\u{064F}\u{064B}\u{0640}", "\u{061F}\u{060C}", "\u{05FF}"] {
+            let cps: Vec<char> = text.chars().collect();
+            assert_eq!(
+                resolve(Direction::Ltr, None, &cps),
+                Direction::Ltr,
+                "{text:?}"
+            );
+            assert_eq!(
+                resolve(Direction::Rtl, None, &cps),
+                Direction::Ltr,
+                "{text:?}"
+            );
+        }
+        // A script without a bucket still reads its strong direction.
+        let tatweel: Vec<char> = "\u{0640}".chars().collect();
+        assert_eq!(
+            resolve(Direction::Ltr, Some(Script::Other), &tatweel),
+            Direction::Rtl
+        );
     }
 
     /// Reverses `text` (glyph ids and clusters are the code point

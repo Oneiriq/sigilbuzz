@@ -1,4 +1,5 @@
-//! Script runs from the Unicode Script property, against HarfBuzz.
+//! Script runs from the Unicode Script property, and leading marks
+//! with no script, against HarfBuzz.
 //!
 //! Every expectation here is HarfBuzz 14.5.0's output (uharfbuzz
 //! 0.56.2, `hb.shape` with no features, script and direction guessed,
@@ -13,7 +14,10 @@
 //! Latin Extended Additional lost the `latn` kerning, Arabic
 //! Extended-A and the Arabic mathematical letters shaped left to right
 //! with no joining, and the Mongolian Supplement, Devanagari Extended,
-//! and Sinhala Archaic Numbers lost their shapers.
+//! and Sinhala Archaic Numbers lost their shapers. Text with no
+//! script-bearing character took the direction of its first strong
+//! character, so Arabic marks before a tatweel were reversed, where
+//! HarfBuzz's invalid script is left to right.
 
 use sigilbuzz::{script_of, shape, Blob, Buffer, Direction, Face, Font, UnicodeScript};
 
@@ -256,6 +260,40 @@ fn devanagari_and_sinhala_extensions_take_their_shapers() {
                 (101, 0, 974, 0, 0),
                 (76, 4, 1262, 0, 0),
                 (15, 4, 1705, 0, 0),
+            ],
+        },
+    ]);
+}
+
+#[test]
+fn leading_arabic_marks_before_a_tatweel_sort_left_to_right() {
+    // Damma and fathatan, or kasra and shadda, then a tatweel: every
+    // character is Common or Inherited, so HarfBuzz's buffer keeps an
+    // invalid script, which is left to right, and the marks sort by
+    // combining class (fathatan before damma, shadda before kasra).
+    // An explicit right-to-left direction reverses the graphemes.
+    assert_eq!(script_of('\u{0640}'), UnicodeScript::Other);
+    check(&[
+        Case {
+            font: AMIRI,
+            text: "\u{064F}\u{064B}\u{0640}",
+            direction: None,
+            expected: &[(1438, 0, 0, 0, 0), (1441, 0, 0, 0, 0), (5477, 4, 185, 0, 0)],
+        },
+        Case {
+            font: AMIRI,
+            text: "\u{0650}\u{0651}\u{0640}",
+            direction: None,
+            expected: &[(97, 0, 0, 0, 0), (96, 0, 0, 0, 0), (5477, 4, 185, 0, 0)],
+        },
+        Case {
+            font: AMIRI,
+            text: "\u{064F}\u{064B}\u{0640}",
+            direction: Some(Direction::Rtl),
+            expected: &[
+                (5477, 4, 185, 0, 0),
+                (1438, 0, 0, 0, 0),
+                (1441, 0, 0, -92, -112),
             ],
         },
     ]);
