@@ -745,3 +745,171 @@ fn contextual_mark_starts_on_the_first_glyph() {
     let m = Morx::parse(&bytes).unwrap();
     assert_eq!(m.apply(&[5, 5, 5]).0, [50, 5, 5]);
 }
+
+// -----------------------------------------------------------------
+// Type 2: ligatures, as HarfBuzz forms them. Every glyph of these
+// runs falls in the out-of-bounds class (1), so the states alone
+// drive the walk.
+// -----------------------------------------------------------------
+
+/// Ligature entry with an explicit action index.
+fn lig_entry_at(new_state: u16, flags: u16, action: u16) -> Vec<u8> {
+    [new_state, flags, action]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect()
+}
+
+/// A ligature subtable over `states` and `entries`, with action words
+/// `actions`, `components[index] = value` for each pair, and the
+/// ligature list `ligatures`.
+fn ligature_morx(
+    states: &[[u16; 4]],
+    entries: &[Vec<u8>],
+    actions: &[u32],
+    components: &[(usize, u16)],
+    ligatures: &[u16],
+) -> Vec<u8> {
+    let refs: Vec<&[u8]> = entries.iter().map(Vec::as_slice).collect();
+    let actions: Vec<u8> = actions.iter().flat_map(|a| a.to_be_bytes()).collect();
+    let mut comps = vec![0u16; 256];
+    for &(i, v) in components {
+        comps[i] = v;
+    }
+    let comps: Vec<u8> = comps.iter().flat_map(|c| c.to_be_bytes()).collect();
+    let ligs: Vec<u8> = ligatures.iter().flat_map(|g| g.to_be_bytes()).collect();
+    let body = state_body(3, states, &refs, &[&actions, &comps, &ligs]);
+    wrap_in_chain(&[&subtable(TYPE_LIGATURE, &body)])
+}
+
+const LS: u32 = LIG_ACTION_LAST | LIG_ACTION_STORE;
+const PUSH: u16 = FLAG_LIG_SET_COMPONENT;
+const ACT: u16 = FLAG_LIG_PERFORM_ACTION;
+
+#[test]
+fn ligature_component_set_twice_counts_once() {
+    // Glyph 1 is set as a component, kept with DontAdvance, and set
+    // again with the action. HarfBuzz never pushes one index twice, so
+    // the action pops glyph 1 and glyph 0 and forms the ligature. With
+    // the double push it popped glyph 1 twice, put the ligature there,
+    // and then removed it as the duplicate: [5, 6] came out as [5].
+    let entries = [
+        lig_entry_at(0, 0, 0),
+        lig_entry_at(1, PUSH, 0),
+        lig_entry_at(2, PUSH | STAY, 0),
+        lig_entry_at(0, PUSH | ACT, 0),
+    ];
+    let states = [[0, 1, 0, 0], [0, 2, 0, 0], [0, 3, 0, 0]];
+    // comp[6] + comp[5] = 3: ligatures[3].
+    let bytes = ligature_morx(&states, &entries, &[0, LS], &[(6, 3)], &[0, 0, 0, 99]);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.apply(&[5, 6]), (vec![99], vec![0]));
+    assert_eq!(m.apply(&[5, 6, 5, 6]), (vec![99, 99], vec![0, 2]));
+}
+
+#[test]
+fn ligature_stays_on_the_stack_for_the_next_action() {
+    // [5, 6] forms ligature 90 at position 0, which stays on the stack.
+    // Glyph 7 then joins it into 91. The stack used to lose the
+    // ligature, so the second action ran out of components.
+    let entries = [
+        lig_entry_at(0, 0, 0),
+        lig_entry_at(1, PUSH, 0),
+        lig_entry_at(2, PUSH | ACT, 0),
+        lig_entry_at(0, PUSH | ACT, 2),
+    ];
+    let states = [[0, 1, 0, 0], [0, 2, 0, 0], [0, 3, 0, 0]];
+    // Action 0: comp[6] + comp[5] = 0. Action 2 (offset 0x64 = 100):
+    // comp[107] + comp[190] = 1.
+    let actions = [0, LS, 0x64, LS | 0x64];
+    let bytes = ligature_morx(&states, &entries, &actions, &[(107, 1)], &[90, 91]);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.apply(&[5, 6, 7]), (vec![91], vec![0]));
+}
+
+#[test]
+fn ligature_store_without_last_and_running_index() {
+    // The first action stores (without Last) ligature 2 in place of
+    // the glyph it popped; the second (Last, no Store) adds to the same
+    // index and stores ligature 4 over glyph 0, deleting the first
+    // ligature. Store used to count only together with Last.
+    let entries = [
+        lig_entry_at(0, 0, 0),
+        lig_entry_at(1, PUSH, 0),
+        lig_entry_at(0, PUSH | ACT, 0),
+    ];
+    let states = [[0, 1, 0, 0], [0, 2, 0, 0]];
+    let actions = [LIG_ACTION_STORE, LIG_ACTION_LAST];
+    let bytes = ligature_morx(&states, &entries, &actions, &[(5, 2)], &[0, 0, 70, 0, 71]);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.apply(&[5, 5]).0, [71]);
+}
+
+#[test]
+fn ligature_action_at_end_of_text_does_nothing() {
+    // State 2's end-of-text entry performs the action. HarfBuzz acts
+    // only on a glyph, so [5, 6] stays as it is.
+    let entries = [
+        lig_entry_at(0, 0, 0),
+        lig_entry_at(1, PUSH, 0),
+        lig_entry_at(2, PUSH, 0),
+        lig_entry_at(0, ACT, 0),
+    ];
+    let states = [[0, 1, 0, 0], [0, 2, 0, 0], [3, 0, 0, 0]];
+    let bytes = ligature_morx(&states, &entries, &[0, LS], &[], &[99]);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.apply(&[5, 6]).0, [5, 6]);
+}
+
+#[test]
+fn ligature_stack_underflow_clears_the_stack() {
+    // The action list wants three components but the stack holds two:
+    // nothing forms and the stack is cleared, so the next action, on
+    // two new components, underflows too instead of reaching back to
+    // the first two.
+    let entries = [
+        lig_entry_at(0, 0, 0),
+        lig_entry_at(1, PUSH, 0),
+        lig_entry_at(0, PUSH | ACT, 0),
+    ];
+    let states = [[0, 1, 0, 0], [0, 2, 0, 0]];
+    let bytes = ligature_morx(&states, &entries, &[0, 0, LS], &[], &[99]);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.apply(&[5, 6, 7, 8]).0, [5, 6, 7, 8]);
+}
+
+#[test]
+fn deleted_components_stay_until_morx_is_done() {
+    // A ligature deletes glyph 1. The contextual subtable after it
+    // still sees that glyph, in the deleted-glyph class (2), and marks
+    // the ligature for substitution there; morx drops the deleted
+    // glyph only at the end, as HarfBuzz does.
+    let lig_entries = [
+        lig_entry_at(0, 0, 0),
+        lig_entry_at(1, PUSH, 0),
+        lig_entry_at(0, PUSH | ACT, 0),
+    ];
+    let lig_refs: Vec<&[u8]> = lig_entries.iter().map(Vec::as_slice).collect();
+    let actions: Vec<u8> = [0, LS].iter().flat_map(|a: &u32| a.to_be_bytes()).collect();
+    let comps = [0u8; 32];
+    let lig = state_body(
+        3,
+        &[[0, 1, 0, 0], [0, 2, 0, 0]],
+        &lig_refs,
+        &[&actions, &comps, &90u16.to_be_bytes()],
+    );
+    let ctx_entries = [
+        ctx_entry(0, FLAG_CTX_SET_MARK, 0xFFFF, 0xFFFF),
+        ctx_entry(0, 0, 0, 0xFFFF),
+    ];
+    let ctx_refs: Vec<&[u8]> = ctx_entries.iter().map(Vec::as_slice).collect();
+    let table = substitution_table(&[build_lookup_format6(&[(90, 77)])]);
+    // Out-of-bounds glyphs set the mark; a deleted glyph substitutes it.
+    let ctx = state_body(1, &[[0, 0, 1, 0]], &ctx_refs, &[&table]);
+    let bytes = wrap_in_chain(&[
+        &subtable(TYPE_LIGATURE, &lig),
+        &subtable(TYPE_CONTEXTUAL, &ctx),
+    ]);
+    let m = Morx::parse(&bytes).unwrap();
+    assert_eq!(m.apply(&[5, 6]), (vec![77], vec![0]));
+}

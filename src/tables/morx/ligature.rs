@@ -3,27 +3,66 @@
 use alloc::vec::Vec;
 
 use super::{
-    class_for, max_steps, FLAG_DONT_ADVANCE, FLAG_LIG_PERFORM_ACTION, FLAG_LIG_SET_COMPONENT,
-    LIG_ACTION_LAST, LIG_ACTION_OFFSET_MASK, LIG_ACTION_OFFSET_SIGN, LIG_ACTION_STORE,
+    class_for, max_steps, DELETED_GLYPH, FLAG_DONT_ADVANCE, FLAG_LIG_PERFORM_ACTION,
+    FLAG_LIG_SET_COMPONENT, LIG_ACTION_LAST, LIG_ACTION_OFFSET_MASK, LIG_ACTION_OFFSET_SIGN,
+    LIG_ACTION_STORE,
 };
 use crate::tables::layout::state_table::{StateTableHeader, CLASS_OUT_OF_BOUNDS};
 
+/// Component positions the stack holds, HarfBuzz's
+/// `HB_MAX_CONTEXT_LENGTH`. Like HarfBuzz's `match_positions`, the
+/// stack is a ring: a push past this many overwrites the oldest entry.
+const STACK_SIZE: usize = 64;
+
+/// The component stack of a ligature subtable pass: glyph positions in
+/// push order, kept as HarfBuzz keeps `match_positions` and
+/// `match_length`.
+struct ComponentStack {
+    positions: [usize; STACK_SIZE],
+    /// Pushes not yet consumed. Can pass [`STACK_SIZE`]; positions
+    /// wrap.
+    len: usize,
+}
+
+impl ComponentStack {
+    fn at(&self, index: usize) -> usize {
+        self.positions[index % STACK_SIZE]
+    }
+
+    /// Pushes position `i`, unless it is already on top: an entry with
+    /// DontAdvance can set the same glyph as a component again, and
+    /// HarfBuzz never marks one index twice.
+    fn push(&mut self, i: usize) {
+        if self.len > 0 && self.at(self.len - 1) == i {
+            self.len -= 1;
+        }
+        self.positions[self.len % STACK_SIZE] = i;
+        self.len += 1;
+    }
+}
+
 // --- Type 2: Ligature substitution ---
 
+/// Runs a ligature subtable over `glyphs` the way HarfBuzz's
+/// `LigatureSubtable` does. Components that a ligature absorbs become
+/// [`DELETED_GLYPH`] in place, so positions stay put for the rest of
+/// the pass; [`super::Morx::apply`] removes them after the last chain,
+/// as HarfBuzz removes deleted glyphs after `morx`.
 pub(super) fn apply_ligature(
     state: &StateTableHeader<'_>,
     lig_actions: &[u8],
     components: &[u8],
     ligatures: &[u8],
-    glyphs: &mut Vec<u16>,
-    origins: &mut Vec<usize>,
+    glyphs: &mut [u16],
+    origins: &mut [usize],
 ) {
     const ENTRY_SIZE: usize = 6; // newState + flags + actionIndex
     let mut cur_state: u16 = 0;
-    let mut component_stack: Vec<usize> = Vec::new();
+    let mut stack = ComponentStack {
+        positions: [0; STACK_SIZE],
+        len: 0,
+    };
     let mut i = 0;
-    // The step cap also bounds the component stack, since each step
-    // pushes at most one entry.
     let max_iters = max_steps(glyphs.len());
     let mut iters = 0usize;
     while i <= glyphs.len() {
@@ -40,20 +79,18 @@ pub(super) fn apply_ligature(
         };
         let action_idx = state.entry_tail_u16(entry_idx, ENTRY_SIZE, 4).unwrap_or(0);
 
-        if flags & FLAG_LIG_SET_COMPONENT != 0 && i < glyphs.len() {
-            component_stack.push(i);
+        if flags & FLAG_LIG_SET_COMPONENT != 0 {
+            stack.push(i);
         }
-        if flags & FLAG_LIG_PERFORM_ACTION != 0 && !component_stack.is_empty() {
-            perform_ligature_action(
-                action_idx,
+        // HarfBuzz performs no action with an empty stack or at the end
+        // of text.
+        if flags & FLAG_LIG_PERFORM_ACTION != 0 && stack.len > 0 && i < glyphs.len() {
+            let tables = ActionTables {
                 lig_actions,
                 components,
                 ligatures,
-                &mut component_stack,
-                glyphs,
-                origins,
-                &mut i,
-            );
+            };
+            perform_ligature_action(action_idx, &tables, &mut stack, glyphs, origins);
         }
 
         cur_state = new_state;
@@ -65,100 +102,91 @@ pub(super) fn apply_ligature(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The three arrays a ligature action reads.
+struct ActionTables<'t> {
+    lig_actions: &'t [u8],
+    components: &'t [u8],
+    ligatures: &'t [u8],
+}
+
+/// Runs the action list that starts at `action_idx`, as HarfBuzz's
+/// `LigatureSubtable::driver_context_t::transition` does. Each action
+/// pops a component off the stack and adds `components[glyph + offset]`
+/// to the ligature index. An action with Store or Last puts
+/// `ligatures[index]` in place of the component it popped, deletes the
+/// components popped since the last store, and leaves the ligature on
+/// the stack for later actions. The index carries on across stores.
+/// Running out of components clears the stack; reading past an array
+/// ends the list.
 fn perform_ligature_action(
     action_idx: u16,
-    lig_actions: &[u8],
-    components: &[u8],
-    ligatures: &[u8],
-    stack: &mut Vec<usize>,
-    glyphs: &mut Vec<u16>,
-    origins: &mut Vec<usize>,
-    cursor: &mut usize,
+    tables: &ActionTables<'_>,
+    stack: &mut ComponentStack,
+    glyphs: &mut [u16],
+    origins: &mut [usize],
 ) {
-    // Walk action entries starting at `action_idx`, summing
-    // component-table lookups into a component-index offset. The
-    // `LAST` bit ends the walk; on the final action, if `STORE` is
-    // set, the offset is used to index the ligature table and emit
-    // the resulting glyph id.
-    let mut offset: i32 = 0;
-    let mut action_pos = action_idx as usize;
-    let mut consumed: Vec<usize> = Vec::new();
+    let mut cursor = stack.len;
+    let mut action_pos = usize::from(action_idx);
+    let mut ligature_idx: u32 = 0;
     loop {
-        let Some(stack_top) = stack.pop() else {
+        if cursor == 0 {
+            // Stack underflow: clear the stack.
+            stack.len = 0;
+            return;
+        }
+        cursor -= 1;
+        let pos = stack.at(cursor);
+        let Some(&glyph) = glyphs.get(pos) else {
             return;
         };
-        consumed.push(stack_top);
-
-        let Some(action) = u32_at(lig_actions, action_pos) else {
+        let Some(action) = u32_at(tables.lig_actions, action_pos) else {
             return;
         };
-
         let raw_off = action & LIG_ACTION_OFFSET_MASK;
-        // Sign-extend from the 30-bit signed offset field to i32. The
-        // `as` casts wrap on purpose: that is the conversion.
-        let signed_off: i32 = if action & LIG_ACTION_OFFSET_SIGN != 0 {
-            (raw_off | 0xC000_0000) as i32
+        // Sign-extend the 30-bit offset. HarfBuzz adds it to the glyph
+        // id in unsigned arithmetic, so a negative sum wraps far past
+        // the end of the component array.
+        let offset = if raw_off & LIG_ACTION_OFFSET_SIGN != 0 {
+            raw_off | 0xC000_0000
         } else {
-            raw_off as i32
+            raw_off
         };
-        // An earlier ligature in this walk removes glyphs but leaves
-        // the stack as is, so a stack entry can point past the run.
-        // Stop the action instead of reading out of bounds.
-        let Some(&glyph) = glyphs.get(stack_top) else {
-            return;
-        };
-        // Cannot overflow: the glyph is at most 0xFFFF and the offset
-        // is a 30-bit signed value.
-        let comp_idx = i32::from(glyph) + signed_off;
-        // A negative index points before the component table. Treat
-        // it like any other out-of-range read.
-        let Some(comp_val) = usize::try_from(comp_idx)
+        let component_idx = u32::from(glyph).wrapping_add(offset);
+        let Some(component) = usize::try_from(component_idx)
             .ok()
-            .and_then(|idx| u16_at(components, idx))
+            .and_then(|idx| u16_at(tables.components, idx))
         else {
             return;
         };
-        offset = offset.wrapping_add(i32::from(comp_val));
+        ligature_idx = ligature_idx.wrapping_add(u32::from(component));
 
-        if action & LIG_ACTION_LAST != 0 {
-            if action & LIG_ACTION_STORE != 0 {
-                let lig_glyph = usize::try_from(offset)
-                    .ok()
-                    .and_then(|idx| u16_at(ligatures, idx));
-                if let Some(lig_glyph) = lig_glyph {
-                    // Replace the earliest consumed slot with the
-                    // ligature, drop the later slots. Sort in
-                    // ascending order so the earliest index lands
-                    // first. Stack was LIFO so the natural order is
-                    // reversed.
-                    consumed.sort_unstable();
-                    let Some((&keep, rest)) = consumed.split_first() else {
-                        return;
-                    };
-                    if let Some(slot) = glyphs.get_mut(keep) {
-                        *slot = lig_glyph;
-                    }
-                    // origins[keep] keeps the smallest originating
-                    // input index so cluster merging finds the
-                    // correct grapheme root.
-                    // Remove every other consumed slot, highest index
-                    // first so earlier indices stay valid. A glyph
-                    // pushed twice shows up twice here, so an earlier
-                    // removal can shorten the run past a later index.
-                    // Skip those.
-                    for &idx in rest.iter().rev() {
-                        if idx >= glyphs.len().min(origins.len()) {
-                            continue;
-                        }
-                        glyphs.remove(idx);
-                        origins.remove(idx);
-                        if idx < *cursor {
-                            *cursor -= 1;
-                        }
-                    }
+        if action & (LIG_ACTION_STORE | LIG_ACTION_LAST) != 0 {
+            let Some(lig) = usize::try_from(ligature_idx)
+                .ok()
+                .and_then(|idx| u16_at(tables.ligatures, idx))
+            else {
+                return;
+            };
+            glyphs[pos] = lig;
+            let lig_end = stack.at(stack.len - 1) + 1;
+            // Delete the components popped since the last store.
+            while stack.len - 1 > cursor {
+                stack.len -= 1;
+                let Some(slot) = glyphs.get_mut(stack.at(stack.len)) else {
+                    return;
+                };
+                *slot = DELETED_GLYPH;
+            }
+            // HarfBuzz merges the clusters from the ligature to the last
+            // component into one; the ligature takes the earliest
+            // origin among them.
+            if let Some(span) = origins.get(pos..lig_end.min(origins.len())) {
+                if let Some(&first) = span.iter().min() {
+                    origins[pos] = first;
                 }
             }
+        }
+        if action & LIG_ACTION_LAST != 0 {
             return;
         }
         action_pos += 1;
@@ -177,4 +205,14 @@ fn u32_at(data: &[u8], index: usize) -> Option<u32> {
     let start = index.checked_mul(4)?;
     let bytes = data.get(start..)?.first_chunk::<4>()?;
     Some(u32::from_be_bytes(*bytes))
+}
+
+/// Removes every [`DELETED_GLYPH`] and its origin.
+pub(super) fn remove_deleted(glyphs: &mut Vec<u16>, origins: &mut Vec<usize>) {
+    if !glyphs.contains(&DELETED_GLYPH) {
+        return;
+    }
+    let mut keep = glyphs.iter().map(|&g| g != DELETED_GLYPH);
+    origins.retain(|_| keep.next().unwrap_or(true));
+    glyphs.retain(|&g| g != DELETED_GLYPH);
 }
