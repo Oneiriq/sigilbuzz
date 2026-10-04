@@ -58,10 +58,14 @@
 //! # Determinism
 //!
 //! The bake patches a writable copy of the source GPOS bytes in place.
-//! Every `VariationIndex` resolution rounds through the same
-//! `add-0.5/subtract-0.5` rule as the HVAR / MVAR bakes so the three
-//! stay in byte-for-byte lockstep. Saturating addition guards against
-//! ValueRecord field overflow on extreme coords.
+//! Every `VariationIndex` resolution rounds the delta half away from
+//! zero (`add-0.5/subtract-0.5`, see [`round_delta`]). That is not the
+//! rule the core shaper applies to the same deltas, which rounds halves
+//! up as HarfBuzz's `roundf` (`floor(x + 0.5)`) does, nor fontTools'
+//! instancer's (`otRound`, also `floor(x + 0.5)`): a delta of exactly
+//! -n.5 bakes one unit below the value shaping the variable font gives.
+//! Saturating addition guards against ValueRecord field overflow on
+//! extreme coords.
 //!
 //! # Work limit
 //!
@@ -93,8 +97,9 @@ use value_records::{walk_pair_pos, walk_single_pos};
 pub(crate) const VARIATION_INDEX_DELTA_FORMAT: u16 = 0x8000;
 
 /// Rounds the variation store's float delta to the nearest design-unit
-/// integer. Matches the rule the HVAR/MVAR/value_record pipelines use
-/// so the four stay in byte-for-byte lockstep.
+/// integer, halves away from zero. The core shaper's value records and
+/// anchors round the same deltas halves up, as HarfBuzz does, so the
+/// two differ on a delta of exactly -n.5 (see the module docs).
 #[must_use]
 #[inline]
 fn round_delta(delta: f32) -> i32 {

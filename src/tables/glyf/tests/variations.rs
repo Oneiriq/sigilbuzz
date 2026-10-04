@@ -429,17 +429,10 @@ fn an_outline_walk_charges_every_visit_to_one_budget() {
         var: Variation::new(Some(&gvar), &[1.0]),
     };
     let mut budget = FlattenBudget::new();
-    let mut flat = FlatGlyph::default();
-    glyf.flatten(
-        &cx,
-        2,
-        None,
-        &Transform::identity(),
-        &mut flat,
-        0,
-        &mut budget,
-    )
-    .unwrap();
+    let flat = glyf
+        .flatten_root(&cx, 2, None, &mut budget)
+        .unwrap()
+        .unwrap();
     assert_eq!(flat.points.len(), 9 * 4);
     assert_eq!(MAX_TUPLE_WORK - budget.work, 4 * 16 + 9 * 18);
 }
@@ -487,18 +480,13 @@ fn a_composite_tree_shares_its_gvar_budget() {
             "{r:?}"
         );
     };
-    let identity = Transform::identity();
-    let mut flat = FlatGlyph::default();
-    let drawn = glyf.flatten(&cx, 2, None, &identity, &mut flat, 0, &mut small());
+    let drawn = glyf.flatten_root(&cx, 2, None, &mut small());
     assert_cap(drawn.map(drop));
     let phantoms = glyf.varied_phantoms(&cx, &metrics, 2, 0, &mut small());
     assert_cap(phantoms.map(drop));
     // The full cap covers the tree.
-    let mut flat = FlatGlyph::default();
     let mut budget = FlattenBudget::new();
-    assert!(glyf
-        .flatten(&cx, 2, None, &identity, &mut flat, 0, &mut budget)
-        .is_ok());
+    assert!(glyf.flatten_root(&cx, 2, None, &mut budget).is_ok());
 }
 
 // The expected points and advances below match HarfBuzz 14.5.0 on the
@@ -664,7 +652,8 @@ fn vertical_phantom_points_take_their_deltas() {
     // vmtx: advance height 1200, top side bearing 80, over the square's
     // header yMax of 1000: phantom point 3 at 1080 and point 4 at -120.
     // The tuple moves them by 40 and -25, so the vertical advance grows
-    // to 1265, and half way to 1232.5, rounded away from zero to 1233.
+    // to 1265, and half way to 1232.5, which the shaper rounds up to
+    // 1233, as HarfBuzz's `roundf` (`floor(x + 0.5)`) does.
     let (glyf_bytes, loca_bytes) = build_tables(&[square()]);
     let loca = Loca::parse(&loca_bytes, IndexToLocFormat::Short, 1).unwrap();
     let glyf = Glyf::new(&glyf_bytes);
@@ -693,8 +682,8 @@ fn vertical_phantom_points_take_their_deltas() {
             .phantom_points_at_coords(&loca, 0, Some(&gvar), &[coord], &metrics)
             .unwrap();
         assert_points(&pp[2..], &[(0.0, top), (0.0, bottom)]);
-        // Rounded half away from zero, as the shaper rounds it.
+        // Rounded halves up, as the shaper rounds it.
         let height = pp[2].1 - pp[3].1;
-        assert_eq!((height + 0.5) as i32, advance, "{height}");
+        assert_eq!(crate::tables::parse::hb_round(height), advance, "{height}");
     }
 }

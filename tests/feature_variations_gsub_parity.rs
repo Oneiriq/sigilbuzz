@@ -1,4 +1,4 @@
-//! GSUB FeatureVariations and `rvrn` against HarfBuzz and rustybuzz.
+//! GSUB FeatureVariations and `rvrn` against HarfBuzz.
 //! `tests/feature_variations_gpos_parity.rs` covers GPOS.
 //!
 //! Rubik Variable (`tests/fixtures/rubik_vf.ttf`) has a GSUB 1.1 whose
@@ -11,14 +11,15 @@
 //!
 //! Every expectation here is HarfBuzz 14.5.0's output (uharfbuzz
 //! 0.56.2, `hb.shape` with `guess_segment_properties`): glyph id,
-//! cluster, x advance, x offset, y offset. rustybuzz 0.20, which reads
-//! FeatureVariations condition format 1, agrees on the user-space
-//! cases, and the tests check that too.
+//! cluster, x advance, x offset, y offset. rustybuzz 0.20 is not a
+//! reference here: through ttf-parser 0.25 it truncates the normalized
+//! `fvar` coordinate to F2DOT14 (`(v * 16384.0) as i16`) and maps that
+//! through `avar` in integer arithmetic, where HarfBuzz rounds it to
+//! 16.16, maps it in floating point, and rounds it to F2DOT14 last, so
+//! at `wght` 700 two of its advances are 1 unit off.
 
 use std::time::{Duration, Instant};
 
-use rustybuzz::ttf_parser::Tag;
-use rustybuzz::{Face as RbFace, UnicodeBuffer, Variation};
 use sigilbuzz::{shape, Blob, Buffer, Face, Feature, Font};
 
 const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
@@ -457,58 +458,16 @@ fn font_rows(
         .collect()
 }
 
-fn rustybuzz_rows(user: f32, text: &str) -> Vec<Row> {
-    let mut face = RbFace::from_slice(RUBIK, 0).unwrap();
-    face.set_variations(&[Variation {
-        tag: Tag::from_bytes(b"wght"),
-        value: user,
-    }]);
-    let mut buffer = UnicodeBuffer::new();
-    buffer.push_str(text);
-    buffer.guess_segment_properties();
-    let out = rustybuzz::shape(&face, &[], buffer);
-    out.glyph_infos()
-        .iter()
-        .zip(out.glyph_positions())
-        .map(|(i, p)| (i.glyph_id, i.cluster, p.x_advance, p.x_offset, p.y_offset))
-        .collect()
-}
-
 #[test]
 fn gsub_rvrn_follows_harfbuzz_in_user_space() {
-    // Glyph ids, clusters, and offsets match exactly. An advance may be
-    // 1 unit off: HarfBuzz rounds the `fvar` coordinate to F2DOT14
-    // before `avar` maps it, and sigilbuzz (like rustybuzz) maps the
-    // unrounded value, so HVAR sees a slightly different coordinate.
-    // At `wght` 700 that moves four advances by 1. The normalized cases
-    // below give both engines the same coordinate and match exactly.
-    let mut advance_diffs = 0;
+    // The coordinates go through `fvar` and `avar` the way HarfBuzz's
+    // `hb_ot_var_normalize_coords` takes them, rounded to 16.16 before
+    // `avar` and to F2DOT14 after, so the advances match exactly too.
     for &(wght, text, expected) in USER {
         let rows = sigilbuzz_rows(None, Some(wght), text, &[]);
-        let without_advance = |rows: &[Row]| -> Vec<(u32, u32, i32, i32)> {
-            rows.iter().map(|&(g, c, _, x, y)| (g, c, x, y)).collect()
-        };
-        assert_eq!(
-            without_advance(&rows),
-            without_advance(expected),
-            "wght {wght} {text:?}"
-        );
-        for (got, want) in rows.iter().zip(expected) {
-            assert!((got.2 - want.2).abs() <= 1, "wght {wght} {text:?}");
-            advance_diffs += usize::from(got.2 != want.2);
-        }
-    }
-    assert!(advance_diffs <= 4, "{advance_diffs} advances differ");
-}
-
-#[test]
-fn gsub_rvrn_follows_rustybuzz_in_user_space() {
-    for &(wght, text, _) in USER {
-        let rows = sigilbuzz_rows(None, Some(wght), text, &[]);
-        assert_eq!(rows, rustybuzz_rows(wght, text), "wght {wght} {text:?}");
+        assert_eq!(rows, expected, "wght {wght} {text:?}");
     }
 }
-
 #[test]
 fn gsub_rvrn_follows_harfbuzz_at_normalized_coordinates() {
     for &(coord, text, expected) in NORMALIZED {

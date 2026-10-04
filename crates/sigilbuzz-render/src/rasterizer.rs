@@ -111,6 +111,10 @@ impl Rasterizer {
     /// is sized to the glyph's bounding box plus a one-pixel margin so
     /// anti-aliased edges don't clip.
     ///
+    /// The outline comes from [`Face::glyph_outline_at_coords`], which
+    /// rounds the coords to F2DOT14 as HarfBuzz and shaping do, so the
+    /// glyph drawn is the one shaping measured.
+    ///
     /// `size_pt` is the rendering size in pixels (the renderer's "em
     /// size"); the function maps font design-units to pixels via
     /// `size_pt / units_per_em`. Y flips so that increasing pixel rows

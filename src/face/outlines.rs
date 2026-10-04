@@ -3,11 +3,12 @@
 
 use alloc::vec::Vec;
 
-use super::{round_f32_to_i16, Face};
+use super::Face;
 use crate::error::{Error, Result};
+use crate::font::f2dot14_coords;
 use crate::tables::glyf::PhantomMetrics;
-use crate::tables::outline::OutlineSink;
-use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Loca, Outline, PathOp};
+use crate::tables::parse::hb_roundf;
+use crate::tables::{tag, Cff, Cff2, Glyf, GlyphBounds, Gvar, Loca, Outline, PathOp, Vmtx};
 
 impl<'a> Face<'a> {
     /// Parses the `loca` table. Pulls the offset format from `head`
@@ -65,10 +66,16 @@ impl<'a> Face<'a> {
     /// Returns the design-unit bounding box for `glyph_id` at the
     /// given normalized axis coords.
     ///
+    /// The coords are first rounded to F2DOT14, multiples of 1/16384
+    /// with halves rounded up, as HarfBuzz stores a font's coords and
+    /// as shaping reads them, so the box is the one shaping uses.
+    /// Coords that all round to zero give the default instance.
+    ///
     /// When the font varies (`gvar` is present and some coord is not
     /// zero), the box is the extent of the varied outline's points,
-    /// off-curve points included, each edge rounded half away from
-    /// zero, as HarfBuzz computes glyph extents. A glyph whose varied
+    /// off-curve points included, each edge rounded as HarfBuzz's
+    /// `roundf` rounds (`floor(x + 0.5)`, halves up), as HarfBuzz
+    /// computes glyph extents. A glyph whose varied
     /// outline has no points, or whose box has no width or no height,
     /// gets an all-zero box, as in HarfBuzz. Otherwise the box
     /// is the static one from [`Face::glyph_bounds`]. `num_contours`
@@ -81,7 +88,8 @@ impl<'a> Face<'a> {
         let Some(base) = self.glyph_bounds(glyph_id)? else {
             return Ok(None);
         };
-        if coords.iter().all(|&c| c == 0.0) {
+        let coords = f2dot14_coords(coords);
+        if coords.is_empty() {
             return Ok(Some(base));
         }
         let Some(gvar) = self.gvar()? else {
@@ -95,20 +103,26 @@ impl<'a> Face<'a> {
         // counts as absent, as HarfBuzz's sanitizer drops it, so it
         // cannot fail the extents of a horizontal run's glyphs.
         let vmtx = self.vmtx().ok().flatten();
+        let vmtx = self.phantom_vmtx(vmtx)?;
         let metrics = PhantomMetrics {
             hmtx: &hmtx,
-            vmtx: vmtx.as_ref(),
+            vmtx: Some(&vmtx),
         };
-        let mut points = PointBox::default();
-        glyf.outline_at_coords(
-            &loca,
-            glyph_id,
-            Some(&gvar),
-            coords,
-            Some(&metrics),
-            &mut points,
-        )?;
-        Ok(Some(points.bounds(base.num_contours)))
+        let tables = (&glyf, &loca, &gvar);
+        varied_glyph_bounds(tables, glyph_id, &coords, &metrics, base.num_contours).map(Some)
+    }
+
+    /// The vertical metrics the phantom points of the glyphs of a walk
+    /// read: `vmtx`, the font's table, or when the font has none
+    /// HarfBuzz's metrics for that case (see [`Vmtx::missing`]), a top
+    /// side bearing of zero and an advance of an em. A component
+    /// anchored to a vertical phantom point then lands where HarfBuzz
+    /// puts it.
+    pub(crate) fn phantom_vmtx(&self, vmtx: Option<Vmtx<'a>>) -> Result<Vmtx<'a>> {
+        match vmtx {
+            Some(vmtx) => Ok(vmtx),
+            None => Ok(Vmtx::missing(self.head()?.units_per_em)),
+        }
     }
 
     /// Parses the `CFF ` (Compact Font Format 1) table.
@@ -142,6 +156,15 @@ impl<'a> Face<'a> {
     /// table's own Variation Store via the `blend` charstring
     /// operator. An empty `coords` slice is equivalent to the static
     /// outline and is the cheap path taken by [`Face::glyph_outline`].
+    ///
+    /// The coords are first rounded to F2DOT14, multiples of 1/16384
+    /// with halves rounded up: HarfBuzz rounds a font's coords to that
+    /// precision when they are set, and shaping reads them the same
+    /// way, so a glyph drawn here at a `Font`'s coords is the glyph
+    /// shaping measured and HarfBuzz draws. Coords that all round to
+    /// zero draw the default instance. The table-level methods
+    /// ([`Glyf::outline_at_coords`], [`Cff2::outline`]) take coords as
+    /// given.
     pub fn glyph_outline_at_coords(
         &self,
         glyph_id: u16,
@@ -151,7 +174,8 @@ impl<'a> Face<'a> {
             components_left: MAX_VARC_COMPONENTS,
             ops_left: MAX_VARC_OPS,
         };
-        self.glyph_outline_at_coords_inner(glyph_id, coords, 0, &mut budget)
+        let coords = f2dot14_coords(coords);
+        self.glyph_outline_at_coords_inner(glyph_id, &coords, 0, &mut budget)
     }
 
     /// Recursive entry point used by VARC composite resolution.
@@ -241,12 +265,14 @@ impl<'a> Face<'a> {
         // Phantom metrics let composite anchor-mode resolve indices
         // past the contour-point count (lsb / advance-width / tsb /
         // advance-height). hmtx is required by every TrueType font;
-        // vmtx is optional and only horizontal-only fonts skip it.
+        // vmtx is optional, and a font without it gets HarfBuzz's
+        // vertical metrics for one.
         let hmtx = self.hmtx()?;
         let vmtx = self.vmtx()?;
+        let vmtx = self.phantom_vmtx(vmtx)?;
         let metrics = PhantomMetrics {
             hmtx: &hmtx,
-            vmtx: vmtx.as_ref(),
+            vmtx: Some(&vmtx),
         };
 
         // gvar moves simple glyphs' points and composite glyphs'
@@ -269,9 +295,29 @@ impl<'a> Face<'a> {
     }
 }
 
-/// Bounding box of every point an outline walk emits, off-curve
-/// points included. Implied on-curve points lie between two emitted
-/// points, so they never widen it.
+/// The box of glyph `glyph_id`'s outline walked at `coords` with the
+/// `glyf`, `loca` and `gvar` of `tables`, as
+/// [`Face::glyph_bounds_at_coords`] computes it away from the default
+/// instance, with `num_contours` from the glyph header. The shaper's
+/// glyph extents call it with tables it reads once per shaping call.
+pub(crate) fn varied_glyph_bounds(
+    tables: (&Glyf<'_>, &Loca<'_>, &Gvar<'_>),
+    glyph_id: u16,
+    coords: &[f32],
+    metrics: &PhantomMetrics<'_>,
+    num_contours: i16,
+) -> Result<GlyphBounds> {
+    let (glyf, loca, gvar) = tables;
+    let mut points = PointBox::default();
+    glyf.points_at_coords(loca, glyph_id, Some(gvar), coords, Some(metrics), |x, y| {
+        points.add(x, y);
+    })?;
+    Ok(points.bounds(num_contours))
+}
+
+/// Bounding box of every point of an outline walk, off-curve points
+/// included. Implied on-curve points lie between two of them, so they
+/// never widen it.
 struct PointBox {
     min: (f32, f32),
     max: (f32, f32),
@@ -292,9 +338,10 @@ impl PointBox {
         self.max = (self.max.0.max(x), self.max.1.max(y));
     }
 
-    /// The box rounded half away from zero, or all zeros when it is
-    /// empty: no point was seen, or it has no width or no height, as
-    /// HarfBuzz's `contour_bounds_t::empty` decides before rounding.
+    /// The box rounded as HarfBuzz's `roundf` rounds, halves up, or all
+    /// zeros when it is empty: no point was seen, or it has no width or
+    /// no height, as HarfBuzz's `contour_bounds_t::empty` decides before
+    /// rounding.
     fn bounds(&self, num_contours: i16) -> GlyphBounds {
         if self.min.0 >= self.max.0 || self.min.1 >= self.max.1 {
             return GlyphBounds {
@@ -305,33 +352,15 @@ impl PointBox {
                 num_contours,
             };
         }
+        let round = |v: f32| hb_roundf(v).clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
         GlyphBounds {
-            x_min: round_f32_to_i16(self.min.0),
-            y_min: round_f32_to_i16(self.min.1),
-            x_max: round_f32_to_i16(self.max.0),
-            y_max: round_f32_to_i16(self.max.1),
+            x_min: round(self.min.0),
+            y_min: round(self.min.1),
+            x_max: round(self.max.0),
+            y_max: round(self.max.1),
             num_contours,
         }
     }
-}
-
-impl OutlineSink for PointBox {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.add(x, y);
-    }
-    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
-        self.add(cx, cy);
-        self.add(x, y);
-    }
-    fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
-        self.add(c1x, c1y);
-        self.add(c2x, c2y);
-        self.add(x, y);
-    }
-    fn close(&mut self) {}
 }
 
 /// Most VARC components one outline request may resolve, summed over
@@ -415,9 +444,97 @@ mod tests {
     }
 
     #[test]
-    fn a_point_box_rounds_its_edges_half_away_from_zero() {
+    fn outlines_and_bounds_read_coords_at_f2dot14_precision() {
+        // A subset of Hahmlet, whose `wght` axis runs from 100 to 900.
+        let data = include_bytes!("../../tests/fixtures/hahmlet_gvar_subset.ttf");
+        let blob = crate::Blob::new(data);
+        let face = Face::parse(&blob, 0).unwrap();
+        // Glyph 4 is `O`. 0.3 is no multiple of 1/16384: HarfBuzz keeps
+        // it as round(0.3 * 16384) = 4915, and so does shaping.
+        let o = 4;
+        let rounded = [4915.0 / 16384.0];
+        let outline = face.glyph_outline_at_coords(o, &[0.3]).unwrap();
+        assert_eq!(outline, face.glyph_outline_at_coords(o, &rounded).unwrap());
+        assert_eq!(
+            face.glyph_bounds_at_coords(o, &[0.3]).unwrap(),
+            face.glyph_bounds_at_coords(o, &rounded).unwrap()
+        );
+        // The table-level walk takes 0.3 as given, and draws another
+        // outline.
+        let (loca, glyf, gvar) = (
+            face.loca().unwrap(),
+            face.glyf().unwrap(),
+            face.gvar().unwrap(),
+        );
+        let mut exact = Outline::new();
+        glyf.outline_at_coords(&loca, o, gvar.as_ref(), &[0.3], None, &mut exact)
+            .unwrap();
+        assert_ne!(outline, Some(exact));
+        // A coord under half a unit is the default instance.
+        assert_eq!(
+            face.glyph_outline_at_coords(o, &[1.0 / 40000.0]).unwrap(),
+            face.glyph_outline(o).unwrap()
+        );
+    }
+
+    #[test]
+    fn varied_bounds_from_the_points_box_the_drawn_outline() {
+        // The varied box reads the walked points without drawing the
+        // outline; the drawing only adds points between two of them,
+        // so the box is the same.
+        for data in [
+            &include_bytes!("../../tests/fixtures/hahmlet_gvar_subset.ttf")[..],
+            &include_bytes!("../../tests/fixtures/rubik_vf.ttf")[..],
+        ] {
+            let blob = crate::Blob::new(data);
+            let face = Face::parse(&blob, 0).unwrap();
+            let (loca, glyf, hmtx) = (
+                face.loca().unwrap(),
+                face.glyf().unwrap(),
+                face.hmtx().unwrap(),
+            );
+            let gvar = face.gvar().unwrap().unwrap();
+            let vmtx = face.phantom_vmtx(None).unwrap();
+            let metrics = PhantomMetrics {
+                hmtx: &hmtx,
+                vmtx: Some(&vmtx),
+            };
+            for coords in [[1.0], [-0.625], [6145.0 / 16384.0]] {
+                for gid in 0..face.maxp().unwrap().num_glyphs {
+                    let mut drawn = PointBox::default();
+                    let mut sink = Outline::new();
+                    glyf.outline_at_coords(
+                        &loca,
+                        gid,
+                        Some(&gvar),
+                        &coords,
+                        Some(&metrics),
+                        &mut sink,
+                    )
+                    .unwrap();
+                    for op in sink.ops() {
+                        match *op {
+                            PathOp::MoveTo { x, y } | PathOp::LineTo { x, y } => drawn.add(x, y),
+                            PathOp::QuadTo { cx, cy, x, y } => {
+                                drawn.add(cx, cy);
+                                drawn.add(x, y);
+                            }
+                            PathOp::CubicTo { .. } | PathOp::Close => {}
+                        }
+                    }
+                    let tables = (&glyf, &loca, &gvar);
+                    let got = varied_glyph_bounds(tables, gid, &coords, &metrics, 1).unwrap();
+                    assert_eq!(got, drawn.bounds(1), "glyph {gid} at {coords:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_point_box_rounds_its_edges_halves_up() {
+        // HarfBuzz's roundf is floor(x + 0.5): -10.5 goes up to -10.
         let b = bounds(&[(-10.5, 0.4), (99.5, 200.6)]);
-        assert_eq!(edges(b), [-11, 0, 100, 201]);
+        assert_eq!(edges(b), [-10, 0, 100, 201]);
         assert_eq!(b.num_contours, 1);
     }
 

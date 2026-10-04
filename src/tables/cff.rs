@@ -47,7 +47,7 @@ use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 
-pub(crate) use charstring::{BlendContext, Interp2};
+pub(crate) use charstring::{BlendContext, CharstringSink, Interp2, RegionCache};
 pub(crate) use dict::FdSelect;
 pub(crate) use index::{read_index2, Index};
 
@@ -205,6 +205,12 @@ impl<'a> Cff<'a> {
     /// own charstring drew, then the base glyph, then the accent glyph
     /// moved to the accent origin.
     pub fn outline<S: OutlineSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
+        self.draw(glyph_id, sink)
+    }
+
+    /// [`Cff::outline`] into any [`CharstringSink`], such as one that
+    /// keeps the points in the `f64` the charstring is evaluated in.
+    pub(crate) fn draw<S: CharstringSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
         let gid = usize::from(glyph_id);
         if gid >= self.char_strings.len() {
             return Ok(false);
@@ -219,12 +225,12 @@ impl<'a> Cff<'a> {
     /// Runs glyph `gid`'s charstring into `sink` and returns the seac
     /// its `endchar` asked for. `component` is the origin of a seac base
     /// or accent; a seac inside one fails.
-    fn run_charstring<S: OutlineSink>(
+    fn run_charstring<S: CharstringSink>(
         &self,
         gid: usize,
         local_subrs: Index<'a>,
         sink: &mut S,
-        component: Option<(f32, f32)>,
+        component: Option<(f64, f64)>,
     ) -> Result<Option<Seac>> {
         let cs = self.char_strings.get(gid)?;
         let mut interp = Interp::new(self.global_subrs, local_subrs, sink, false);
@@ -243,7 +249,7 @@ impl<'a> Cff<'a> {
     /// `(adx, ady)`, finding both through the charset. Both use the
     /// Local Subrs of the glyph that asked for them. CID-keyed fonts
     /// name glyphs by CID, not SID, so seac is unsupported there.
-    fn draw_seac<S: OutlineSink>(
+    fn draw_seac<S: CharstringSink>(
         &self,
         seac: Seac,
         local_subrs: Index<'a>,

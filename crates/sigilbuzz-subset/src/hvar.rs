@@ -862,7 +862,8 @@ mod tests {
             .map(|g| vvar.top_side_bearing_delta(g, &coords))
             .collect();
         assert_eq!(tsbs, [Some(40.0), Some(20.0), Some(40.0)]);
-        // The core parser skips the vertical origin map; read it here.
+        // The vertical origin map, read by hand from the bytes and
+        // through the core parser's `Vvar::vorg_delta`.
         let store = ItemVariationStore::parse(&out[offset_at(&out, STORE_SLOT)..]).unwrap();
         let vorg_off = offset_at(&out, VVAR_VORG_SLOT);
         let origins: Vec<f32> = (0..3)
@@ -872,6 +873,8 @@ mod tests {
             })
             .collect();
         assert_eq!(origins, [10.0, 30.0, 30.0]);
+        let parsed: Vec<Option<f32>> = (0..3).map(|g| vvar.vorg_delta(g, &coords)).collect();
+        assert_eq!(parsed, [Some(10.0), Some(30.0), Some(30.0)]);
     }
 
     #[test]

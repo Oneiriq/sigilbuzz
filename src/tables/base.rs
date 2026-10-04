@@ -83,7 +83,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::parse::Reader;
+use crate::tables::parse::{hb_round, Reader};
 use crate::tables::variation_store::ItemVariationStore;
 
 /// A parsed `BASE` table.
@@ -404,16 +404,12 @@ impl<'a> BaseScript<'a> {
             return Some(coord);
         };
         let delta = store.delta(outer, inner, coords);
-        // Round-half-away-from-zero, saturating into i16. Matches
-        // the convention used elsewhere in sigilbuzz for variable
-        // metrics rounding.
-        let adj = if delta >= 0.0 {
-            delta + 0.5
-        } else {
-            delta - 0.5
-        };
-        let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32) as i16;
-        Some(coord.saturating_add(clamped))
+        // HarfBuzz's BaseCoordFormat3 adds the VariationDevice delta
+        // rounded with `roundf`, which hb-algs.hh makes
+        // `floor(x + 0.5)`: halves round up, so -2.5 moves the
+        // coordinate by -2. The sum saturates into i16.
+        let sum = i32::from(coord).saturating_add(hb_round(delta));
+        Some(sum.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
     }
 
     /// Resolves `(coordinate, optional VariationIndex)` for the

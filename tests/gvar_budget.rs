@@ -289,3 +289,106 @@ fn shaping_the_crafted_font_keeps_the_static_advances() {
         .iter()
         .all(|g| g.glyph_id == u32::from(c.root) && g.x_advance == 600));
 }
+
+/// The glyphs of `c`, cut out of its `glyf` by its long `loca`.
+fn glyphs_of(c: &Crafted) -> Vec<Vec<u8>> {
+    let offsets: Vec<usize> = c
+        .loca
+        .chunks(4)
+        .map(|o| u32::from_be_bytes([o[0], o[1], o[2], o[3]]) as usize)
+        .collect();
+    offsets
+        .windows(2)
+        .map(|w| c.glyf[w[0]..w[1]].to_vec())
+        .collect()
+}
+
+/// `c` with its `glyf` and `loca` rebuilt from `glyphs`.
+fn set_glyphs(c: &mut Crafted, glyphs: &[Vec<u8>]) {
+    c.glyf.clear();
+    c.loca.clear();
+    for g in glyphs {
+        be32(&mut c.loca, c.glyf.len() as u32);
+        c.glyf.extend_from_slice(g);
+    }
+    be32(&mut c.loca, c.glyf.len() as u32);
+}
+
+/// A glyph header with no contours and two bytes of padding: put in
+/// front, it moves every other glyph 12 bytes into `glyf`.
+fn leading_glyph() -> Vec<u8> {
+    vec![0; 12]
+}
+
+/// A simple glyph of one contour of `points` on-curve points, all at
+/// the origin.
+fn many_point_glyph(points: u16) -> Vec<u8> {
+    let mut g = Vec::new();
+    for v in [1i16, 0, 0, 0, 0] {
+        g.extend_from_slice(&v.to_be_bytes());
+    }
+    be16(&mut g, points - 1); // endPtsOfContours
+    be16(&mut g, 0); // instruction length
+    let mut left = points;
+    while left > 0 {
+        let run = left.min(256);
+        // On curve, x and y the same as before, repeated.
+        g.extend_from_slice(&[0x39, (run - 1) as u8]);
+        left -= run;
+    }
+    g
+}
+
+fn assert_over_glyph_budget<T: std::fmt::Debug>(result: Result<T, Error>, at: usize, what: &str) {
+    match result {
+        Err(Error::Malformed { offset, context }) if context == what => {
+            assert_eq!(offset, at, "{context}");
+        }
+        other => panic!("expected {what:?} at {at}, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_glyph_count_budget_reports_the_glyph_that_ran_over() {
+    // Five levels of 15 components visit 813,616 glyphs; the 65,537th,
+    // one past the cap, is a square, which now sits at byte 12.
+    let mut c = crafted(5, 15, 1, true);
+    let mut glyphs = glyphs_of(&c);
+    glyphs[0] = leading_glyph();
+    set_glyphs(&mut c, &glyphs);
+    let bytes = sfnt(&c);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let what = "glyf composite visits too many glyphs";
+    assert_over_glyph_budget(face.glyph_outline_at_coords(c.root, &[]), 12, what);
+    // The phantom-point walk through the USE_MY_METRICS components
+    // shares the cap.
+    let loca = Loca::parse(&c.loca, IndexToLocFormat::Long, c.num_glyphs).unwrap();
+    let hmtx = Hmtx::parse(&c.hmtx, c.num_glyphs, c.num_glyphs).unwrap();
+    let metrics = PhantomMetrics {
+        hmtx: &hmtx,
+        vmtx: None,
+    };
+    let glyf = Glyf::new(&c.glyf);
+    let phantoms = glyf.phantom_points_at_coords(&loca, c.root, None, &[], &metrics);
+    assert_over_glyph_budget(phantoms, 12, what);
+}
+
+#[test]
+fn the_point_budget_reports_the_glyph_that_ran_over() {
+    // 225 copies of a 2,000-point glyph: the 132nd overruns the cap of
+    // 262,144 points.
+    let mut c = crafted(2, 15, 1, false);
+    let mut glyphs = glyphs_of(&c);
+    glyphs[0] = leading_glyph();
+    glyphs[1] = many_point_glyph(2000);
+    set_glyphs(&mut c, &glyphs);
+    let bytes = sfnt(&c);
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    assert_over_glyph_budget(
+        face.glyph_outline_at_coords(c.root, &[]),
+        12,
+        "glyf composite expands to too many points",
+    );
+}

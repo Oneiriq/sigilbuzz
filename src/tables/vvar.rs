@@ -17,7 +17,7 @@
 //!   Offset32  advanceHeightMappingOffset      (may be 0, use gid)
 //!   Offset32  tsbMappingOffset                (optional)
 //!   Offset32  bsbMappingOffset                (optional, unused here)
-//!   Offset32  vorgMappingOffset               (optional, unused here)
+//!   Offset32  vorgMappingOffset               (optional)
 //! ```
 //!
 //! Each mapping offset, when non-zero, points at a
@@ -35,6 +35,7 @@ pub struct Vvar<'a> {
     store: ItemVariationStore<'a>,
     advance_map_off: u32,
     tsb_map_off: u32,
+    vorg_map_off: u32,
 }
 
 impl<'a> Vvar<'a> {
@@ -53,7 +54,7 @@ impl<'a> Vvar<'a> {
         let advance_map_off = r.read_u32()?;
         let tsb_map_off = r.read_u32()?;
         let _bsb_off = r.read_u32()?;
-        let _vorg_off = r.read_u32()?;
+        let vorg_map_off = r.read_u32()?;
 
         let store = ItemVariationStore::parse(data.get(store_off..).ok_or(Error::Malformed {
             offset: store_off,
@@ -65,6 +66,7 @@ impl<'a> Vvar<'a> {
             store,
             advance_map_off,
             tsb_map_off,
+            vorg_map_off,
         })
     }
 
@@ -95,6 +97,22 @@ impl<'a> Vvar<'a> {
             return None;
         }
         let (outer, inner) = read_index_map(self.data, self.tsb_map_off as usize, glyph_id)?;
+        Some(self.store.delta(outer, inner, coords))
+    }
+
+    /// Returns the vertical-origin delta for `glyph_id` at the given
+    /// normalized coords: how far the glyph's `VORG` origin moves. As
+    /// in HarfBuzz's `get_vorg_delta_unscaled`, a table without a
+    /// vertical origin mapping has no deltas; this returns `None`
+    /// then, and for a glyph the mapping has no entry for.
+    ///
+    /// The caller adds it to the `VORG` value and rounds the sum.
+    #[must_use]
+    pub fn vorg_delta(&self, glyph_id: u16, coords: &[f32]) -> Option<f32> {
+        if self.vorg_map_off == 0 {
+            return None;
+        }
+        let (outer, inner) = read_index_map(self.data, self.vorg_map_off as usize, glyph_id)?;
         Some(self.store.delta(outer, inner, coords))
     }
 }
@@ -269,6 +287,27 @@ mod tests {
         let vvar = Vvar::parse(&out).unwrap();
         let d = vvar.top_side_bearing_delta(0, &[1.0]).unwrap();
         assert!((d - 40.0).abs() < 1e-3);
+    }
+
+    /// The vertical origin delta reads the last mapping offset, and a
+    /// table without that mapping has none, as in HarfBuzz.
+    #[test]
+    fn vorg_delta_resolves_through_its_own_index_map() {
+        let ivs = build_ivs_one_axis_one_region_one_item(-30);
+        assert!(Vvar::parse(&build_vvar_without_maps(&ivs))
+            .unwrap()
+            .vorg_delta(0, &[1.0])
+            .is_none());
+        let mut out = build_vvar_without_maps(&ivs);
+        let map_off = out.len() as u32;
+        out[20..24].copy_from_slice(&map_off.to_be_bytes());
+        // Format 0, 1-byte entries with 1 inner bit, one entry: (0, 0).
+        out.extend_from_slice(&[0, 0, 0, 1, 0]);
+        let vvar = Vvar::parse(&out).unwrap();
+        assert_eq!(vvar.vorg_delta(0, &[1.0]), Some(-30.0));
+        assert_eq!(vvar.vorg_delta(0, &[0.5]), Some(-15.0));
+        // The other mappings are still absent.
+        assert!(vvar.top_side_bearing_delta(0, &[1.0]).is_none());
     }
 
     #[test]

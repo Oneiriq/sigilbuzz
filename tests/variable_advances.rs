@@ -289,3 +289,73 @@ fn a_vertical_run_without_vvar_takes_advances_from_phantom_points() {
         advances(&intact, &coords, "O").unwrap()
     );
 }
+
+/// An `ItemVariationStore` with one region, peaking at the top of the
+/// first axis, and one item per glyph, each moving by `delta` there.
+fn ivs_every_glyph(glyphs: u16, delta: i16) -> Vec<u8> {
+    let mut ivs = Vec::new();
+    // Format 1, the region list at 12, one data subtable at 22.
+    ivs.extend_from_slice(&1u16.to_be_bytes());
+    ivs.extend_from_slice(&12u32.to_be_bytes());
+    ivs.extend_from_slice(&1u16.to_be_bytes());
+    ivs.extend_from_slice(&22u32.to_be_bytes());
+    // One axis, one region: start 0, peak 1, end 1.
+    for v in [1u16, 1, 0, 0x4000, 0x4000] {
+        ivs.extend_from_slice(&v.to_be_bytes());
+    }
+    // `glyphs` items of one word delta each, for region 0.
+    for v in [glyphs, 1, 1, 0] {
+        ivs.extend_from_slice(&v.to_be_bytes());
+    }
+    for _ in 0..glyphs {
+        ivs.extend_from_slice(&delta.to_be_bytes());
+    }
+    ivs
+}
+
+#[test]
+fn varied_advances_stop_at_zero() {
+    // HarfBuzz adds the rounded HVAR (or VVAR) delta to the advance
+    // and stops at zero: `hb_max (0, advance + roundf (delta))`.
+    // Hahmlet with an HVAR and a VVAR that take 5000 units off every
+    // advance at wght 900, and a vmtx of 1000-unit advances.
+    let ivs = ivs_every_glyph(12, -5000);
+    let mut hvar = vec![0, 1, 0, 0];
+    hvar.extend_from_slice(&20u32.to_be_bytes());
+    hvar.extend_from_slice(&[0; 12]);
+    hvar.extend_from_slice(&ivs);
+    let mut vvar = vec![0, 1, 0, 0];
+    vvar.extend_from_slice(&24u32.to_be_bytes());
+    vvar.extend_from_slice(&[0; 16]);
+    vvar.extend_from_slice(&ivs);
+    let mut vhea = broken_vhea();
+    vhea[34..36].copy_from_slice(&12u16.to_be_bytes());
+    let vmtx: Vec<u8> = (0..12).flat_map(|_| [0x03, 0xE8, 0, 50]).collect();
+    let bytes = with_tables(
+        HAHMLET,
+        &[
+            (b"HVAR", hvar),
+            (b"VVAR", vvar),
+            (b"vhea", vhea),
+            (b"vmtx", vmtx),
+        ],
+    );
+    let blob = Blob::new(&bytes);
+    let face = Face::parse(&blob, 0).unwrap();
+    let y_advances = |coords: &[f32]| {
+        let font = Font::new(face.clone(), 1000.0).with_coords(coords);
+        let mut buffer = Buffer::new();
+        buffer.push_str("AO ");
+        buffer.set_direction(sigilbuzz::Direction::Ttb);
+        let run = shape(&font, &buffer, &[]).unwrap();
+        run.glyphs.iter().map(|g| g.y_advance).collect::<Vec<_>>()
+    };
+    // HarfBuzz 14.5.0 gives the same advances.
+    assert_eq!(advances(&face, &[], "AO ").unwrap(), [834, 891, 248]);
+    assert_eq!(y_advances(&[]), [-1000, -1000, -1000]);
+    for wght in [650.0, 900.0] {
+        let coords = hahmlet_coords(&face, wght);
+        assert_eq!(advances(&face, &coords, "AO ").unwrap(), [0, 0, 0]);
+        assert_eq!(y_advances(&coords), [0, 0, 0]);
+    }
+}

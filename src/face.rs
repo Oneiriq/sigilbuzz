@@ -45,6 +45,7 @@ use crate::tables::parse::Reader;
 use crate::tables::{tag, Cmap, Head, Hhea, Hmtx, Maxp, Name, Vhea, Vmtx, Vorg};
 
 pub use color::GlyphBitmapEntry;
+pub(crate) use outlines::varied_glyph_bounds;
 
 /// One entry in the SFNT table directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,17 +68,6 @@ pub struct Face<'a> {
     data: &'a [u8],
     sfnt_version: u32,
     records: Vec<TableRecord>,
-}
-
-/// Rounds a float to the nearest `i16`, saturating at the type bounds.
-/// A `no_std`-friendly replacement for `f32::round() as i16`, which
-/// would otherwise drag in `libm`. NaN maps to `i16::MIN`.
-fn round_f32_to_i16(v: f32) -> i16 {
-    // Add-half trick: positive -> +0.5 then truncate, negative ->
-    // -0.5 then truncate. The clamp makes the saturation explicit.
-    let adj = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
-    let clamped = adj.max(i16::MIN as f32).min(i16::MAX as f32);
-    clamped as i16
 }
 
 use crate::ttc::TTCF_MAGIC;
