@@ -241,6 +241,13 @@ pub(crate) struct DirectAccel<'a> {
 
 /// Subtables whose coverages a [`DirectAccel`] keeps inline.
 const INLINE_COVERAGES: usize = 4;
+/// Subtables whose coverages a [`DirectAccel`] reads at most. Past them
+/// a lookup's subtables admit every glyph and are parsed when a glyph
+/// reaches them, as every subtable was before the accelerators. Real
+/// lookups stay far below it (Noto Sans KR's `ccmp` has 268), and a
+/// hostile one of tens of thousands then costs an application no more
+/// reading than its subtables' parsing.
+const MAX_DIRECT_COVERAGES: usize = 1024;
 
 impl<'a> DirectAccel<'a> {
     fn new(table: LayoutTable, lookup: &Lookup<'a>) -> Self {
@@ -255,13 +262,15 @@ impl<'a> DirectAccel<'a> {
         }
         let rest = (0..lookup.subtable_count())
             .skip(INLINE_COVERAGES)
+            .take(MAX_DIRECT_COVERAGES - INLINE_COVERAGES)
             .map(coverage)
             .collect();
         Self { first, rest, count }
     }
 
     /// Subtable `index`'s coverage: `Some(None)` for a subtable without
-    /// one sigilbuzz reads, `None` past the last subtable.
+    /// one sigilbuzz reads, `None` past the last subtable or past
+    /// [`MAX_DIRECT_COVERAGES`].
     #[inline]
     fn coverage(&self, index: usize) -> Option<&Option<Coverage<'a>>> {
         if index >= self.count {
@@ -280,7 +289,7 @@ impl<'a> DirectAccel<'a> {
     }
 
     fn covers_any(&self, glyph: u16) -> bool {
-        (0..self.count).any(|i| self.covers(i, glyph))
+        self.count > MAX_DIRECT_COVERAGES || (0..self.count).any(|i| self.covers(i, glyph))
     }
 }
 
@@ -847,6 +856,22 @@ mod tests {
             let data = list_of(&targets, &[&a, &b]);
             assert!(shared_lookups(&LookupList::parse(&data).unwrap()).is_empty());
         }
+    }
+
+    #[test]
+    fn direct_reads_stop_at_their_cap() {
+        let subs: Vec<Vec<u8>> = (0..MAX_DIRECT_COVERAGES as u16 + 3)
+            .map(|g| single(&[g]))
+            .collect();
+        let data = lookup_list(1, &subs);
+        let list = LookupList::parse(&data).unwrap();
+        let accel = DirectAccel::new(LayoutTable::Gsub, &list.get(0).unwrap());
+        assert_eq!(accel.rest.len(), MAX_DIRECT_COVERAGES - INLINE_COVERAGES);
+        assert!(accel.covers(7, 7));
+        assert!(!accel.covers(7, 8));
+        // Past the cap, every glyph is admitted.
+        assert!(accel.covers(MAX_DIRECT_COVERAGES + 1, 8));
+        assert!(accel.covers_any(60_000));
     }
 
     #[test]
