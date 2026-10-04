@@ -314,6 +314,10 @@ const MAX_KEPT_LEAF_OPS: usize = 1 << 18;
 /// Leaf work per charstring operation a CFF or `CFF2` leaf runs.
 const CHARSTRING_OP_WORK: usize = 4;
 
+/// A leaf outline [`Leaves`] keeps: the coords it was drawn at, as `f32`
+/// bits, and the outline, `None` when it drew nothing.
+type KeptLeaf = (Vec<u32>, Option<Rc<Outline>>);
+
 /// The leaves of a walk: the tables they are drawn from, read the first
 /// time a leaf needs them, in the order [`Face::glyph_outline_at_coords`]
 /// reads them for a glyph `VARC` does not draw, and kept for the walk
@@ -325,12 +329,15 @@ struct Leaves<'a> {
     tables: OnceCell<Result<LeafTables<'a>>>,
     /// Read for the first leaf away from the default instance.
     gvar: OnceCell<Result<Option<Gvar<'a>>>>,
-    /// Outlines by glyph and coords (as `f32` bits); `None` for a leaf
-    /// that drew nothing. The coords were charged to the walk's work
-    /// when its components were built, so the keys are bounded by it.
-    drawn: BTreeMap<(u16, Vec<u32>), Option<Rc<Outline>>>,
-    /// What the `CFF2` leaves drawn at one coord vector share.
-    cff2_shared: BTreeMap<Vec<u32>, Cff2Shared<'a>>,
+    /// Outlines by glyph and coords (as `f32` bits), bucketed by the
+    /// glyph and [`coords_hash`] so a lookup compares long coord
+    /// vectors once; `None` for a leaf that drew nothing. The coords
+    /// were charged to the walk's work when its components were built,
+    /// so the keys are bounded by it.
+    drawn: BTreeMap<(u16, u64), Vec<KeptLeaf>>,
+    /// What the `CFF2` leaves drawn at one coord vector share, bucketed
+    /// the same way.
+    cff2_shared: BTreeMap<u64, Vec<(Vec<u32>, Cff2Shared<'a>)>>,
     /// See [`MAX_LEAF_WORK`].
     work: usize,
     /// See [`MAX_KEPT_LEAF_OPS`].
@@ -374,30 +381,35 @@ impl<'a> Leaves<'a> {
         gid: u16,
         coords: &[f32],
     ) -> Result<Option<Rc<Outline>>> {
-        let key = (
-            gid,
-            coords.iter().map(|c| c.to_bits()).collect::<Vec<u32>>(),
-        );
-        if let Some(known) = self.drawn.get(&key) {
-            return Ok(known.clone());
+        let bits: Vec<u32> = coords.iter().map(|c| c.to_bits()).collect();
+        let hash = coords_hash(&bits);
+        let known = self
+            .drawn
+            .get(&(gid, hash))
+            .and_then(|bucket| bucket.iter().find(|(key, _)| *key == bits));
+        if let Some((_, outline)) = known {
+            return Ok(outline.clone());
         }
-        let outline = self.draw(face, gid, coords, &key.1)?.map(Rc::new);
+        let outline = self.draw(face, gid, coords, &bits, hash)?.map(Rc::new);
         let ops = outline.as_ref().map_or(0, |o| o.len());
         if ops <= self.kept_ops_left {
             self.kept_ops_left -= ops;
-            self.drawn.insert(key, outline.clone());
+            let bucket = self.drawn.entry((gid, hash)).or_default();
+            bucket.push((bits, outline.clone()));
         }
         Ok(outline)
     }
 
     /// Draws a leaf [`Leaves::outline`] has not drawn yet, charging its
-    /// work. `bits` are the coords as `f32` bits.
+    /// work. `bits` are the coords as `f32` bits, `hash` their
+    /// [`coords_hash`].
     fn draw(
         &mut self,
         face: &Face<'a>,
         gid: u16,
         coords: &[f32],
         bits: &[u32],
+        hash: u64,
     ) -> Result<Option<Outline>> {
         if self.work == 0 {
             return Ok(None);
@@ -410,8 +422,14 @@ impl<'a> Leaves<'a> {
         let mut out = Outline::new();
         let drew = match tables {
             LeafTables::Cff2(cff2) => {
-                let fresh = !self.cff2_shared.contains_key(bits);
-                let shared = self.cff2_shared.entry(bits.to_vec()).or_default();
+                let bucket = self.cff2_shared.entry(hash).or_default();
+                let at = bucket.iter().position(|(key, _)| key == bits);
+                let fresh = at.is_none();
+                let at = at.unwrap_or_else(|| {
+                    bucket.push((bits.to_vec(), Cff2Shared::default()));
+                    bucket.len() - 1
+                });
+                let shared = &bucket[at].1;
                 let limit = charstring_limit(self.work);
                 let mut ops = limit;
                 let drew = cff2.outline_limited(gid, coords, shared, &mut out, &mut ops);
@@ -492,6 +510,17 @@ fn charstring_drew(drew: Result<bool>, limit: u32, work: &mut usize) -> Result<b
         }
         drew => drew,
     }
+}
+
+/// FNV-1a over the coords' `f32` bits and their count: a bucket key, so
+/// a map of long coord vectors compares them once per lookup.
+fn coords_hash(bits: &[u32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &b in bits {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash ^ bits.len() as u64
 }
 
 /// The charstring operations `work` leaf work pays for, at most one
