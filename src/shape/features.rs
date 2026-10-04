@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use super::arabic_joining::Action;
 use super::gsub::{
     apply_gsub_lookup, apply_gsub_lookups_masked, apply_gsub_stage, gsub_lookup_may_apply,
-    StageLookup,
+    gsub_lookup_may_apply_to_ids, StageLookup,
 };
 use super::joiners::FeatureFlags;
 use super::{feature_disabled, feature_enabled, Feature, JoinerTable, LookupBudget};
@@ -501,6 +501,17 @@ pub(crate) fn feature_would_substitute(
     joiners: impl Into<FeatureFlags>,
 ) -> bool {
     if glyph_ids.is_empty() {
+        return false;
+    }
+    // Lookups none of which can start at one of the glyphs change
+    // nothing, so the dry run is not worth setting up.
+    let may_apply =
+        lookup_indices_for_feature_in_scripts(gsub, tag, script_priority).is_some_and(|lookups| {
+            lookups
+                .iter()
+                .any(|&index| gsub_lookup_may_apply_to_ids(gsub, index, glyph_ids))
+        });
+    if !may_apply {
         return false;
     }
     // Build a throw-away glyph slice: cluster values don't matter,

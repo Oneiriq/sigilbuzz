@@ -661,6 +661,26 @@ struct StageKey<'k> {
     spec: &'k [u64],
 }
 
+impl StageKey<'_> {
+    /// An FNV-1a hash of the key's spec, script tags and feature tags,
+    /// which picks the first slot a lookup probes.
+    fn slot_hash(&self) -> usize {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |w: u64| {
+            h ^= w;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        };
+        self.spec.iter().for_each(|&w| mix(w));
+        self.script_priority
+            .iter()
+            .for_each(|t| mix(u64::from(u32::from_be_bytes(*t))));
+        self.features
+            .iter()
+            .for_each(|f| mix(u64::from(u32::from_be_bytes(f.tag)) << 32 | u64::from(f.value)));
+        (h >> 32) as usize
+    }
+}
+
 /// A kept stage plan with its key.
 struct KeyedStage {
     script_priority: Vec<[u8; 4]>,
@@ -709,7 +729,11 @@ impl StagePlans {
             return Cow::Owned(build());
         }
         let mut built: Option<Vec<PlannedLookup>> = None;
-        for slot in &self.slots {
+        // Probing starts at a slot the key hashes to, so a stage usually
+        // finds its plan at the first slot it looks at.
+        let start = key.slot_hash() % STAGE_SLOTS;
+        let order = (start..STAGE_SLOTS).chain(0..start);
+        for slot in order.filter_map(|i| self.slots.get(i)) {
             if let Some(kept) = slot.get() {
                 if kept.matches(key) {
                     return Cow::Borrowed(&kept.lookups);

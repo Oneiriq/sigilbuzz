@@ -250,6 +250,14 @@ pub(crate) fn gsub_lookup_may_apply(gsub: &Gsub<'_>, index: u16, glyphs: &[Glyph
         .is_some_and(|lookup| lookup_may_apply(&gsub.lookup_accel(index, &lookup), glyphs))
 }
 
+/// [`gsub_lookup_may_apply`] over bare glyph ids.
+pub(crate) fn gsub_lookup_may_apply_to_ids(gsub: &Gsub<'_>, index: u16, ids: &[u16]) -> bool {
+    gsub.lookup_list().get(index).is_some_and(|lookup| {
+        gsub.lookup_accel(index, &lookup)
+            .may_apply(ids.iter().copied())
+    })
+}
+
 /// One pass of `lookup`, lookup `index` of the table, over `buf`,
 /// HarfBuzz's `apply_string`: `apply_forward`, whose cursor stops at
 /// each glyph the feature is on at, the lookup flags keep, and the

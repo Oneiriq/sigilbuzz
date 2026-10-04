@@ -341,6 +341,15 @@ pub(crate) fn apply_stage(
     if planned.is_empty() {
         return;
     }
+    // A stage none of whose lookups can start at a glyph of the run
+    // changes nothing but the syllables the glyphs carry, which the
+    // slots below would set.
+    if !planned.iter().any(|p| runner.may_apply(p.index, glyphs)) {
+        for (g, info) in glyphs.iter_mut().zip(info.iter()) {
+            g.syllable = info.syllable;
+        }
+        return;
+    }
     let lookups = planned.iter().map(|p| StageLookup {
         index: p.index,
         mask: p.mask,
