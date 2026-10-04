@@ -2,7 +2,7 @@
 
 use super::{class_for, max_steps, FLAG_CTX_SET_MARK, FLAG_DONT_ADVANCE};
 use crate::error::Result;
-use crate::tables::layout::state_table::{lookup_class, StateTableHeader, CLASS_OUT_OF_BOUNDS};
+use crate::tables::layout::state_table::{self, StateTableHeader, CLASS_OUT_OF_BOUNDS};
 
 // --- Type 1: Contextual glyph substitution ---
 
@@ -88,25 +88,17 @@ pub(super) fn apply_contextual(
 fn sub_lookup(substitutions: &[u8], idx: u16, glyph: u16) -> Option<u16> {
     let at = usize::from(idx) * 4;
     let off = u32::from_be_bytes(*substitutions.get(at..)?.first_chunk::<4>()?) as usize;
-    let lookup = substitutions.get(off..)?;
-    // Reuse the class-lookup machinery: class value == replacement
-    // glyph id; out-of-bounds yields the reserved class, which we
-    // map back to None so the caller knows not to substitute.
-    let Ok(replacement) = lookup_value(lookup, glyph) else {
-        return None;
-    };
-    if replacement == CLASS_OUT_OF_BOUNDS {
-        None
-    } else {
-        Some(replacement)
-    }
+    lookup_value(substitutions.get(off..)?, glyph)
+        .ok()
+        .flatten()
 }
 
 /// Resolves `glyph` through the AAT lookup table at the start of
-/// `data`. Passes a glyph count of zero, so a format-0 lookup covers
-/// as many glyphs as the slice holds, the same rule
+/// `data`: its replacement, or `None` when the lookup does not cover
+/// it. Passes a glyph count of zero, so a format-0 lookup covers as
+/// many glyphs as the slice holds, the same rule
 /// [`StateTableHeader::class_of`] uses. Reads the lookup in place,
 /// without copying it.
-pub(super) fn lookup_value(data: &[u8], glyph: u16) -> Result<u16> {
-    lookup_class(data, glyph, 0)
+pub(super) fn lookup_value(data: &[u8], glyph: u16) -> Result<Option<u16>> {
+    state_table::lookup_value(data, glyph, 0)
 }

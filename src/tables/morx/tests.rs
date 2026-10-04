@@ -913,3 +913,16 @@ fn deleted_components_stay_until_morx_is_done() {
     let m = Morx::parse(&bytes).unwrap();
     assert_eq!(m.apply(&[5, 6]), (vec![77], vec![0]));
 }
+
+#[test]
+fn substitutions_to_glyph_1_apply() {
+    // Glyph 1 is the same number as the out-of-bounds class, which the
+    // lookup reader used to return for "not covered", so a
+    // substitution to glyph 1 was dropped.
+    let bytes = build_non_contextual_morx(&[(5, 1)]);
+    assert_eq!(Morx::parse(&bytes).unwrap().apply(&[5, 6]).0, [1, 6]);
+    let lookups = [build_lookup_format6(&[(5, 1)])];
+    let entries = [ctx_entry(0, 0, 0xFFFF, 0)];
+    let bytes = contextual_morx(&[[0, 0, 0, 0]], &entries, &lookups);
+    assert_eq!(Morx::parse(&bytes).unwrap().apply(&[5, 6]).0, [1, 6]);
+}
