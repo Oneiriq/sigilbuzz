@@ -101,13 +101,26 @@ impl Decoder<'_> {
         let mut bit_reader = BitReader::new(self.src.get(self.cursor..).unwrap_or_default());
         let mut prev_dc = vec![0i32; self.components.len()];
 
-        for mcu_y in 0..mcus_y {
-            for mcu_x in 0..mcus_x {
+        // A scan of one component is non-interleaved (T.81 A.2.2): each
+        // MCU is one block, and the blocks run over the component's own
+        // sample grid whatever sampling factors the frame declares.
+        let single = self.components.len() == 1;
+        let (scan_mcus_x, scan_mcus_y) = if single {
+            (self.width.div_ceil(8), self.height.div_ceil(8))
+        } else {
+            (mcus_x, mcus_y)
+        };
+
+        for mcu_y in 0..scan_mcus_y {
+            for mcu_x in 0..scan_mcus_x {
                 for (ci, (comp, &(dc_tbl, ac_tbl, qt))) in
                     self.components.iter().zip(&tables).enumerate()
                 {
-                    let h = u32::from(comp.h_sampling);
-                    let v = u32::from(comp.v_sampling);
+                    let (h, v) = if single {
+                        (1, 1)
+                    } else {
+                        (u32::from(comp.h_sampling), u32::from(comp.v_sampling))
+                    };
                     for by in 0..v {
                         for bx in 0..h {
                             let mut coeffs = [0i32; 64];

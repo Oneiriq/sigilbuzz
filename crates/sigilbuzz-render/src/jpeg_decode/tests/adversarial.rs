@@ -86,6 +86,7 @@ fn marker_walker_rejects_progressive_scan_params() {
     bytes.push(1); // n_scan
     bytes.extend_from_slice(&[1, 0x00]); // comp id, td/ta=0
     bytes.extend_from_slice(&[1, 63, 0]); // Ss=1 (bad), Se, Ah/Al
+    bytes.push(0x00); // one byte of scan data
     let err = decode_jpeg(&bytes).unwrap_err();
     assert!(
         matches!(err, RenderError::BadJpeg("non-baseline scan parameters")),
@@ -124,6 +125,7 @@ fn marker_walker_rejects_refinement_bit_field() {
     bytes.push(1);
     bytes.extend_from_slice(&[1, 0x00]);
     bytes.extend_from_slice(&[0, 63, 0x11]); // Ss=0, Se=63, Ah/Al=0x11
+    bytes.push(0x00); // one byte of scan data
     let err = decode_jpeg(&bytes).unwrap_err();
     assert!(
         matches!(err, RenderError::BadJpeg("non-baseline scan parameters")),
@@ -332,4 +334,116 @@ fn idct_cos_table_matches_inline_cosines() {
         idct_with_table(&coeffs, &mut b, &table);
         assert_eq!(a, b);
     }
+}
+
+/// An SOS header for one component and `data` bytes of scan data.
+fn scan(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0xFF, MARKER_SOS, 0x00, 8, 1, 1, 0x00, 0, 63, 0];
+    out.extend_from_slice(data);
+    out
+}
+
+/// A COM segment with `len` bytes of comment.
+fn comment(len: usize) -> Vec<u8> {
+    let mut out = vec![0xFF, MARKER_COM];
+    out.extend_from_slice(&(len as u16 + 2).to_be_bytes());
+    out.resize(out.len() + len, 0);
+    out
+}
+
+#[test]
+fn only_scan_data_backs_a_frame() {
+    // A 2048x2048 grayscale frame has 65,536 blocks, so its scans need
+    // at least 8,192 bytes. COM padding after the frame header used to
+    // count, so a few KB of comments let a header size buffers that no
+    // scan data backs (a 574 KB stream of them reached 1.8 GB).
+    let mut tail = comment(9000);
+    tail.extend(scan(&[0]));
+    tail.extend_from_slice(&[0xFF, MARKER_EOI]);
+    assert_eq!(
+        decode_jpeg(&frame_only(MARKER_SOF0, 2048, 2048, &tail)).unwrap_err(),
+        RenderError::BadJpeg("frame larger than entropy data")
+    );
+    // 8,192 bytes of scan data pass the check; with no Huffman tables
+    // the scan then fails before any buffer is sized.
+    let mut tail = comment(9000);
+    tail.extend(scan(&vec![0x11; 8192]));
+    tail.extend_from_slice(&[0xFF, MARKER_EOI]);
+    assert_eq!(
+        decode_jpeg(&frame_only(MARKER_SOF0, 2048, 2048, &tail)).unwrap_err(),
+        RenderError::BadJpeg("missing DC Huffman table")
+    );
+}
+
+#[test]
+fn entropy_bytes_count_only_scan_data() {
+    let mut s = vec![0xFF, MARKER_SOI];
+    let at = s.len();
+    s.extend(comment(100));
+    s.extend(scan(&[1, 2, 0xFF, 0x00, 3])); // a stuffed 0xFF counts as two
+    s.extend_from_slice(&[0xFF, MARKER_DHT, 0x00, 4, 0, 0]);
+    s.extend(scan(&[4, 5]));
+    s.extend_from_slice(&[0xFF, 0xFF, MARKER_EOI]); // fill before EOI
+    s.extend(scan(&[6; 50])); // after EOI: not counted
+    assert_eq!(entropy_bytes_after(&s, at), 7);
+    // A byte where a marker should start ends the walk.
+    assert_eq!(entropy_bytes_after(&[0x00, 0xFF, MARKER_SOS], 0), 0);
+    // A scan that runs to the end of the data counts to the end; a
+    // last lone 0xFF would start a marker.
+    let mut open = scan(&[9; 10]);
+    assert_eq!(entropy_bytes_after(&open, 0), 10);
+    open.push(0xFF);
+    assert_eq!(entropy_bytes_after(&open, 0), 10);
+    assert_eq!(entropy_bytes_after(&[], 0), 0);
+}
+
+#[test]
+fn frames_past_the_pixel_limit_are_rejected() {
+    // 2049 x 2049 is just past 2^22 pixels; its 66,049 blocks are
+    // backed by enough scan data, so only the pixel limit stops it.
+    let mut tail = scan(&vec![0x11; 8300]);
+    tail.extend_from_slice(&[0xFF, MARKER_EOI]);
+    for marker in [MARKER_SOF0, MARKER_SOF2] {
+        assert_eq!(
+            decode_jpeg(&frame_only(marker, 2049, 2049, &tail)).unwrap_err(),
+            RenderError::BadJpeg("frame larger than pixel limit")
+        );
+    }
+    // 2048 x 2048 is at the limit and passes it.
+    assert_eq!(
+        decode_jpeg(&frame_only(MARKER_SOF0, 2048, 2048, &tail)).unwrap_err(),
+        RenderError::BadJpeg("missing DC Huffman table")
+    );
+}
+
+#[test]
+fn a_second_frame_is_an_error() {
+    // A stream holds one frame. Each SOF used to size a fresh frame
+    // with a fresh scan budget, so a stream of frames multiplied the
+    // work, as libjpeg's JERR_SOF_DUPLICATE prevents.
+    use super::encode::{encode_progressive, libjpeg_script, Image};
+    let img = Image::random(16, 16, &[(1, 1)], 9, 40, 3);
+    let one = encode_progressive(&img, &libjpeg_script(1));
+    let sof = marker_pos(&one, MARKER_SOF2) - 1;
+    let len = usize::from(u16::from_be_bytes([one[sof + 2], one[sof + 3]]));
+    let frame_header = one[sof..sof + 2 + len].to_vec();
+    // The header again after the last scan, before EOI.
+    let mut two = one[..one.len() - 2].to_vec();
+    two.extend_from_slice(&frame_header);
+    two.extend_from_slice(&[0xFF, MARKER_EOI]);
+    assert!(decode_jpeg(&one).is_ok());
+    assert_eq!(
+        decode_jpeg(&two).unwrap_err(),
+        RenderError::BadJpeg("second SOF")
+    );
+    // A baseline header repeated before its scan.
+    let base = build_constant_jpeg(0, 0, 0);
+    let sof = marker_pos(&base, MARKER_SOF0) - 1;
+    let len = usize::from(u16::from_be_bytes([base[sof + 2], base[sof + 3]]));
+    let mut twice = base[..sof + 2 + len].to_vec();
+    twice.extend_from_slice(&base[sof..]);
+    assert_eq!(
+        decode_jpeg(&twice).unwrap_err(),
+        RenderError::BadJpeg("second SOF")
+    );
 }

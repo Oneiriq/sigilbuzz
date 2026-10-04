@@ -251,6 +251,14 @@ fn read_u16_at(data: &[u8], off: usize, context: &'static str) -> Result<u16> {
 /// `n_glyphs` is required by format 0, which is just a flat u16
 /// array sized by the font's `numGlyphs`. Other formats ignore it.
 pub(crate) fn lookup_class(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
+    Ok(lookup_value(data, glyph_id, n_glyphs)?.unwrap_or(CLASS_OUT_OF_BOUNDS))
+}
+
+/// The value [`lookup_class`] reads for `glyph_id`, or `None` when the
+/// lookup does not cover the glyph. Substitution lookups need the
+/// difference: a covered glyph may map to glyph 1, the same number as
+/// the out-of-bounds class.
+pub(crate) fn lookup_value(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<Option<u16>> {
     if data.len() < 2 {
         return Err(Error::Truncated {
             offset: 0,
@@ -280,7 +288,7 @@ pub(crate) fn lookup_class(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<
 // Used when the value stream is dense: kerx format 2's left- and
 // right-class tables are the canonical case, since they yield a
 // per-glyph byte offset that's almost always non-default.
-fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
+fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<Option<u16>> {
     // Two limits gate the read: the caller-supplied glyph count
     // (when known) and the slice's actual byte length. The smaller
     // of the two wins so a truncated table can never panic.
@@ -292,7 +300,7 @@ fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
     };
     let limit = declared.min(slice_cap);
     if usize::from(glyph_id) >= limit {
-        return Ok(CLASS_OUT_OF_BOUNDS);
+        return Ok(None);
     }
     let off = 2usize + glyph_id as usize * 2;
     // The bound check above already guarantees off + 2 <= data.len(),
@@ -301,7 +309,7 @@ fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
         offset: off,
         context: "AAT lookup format 0 cell",
     })?;
-    Ok(u16::from_be_bytes([slice[0], slice[1]]))
+    Ok(Some(u16::from_be_bytes([slice[0], slice[1]])))
 }
 
 // Format 2 layout:
@@ -318,7 +326,7 @@ fn lookup_format0(data: &[u8], glyph_id: u16, n_glyphs: u16) -> Result<u16> {
 //   (trailing sentinel segment (0xFFFF, 0xFFFF, 0) terminates the array)
 //
 // Segments are sorted by `lastGlyph`, so we can binary-search.
-fn lookup_format2(data: &[u8], glyph_id: u16) -> Result<u16> {
+fn lookup_format2(data: &[u8], glyph_id: u16) -> Result<Option<u16>> {
     if data.len() < 12 {
         return Err(Error::Truncated {
             offset: 0,
@@ -360,17 +368,13 @@ fn lookup_format2(data: &[u8], glyph_id: u16) -> Result<u16> {
         }
     }
     if lo == n_units {
-        return Ok(CLASS_OUT_OF_BOUNDS);
+        return Ok(None);
     }
     let off = body_off + lo * unit_size;
     let last = u16::from_be_bytes([data[off], data[off + 1]]);
     let first = u16::from_be_bytes([data[off + 2], data[off + 3]]);
     let value = u16::from_be_bytes([data[off + 4], data[off + 5]]);
-    if glyph_id >= first && glyph_id <= last {
-        Ok(value)
-    } else {
-        Ok(CLASS_OUT_OF_BOUNDS)
-    }
+    Ok((glyph_id >= first && glyph_id <= last).then_some(value))
 }
 
 // Format 6 layout:
@@ -386,7 +390,7 @@ fn lookup_format2(data: &[u8], glyph_id: u16) -> Result<u16> {
 //   (trailing sentinel (0xFFFF, 0) optional)
 //
 // Records are sorted by `glyph`.
-fn lookup_format6(data: &[u8], glyph_id: u16) -> Result<u16> {
+fn lookup_format6(data: &[u8], glyph_id: u16) -> Result<Option<u16>> {
     if data.len() < 12 {
         return Err(Error::Truncated {
             offset: 0,
@@ -424,12 +428,12 @@ fn lookup_format6(data: &[u8], glyph_id: u16) -> Result<u16> {
             core::cmp::Ordering::Less => lo = mid + 1,
             core::cmp::Ordering::Equal => {
                 let v = u16::from_be_bytes([data[off + 2], data[off + 3]]);
-                return Ok(v);
+                return Ok(Some(v));
             }
             core::cmp::Ordering::Greater => hi = mid,
         }
     }
-    Ok(CLASS_OUT_OF_BOUNDS)
+    Ok(None)
 }
 
 #[cfg(test)]
