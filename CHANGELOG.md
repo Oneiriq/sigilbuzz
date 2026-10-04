@@ -5,6 +5,197 @@ GitHub issues and pull requests. sigilbuzz is pre-1.0, so a minor release may ch
 the API. See [docs/STABILITY.md](docs/STABILITY.md) for what is covered by the
 stability commitment.
 
+## 0.23.1 (2026-10-04)
+
+The crates in this release: `sigilbuzz` 0.23.1, `sigilbuzz-render` 0.10.1, and
+`sigilbuzz-subset` 0.13.1. The other companion crates did not change and keep their
+0.23.0 versions, which work with `sigilbuzz` 0.23.1: `sigilbuzz-capi` 0.4.0,
+`sigilbuzz-cli` 0.2.0, `sigilbuzz-gpu` 0.2.0, `sigilbuzz-hyphen` 0.2.0,
+`sigilbuzz-paint` 0.3.0, `sigilbuzz-pdf` 0.3.0, `sigilbuzz-svg` 0.3.0,
+`sigilbuzz-text-layout` 0.2.0, and `sigilbuzz-woff` 0.3.2. No public API is removed or
+changed.
+
+Changed:
+
+- FDSelect format 3 and 4 tables whose ranges do not ascend work out each range's span
+  when opened, in one pass, and lookups binary-search those spans, so drawing every
+  glyph of a crafted 65,535-range table from one `Cff` no longer takes quadratic time
+  (#282). The spans take at most one `u32` per glyph or range, whichever is fewer.
+  Lookups resolve exactly as before.
+- Top-to-bottom shaping is slower for fonts without `VORG`, because their vertical
+  origins now come from the varied glyph extents or phantom points, as described under
+  Fixed (#283). 0.23.0 placed every CFF glyph at the ascender without running its
+  charstring and read static boxes. Against 0.23.0, a CFF run takes about 1.5 times as
+  long and a CFF2 run about 2.3 times. A varied `glyf` font without `vmtx` walks `gvar`
+  once per new glyph of a call, about 2.8 times as long for Hangul in Hahmlet. Each
+  shaping call reads these tables once.
+- `sigilbuzz-render` 0.10.1 requires `sigilbuzz` 0.23.1, so `Rasterizer` draws variable
+  glyphs at the F2DOT14 coords shaping uses, as described under Fixed (#283). The
+  `rasterize_glyph` docs say so.
+- `sigilbuzz-subset` 0.13.1: `instance` keeps the hinting instructions of simple glyphs,
+  as HarfBuzz's instancer does unless asked to drop hinting (#284). They used to be
+  stripped while composite instructions and `cvt`, `fpgm` and `prep` were kept.
+- The crates.io publish workflow retries after 90 seconds, with 10 retries of its own,
+  when cargo times out waiting for published dependencies, when cargo reports a crate
+  as already in the index, and when crates.io answers "crate version `X` is already
+  uploaded" (#282, #285). It matches cargo's exact duplicate-version wording, and a
+  rate limit still waits 11 minutes. It fails when `cargo metadata` fails instead of
+  reporting every crate as published. 0.23.0 needed a manual rerun for the index
+  timeout.
+
+Fixed:
+
+- CFF charstrings that use `dotsection` (12 0), which fonts converted from Type 1 still
+  carry, now draw (#282). It was rejected as a deprecated Type 1 operator and failed
+  the glyph. It now clears the operand stack and does nothing else, as in HarfBuzz and
+  FreeType.
+- The CFF INDEX error for an entry that ends past the data region reports the position
+  of that entry's offset slot, like the other INDEX errors, instead of the end its
+  offsets imply (#282).
+- CFF and CFF2 charstrings are evaluated in `f64`, as HarfBuzz evaluates them in
+  `double`, and glyph extents round that `f64` box (#283). A Source Serif 4 glyph whose
+  top HarfBuzz computes as 749.4999 sat a unit off in a vertical run. Source Serif 4
+  outlines now equal HarfBuzz's at two decimals.
+- Variation deltas round halves up, as HarfBuzz's `roundf` (`floor(x + 0.5)`) does:
+  HVAR and VVAR advances, phantom-point advances, GPOS VariationIndex deltas in value
+  records and anchors, varied glyph extents, and BASE coordinate deltas (#283). They
+  rounded halves away from zero, so some advances, mark offsets and baselines were a
+  unit off. Rubik's space at normalized `wght` 0.1875 advanced 244 units, not 245.
+- Axis coordinates normalize the way HarfBuzz 14.5.0's `hb_ot_var_normalize_coords`
+  does (#283). `Fvar::normalize_coords` rounds to 16.16, `Avar::remap` follows
+  HarfBuzz's `map_float` (past the outermost maps a coordinate now moves by the nearest
+  map's shift instead of clamping), `Avar::remap_all` rounds to 16.16 before and after
+  the map, and `shape` rounds the coordinates to F2DOT14. `VariationAxis::normalize`
+  reads a range that misses the default as widened to take it in. Over 73,000 settings
+  of seven variable fonts the coordinates now equal HarfBuzz's. 12,751 differed, which
+  moved some advances by a unit (Rubik at `wght` 700).
+- `Face::glyph_outline_at_coords` and `Face::glyph_bounds_at_coords` round coords to
+  F2DOT14 as shaping does, so a glyph drawn at a `Font`'s coords (`sigilbuzz-render`
+  included) is the glyph shaping measured (#283).
+- HVAR and VVAR advances stop at zero, as in HarfBuzz (#283).
+- Vertical origins vary (#283). A VORG origin moves by the VVAR vertical origin delta.
+  Without VORG, a `glyf` font with `vmtx` takes the varied top phantom point (from a
+  `USE_MY_METRICS` component for a composite), and other fonts center the varied glyph
+  extents, CFF and CFF2 included, in the ascender-to-descender span, with MVAR's `hasc`
+  and `hdsc` applied. Top-to-bottom runs of Hahmlet, Fraunces, Recursive, Roboto Flex,
+  Rubik, Source Serif 4 and Noto Sans KR VF now match HarfBuzz 14.5.0 at every setting
+  tested. Tens of thousands of offsets were off before.
+- A composite component anchored by point numbers matches its point to the walk's
+  running point list, as HarfBuzz does, so an anchor past the points before the
+  component lands where HarfBuzz puts it (#283). Anchor
+  point numbers in word form are read unsigned, and a component that closes a cycle is
+  skipped instead of failing the outline. In a font without `vmtx`, an anchor to a
+  vertical phantom point uses HarfBuzz's phantom points for that case, `(0, yMax)` and
+  `(0, yMax - unitsPerEm)`.
+- The `glyf` walk's budget errors, depth cap, contour end check, and short glyph header
+  report the glyph's byte offset in `glyf` instead of 0 (#283).
+- `shape` with a lookup that a language system's required feature shares with `rvrn`,
+  and `rvrn` set above 1, substitutes nothing in an AlternateSubst lookup, as HarfBuzz
+  does (#282). It used to take `rvrn`'s alternate. A required feature tagged `rvrn` now
+  runs in stage 0 on the same terms.
+- The Indic, Khmer, and Universal Shaping Engine shapers give `rphf`, `pref`, `cfar`, and
+  the joining-form features their masks when the language system lists them, whatever
+  lookups they have, as in HarfBuzz's feature map (#282). A required feature with the
+  tag no longer counts, and the Indic consonant and `pref` tests find nothing for a
+  feature the language system does not list.
+- In those shapers and the Myanmar and Hangul ones, a required feature runs in the
+  stage of its tag on every glyph, with automatic joiner handling and across syllables,
+  as HarfBuzz adds it with the global mask (#282). It used to take the mask and flags of
+  the feature with its tag. A required feature whose tag the Khmer shaper lacks, `liga`
+  in the Indic and Khmer shapers, or a tag the caller turned off, runs in stage 0, as in
+  HarfBuzz. Such features used to run nowhere, and a required `cfar` used to run in
+  stage 0. On 20 crafted variants of six Noto fonts with listed, emptied, and required
+  `rphf`, `pref`, and `cfar`, all 2,932 strings match HarfBuzz 14.5.0 (2,451 before).
+- A language system's required feature runs where HarfBuzz runs it when HarfBuzz picks
+  the default shaper for an Indic or Myanmar script, that is when the script tag the
+  font's GSUB picks is `DFLT` or `latn` (or `mymr` for Myanmar) (#285). A required
+  `rphf` or `pref` in such a font used to run nowhere. In vertical text, a required
+  feature tagged `liga`, `clig`, `calt`, `rclt` or `vrt2` runs in GSUB stage 0, since
+  HarfBuzz enables none of them there by default.
+- A font whose GSUB only has the misspelled `dflt` script keeps the Indic, Myanmar or
+  Universal Shaping Engine shaper, as in HarfBuzz, instead of taking the default shaper
+  and losing its reordering (#285).
+- The Khmer shaper keeps `clig` on whatever the caller asks, and in vertical text too,
+  as HarfBuzz's `override_features_khmer` does (#285). With `clig=0`, 3 of 60 Noto Sans
+  Khmer strings in an 8,400-string sweep differed from HarfBuzz 14.5.0, and a required
+  `clig` ran in stage 0 instead of the last stage.
+- `calt=1` applies to vertical text of a Hangul buffer, on every glyph but jamo, as in
+  HarfBuzz (#285). It used to be ignored there.
+- `sigilbuzz-subset`: `instance` bakes `gvar` the way HarfBuzz's instancer does (#284).
+  Points a tuple does not list take their inferred deltas. Composite components move by
+  their deltas, widening to word arguments when needed, and glyph boxes are recomputed.
+  `hmtx` and `vmtx` advances and side bearings come from the varied phantom points, and
+  `head`'s box and the `hhea` and `vhea` extremes follow. Glyphs without contours bake
+  as empty glyphs instead of failing the instance. Normalized coordinates go through
+  `avar` and snap to F2DOT14, and values round halves up, as in HarfBuzz and fontTools.
+  Before, Noto Sans KR at wght 700 had 7,210 glyphs more than 1 unit off the variable
+  font (up to 186), composites ignored their deltas, and every left side bearing stayed
+  at the default. Now outlines, composite offsets, glyph boxes, `hmtx` and `vmtx` match
+  HarfBuzz 14.5's instancer on Noto Sans KR, Hahmlet, Rubik and Roboto Flex. Fraunces
+  matches too, except for 2 or 3 glyphs off by 1 unit on rounding ties.
+- `sigilbuzz-subset`: a partial instance moves its defaults to the pinned location, as
+  HarfBuzz and fontTools do, so it renders correctly there even when no variations are
+  applied (#284, #286). A `glyf` font's `glyf`, `hmtx`, `vmtx` and `VORG` are baked at
+  the pinned location. A CFF2 font's charstring and Private DICT blend defaults take the
+  pinned deltas, and so do its `hmtx`, `vmtx` and `VORG`. So do the `OS/2`, `hhea`,
+  `vhea` and `post` fields `MVAR` varies, GPOS values and anchors, and GDEF carets.
+  Regions left on the pinned axes only move into those defaults instead of staying in
+  the variation tables. Before, Source Serif 4 pinned at wght 650 drew 1,450 of 1,464
+  glyphs up to 110 units off at its default, and Roboto Flex shaped kerning pairs up to
+  137 units off.
+- `sigilbuzz-subset`: `MVAR`'s caret records (`hcrs`, `hcrn`, `hcof`, `vcrs`, `vcrn`,
+  `vcof`) move `hhea`'s and `vhea`'s caretSlopeRise, caretSlopeRun and caretOffset in
+  full and partial instances, rounded as HarfBuzz rounds them (#286). Before, Recursive
+  instanced at slnt -15 kept a caret slope of 1/0 instead of 1000/250, and Sitka Italic
+  at opsz 7 a caret offset of -114 instead of -115.
+- `sigilbuzz-subset`: `instance` adds the `cvar` deltas to `cvt`, as HarfBuzz does
+  (#284). A full instance drops `cvar`, and a partial instance rebuilds it for the kept
+  axes. Partial instances used to carry the source `cvar` with tuples sized for the old
+  axis count. An invalid intermediate region ignores its axis, as the spec says.
+- `sigilbuzz-subset`: `instance` rounds the deltas it folds into `GPOS` values and
+  anchors, `GDEF` ligature carets, `MVAR` metrics, and the `HVAR`/`VVAR` advances of
+  fonts without `gvar` halves up, as HarfBuzz and fontTools do (#284). Before, a delta
+  of exactly -n.5 baked one unit low.
+- `sigilbuzz-subset`: `instance` resolves each table's variations at the coordinates
+  HarfBuzz's instancer uses for it (#284). Outlines and glyph metrics use the
+  coordinates a HarfBuzz font draws at. `GDEF` (so `GPOS` and ligature carets), `cvar`,
+  `BASE`, `MVAR`, FeatureVariations, and every table a partial instance projects use the
+  instancer's own F2DOT14 coordinates. Before, values a step apart could move outlines,
+  advances, positions or `cvt` values by a unit. For example, Sitka Italic at opsz 6.5
+  had 1,157 outlines off by up to 2.
+- `sigilbuzz-subset`: `instance` applies `BASE` 1.1 variations (#284). A full instance
+  moves each varied coordinate to the instance, makes it format 1, and drops the store.
+  A partial instance folds the pinned axes in and projects the store onto the kept
+  ones. Noto Sans KR instances used to keep the Thin `icfb` and `icft` baselines at
+  every weight.
+- `sigilbuzz-subset`: a full CFF2 `instance` resolves the `blend` operators of its
+  Private DICTs at the instance and drops `vsindex` (#284). Before, the hinting values
+  pointed at the dropped VariationStore and fontTools could not draw the font.
+- `sigilbuzz-subset`: a partial CFF2 `instance` keeps the font's variations (#284). The
+  store's subtables, which hold no rows in CFF2, were dropped with every blend. Private
+  DICT blends now keep the surviving regions too.
+- `sigilbuzz-subset`: `instance` bounds its work and memory on hostile fonts (#284,
+  #286). The partial `gvar` rewrite, the `glyf` bake, the variation store rows that
+  `HVAR`, `VVAR`, `VORG`, `GPOS`, `GDEF` and `BASE` resolve, and FeatureVariations each
+  work within a budget scaled to the input, or share what many records name, and report
+  what they leave out. A CFF2 Private DICT that many Font DICTs share is written once.
+  A partial CFF2 instance moves blend defaults in constant work each, and fails with
+  `SubsetError::Unsupported` on a charstring that stacks more than the 513 operands
+  CFF2 allows, where HarfBuzz's interpreter stops too. The crate docs list each budget.
+- `sigilbuzz-subset`: `subset` keeps the base and accent glyphs of a kept CFF1 seac
+  glyph when both codes resolve (#284). hb-subset does the same for a seac in the
+  glyph's own charstring, and this subsetter also follows one that a subroutine ends. A
+  subset that kept an accented glyph without its components drew it wrong.
+
+Known limitations:
+
+- When a GSUB stage 0 lookup (`rvrn` or a required feature) changes a segment's glyph
+  count, the Indic, Khmer, Myanmar and Universal Shaping Engine shapers skip that
+  segment: no syllable is reordered and none of the shaper's GSUB stages run (#285).
+  Vertical runs can now hit this too. A required `liga`, `clig`, `calt` or `rclt` that
+  those shapers do not run in vertical text used to run nowhere there. It now runs in
+  stage 0, where a ligature changes the glyph count.
+
 ## 0.23.0 (2026-10-03)
 
 The crates in this release: `sigilbuzz` 0.23.0, `sigilbuzz-capi` 0.4.0,
