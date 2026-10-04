@@ -243,16 +243,10 @@ impl<'a> Varc<'a> {
         self.glyph_records.len()
     }
 
-    /// Whether `gid` has a glyph record, so that VARC draws it: it is in
-    /// the coverage, at an index the glyph records reach.
-    pub(crate) fn has_record(&self, gid: u16) -> bool {
-        self.coverage
-            .index_of(gid)
-            .is_some_and(|idx| (idx as usize) < self.glyph_records.len())
-    }
-
     /// Resolves the component list for `gid` at the given normalized
-    /// axis coords. Returns `None` for uncovered gids.
+    /// axis coords. Returns `None` for uncovered gids. A covered gid
+    /// past the end of the glyph records has no components, as in
+    /// HarfBuzz, which draws nothing for it.
     ///
     /// `coords` are both the glyph's coords and the font's, which is
     /// right for a glyph drawn on its own. For a glyph reached through
@@ -264,9 +258,10 @@ impl<'a> Varc<'a> {
 
     /// Resolves the component list for `gid`, whose own coords are
     /// `coords`, in a font set to `font_coords`. Returns `None` for
-    /// uncovered gids. The two differ when `gid` is a component of
-    /// another VARC composite: `coords` are then that component's
-    /// coords.
+    /// uncovered gids, and no components for a covered gid past the end
+    /// of the glyph records. The two coord vectors differ when `gid` is
+    /// a component of another VARC composite: `coords` are then that
+    /// component's coords.
     ///
     /// Components are read as HarfBuzz's `decompile_record` reads them
     /// and evaluated as its `VarComponent::get_path_at` does:
@@ -309,8 +304,8 @@ impl<'a> Varc<'a> {
     /// budgets, and keeps each composite, condition result and set of
     /// region scalars by the coords it was worked out at, so a glyph
     /// reached again at the same coords costs nothing more. `None` when
-    /// VARC has no record for `gid`. Every call with one `memo` must
-    /// pass the same `font_coords`.
+    /// VARC does not cover `gid`. Every call with one `memo` must pass
+    /// the same `font_coords`.
     pub(crate) fn resolve(
         &self,
         gid: u16,
@@ -318,7 +313,7 @@ impl<'a> Varc<'a> {
         font_coords: &[f32],
         memo: &mut VarcMemo,
     ) -> Option<Rc<VarcComposite>> {
-        if !self.has_record(gid) {
+        if !self.covers(gid) {
             return None;
         }
         let id = memo.coords_id(coords);
@@ -346,7 +341,7 @@ impl<'a> Varc<'a> {
         font_coords: &[f32],
         memo: &mut VarcMemo,
     ) -> Option<VarcComposite> {
-        if !self.has_record(gid) {
+        if !self.covers(gid) {
             return None;
         }
         let id = memo.coords_id(coords);
@@ -365,7 +360,8 @@ impl<'a> Varc<'a> {
         memo: &mut VarcMemo,
     ) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
-        let raw = *self.glyph_records.get(idx)?;
+        // HarfBuzz reads a record past the end of the INDEX as empty.
+        let raw = self.glyph_records.get(idx).copied().unwrap_or_default();
         let mut scratch = CoordsMemo::default();
         let caches = match id {
             Some(id) => &mut memo.per_coords[id],

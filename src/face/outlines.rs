@@ -174,15 +174,17 @@ impl<'a> Face<'a> {
     /// ([`Glyf::outline_at_coords`], [`Cff2::outline`]) take coords as
     /// given.
     ///
-    /// A glyph the font's `VARC` table has a record for is drawn from
-    /// its components, as HarfBuzz draws it:
+    /// A glyph the font's `VARC` table covers is drawn from its
+    /// components, as HarfBuzz draws it:
     ///
     /// - Each component is drawn at its own coords, which start from
     ///   the coords of the glyph it belongs to, or from the font's
     ///   (`coords`) when it sets `RESET_UNSPECIFIED_AXES`, however deep
     ///   it sits.
     /// - A component that names the glyph it belongs to draws that
-    ///   glyph's `glyf` or CFF outline instead of recursing.
+    ///   glyph's `glyf` or CFF outline instead of recursing. A longer
+    ///   cycle is cut where HarfBuzz's decycler cuts it, and a covered
+    ///   glyph past the end of the glyph records draws nothing.
     /// - The condition and delta work of every composite the glyph
     ///   reaches shares one budget (see
     ///   [`Varc::composite_with_font_coords`](crate::tables::Varc::composite_with_font_coords)),

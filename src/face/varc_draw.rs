@@ -4,6 +4,8 @@
 
 use core::cell::OnceCell;
 
+use alloc::vec::Vec;
+
 use super::Face;
 use crate::error::{Error, Result};
 use crate::tables::glyf::PhantomMetrics;
@@ -31,12 +33,16 @@ const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// The walk resolves composites with one [`VarcMemo`], so one budget
 /// bounds the condition and delta work of every composite the glyph
 /// reaches, and a glyph reached again at the same coords is resolved
-/// once. Every composite is resolved in the font set to the coords of
-/// the glyph drawn, so a `RESET_UNSPECIFIED_AXES` component starts from
-/// them however deep it sits. Components that share children can make
-/// the walk grow exponentially with depth, so it also draws at most
+/// once. Components that share children can make the walk grow
+/// exponentially with depth, so it also draws at most
 /// [`MAX_VARC_COMPONENTS`] components and [`MAX_VARC_OPS`] ops, and
 /// fails with `Malformed` past either or past [`MAX_VARC_DEPTH`].
+///
+/// It stops cycles as HarfBuzz's decycler does: `path` holds the
+/// glyphs whose composites are being drawn, from the glyph drawn down,
+/// and a glyph that `VARC` covers is not drawn at position `k` of the
+/// path when it is the glyph at position `k / 2`, where HarfBuzz's
+/// tortoise sits.
 pub(crate) struct VarcDraw<'w, 'a> {
     face: &'w Face<'a>,
     varc: &'w Varc<'a>,
@@ -44,6 +50,8 @@ pub(crate) struct VarcDraw<'w, 'a> {
     font_coords: &'w [f32],
     memo: VarcMemo,
     leaves: Leaves<'a>,
+    /// The glyphs whose composites are being drawn, outermost first.
+    path: Vec<u16>,
     components_left: usize,
     ops_left: usize,
 }
@@ -58,20 +66,23 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
             font_coords,
             memo: VarcMemo::new(),
             leaves: Leaves::default(),
+            path: Vec::new(),
             components_left: MAX_VARC_COMPONENTS,
             ops_left: MAX_VARC_OPS,
         }
     }
 
     /// Draws `glyph_id` into `sink`, as HarfBuzz draws a glyph `VARC`
-    /// has a record for. Returns `Ok(false)`, drawing nothing, when it
-    /// has none; the glyph is then drawn from `glyf` or CFF.
+    /// covers. Returns `Ok(false)`, drawing nothing, when it does not
+    /// cover the glyph, which is then drawn from `glyf` or CFF.
     pub(crate) fn draw<S: OutlineSink>(&mut self, glyph_id: u16, sink: &mut S) -> Result<bool> {
         let coords = self.font_coords;
         let Some(composite) = self.varc.resolve(glyph_id, coords, coords, &mut self.memo) else {
             return Ok(false);
         };
+        self.path.push(glyph_id);
         self.draw_composite(glyph_id, &composite, IDENTITY, 0, sink)?;
+        self.path.pop();
         Ok(true)
     }
 
@@ -126,14 +137,19 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
         }
         // A component that names its parent's glyph draws that glyph's
         // own outline, as in HarfBuzz, which does not recurse on the
-        // same glyph. Other components VARC has a record for are
-        // composites, resolved in the font set to the coords of the
-        // glyph drawn; the rest are drawn from `glyf` or CFF at their
-        // coords.
-        if gid != parent {
+        // same glyph. Other components VARC covers are composites,
+        // unless the decycler stops them; the rest are drawn from
+        // `glyf` or CFF at their coords.
+        if gid != parent && self.varc.covers(gid) {
+            if self.path.get(self.path.len() / 2) == Some(&gid) {
+                return Ok(());
+            }
             let font_coords = self.font_coords;
             if let Some(composite) = self.varc.resolve(gid, coords, font_coords, &mut self.memo) {
-                return self.draw_composite(gid, &composite, transform, depth, sink);
+                self.path.push(gid);
+                let drawn = self.draw_composite(gid, &composite, transform, depth, sink);
+                self.path.pop();
+                return drawn;
             }
         }
         let mut placed = Placed {
