@@ -736,10 +736,11 @@ fn conditions_nested_past_64_levels_fail() {
 }
 
 #[test]
-fn shared_condition_trees_stop_at_the_budget() {
+fn shared_condition_trees_are_evaluated_once() {
     // Five levels of And tables whose 255 offsets all name the next
-    // level: 255^5 visits without a budget. Every leaf holds, so only
-    // the budget can stop the walk, and the component is left out.
+    // level: 255^5 paths. Each table's result is kept for the call, so
+    // the walk visits each level's 255 offsets once and the component,
+    // whose every leaf holds, shows.
     let level_len = 3 + 3 * 255;
     let mut conditions = Vec::new();
     for _ in 0..5 {
@@ -754,7 +755,109 @@ fn shared_condition_trees_stop_at_the_budget() {
         &condition_list(&[conditions]),
     );
     let varc = Varc::parse(&table).unwrap();
-    assert!(varc.composite(1, &[0.0]).unwrap().components.is_empty());
+    let mut eval = Eval::new(&[0.0]);
+    let c = varc.composite_in(1, &[0.0], &mut eval).unwrap();
+    assert_eq!(c.components.len(), 1);
+    assert_eq!(
+        MAX_CONDITION_TABLES - eval.condition_visits_left,
+        1 + 5 * 255
+    );
+}
+
+/// A MultiItemVariationStore with one region (axis 0: 0, 1, 1) and one
+/// subtable that names it `mentions` times, whose one delta set holds a
+/// delta of 1 per mention.
+fn mention_store(mentions: u16) -> Vec<u8> {
+    let mut store = Vec::new();
+    store.extend_from_slice(&1u16.to_be_bytes()); // format
+    store.extend_from_slice(&12u32.to_be_bytes()); // region list
+    store.extend_from_slice(&1u16.to_be_bytes()); // one subtable
+    store.extend_from_slice(&28u32.to_be_bytes()); // its offset
+    store.extend_from_slice(&1u16.to_be_bytes()); // region count, at 12
+    store.extend_from_slice(&6u32.to_be_bytes());
+    store.extend_from_slice(&1u16.to_be_bytes()); // one axis
+    store.extend_from_slice(&0u16.to_be_bytes());
+    store.extend_from_slice(&f2dot14(0.0));
+    store.extend_from_slice(&f2dot14(1.0));
+    store.extend_from_slice(&f2dot14(1.0));
+    assert_eq!(store.len(), 28);
+    store.push(1); // subtable format
+    store.extend_from_slice(&mentions.to_be_bytes());
+    for _ in 0..mentions {
+        store.extend_from_slice(&0u16.to_be_bytes());
+    }
+    // Runs of up to 64 i8 deltas of 1.
+    let mut deltas = Vec::new();
+    let mut left = usize::from(mentions);
+    while left > 0 {
+        let run = left.min(64);
+        deltas.push((run - 1) as u8);
+        deltas.extend(core::iter::repeat(1u8).take(run));
+        left -= run;
+    }
+    store.extend_from_slice(&build_cff2_index(&[&deltas]));
+    store
+}
+
+/// A VARC table with one component of glyph 10 gated by a chain of
+/// `levels` And tables, each with two offsets that both name the next,
+/// ending in the Value condition `default + delta > 0` over
+/// [`mention_store`].
+fn deep_value_condition_table(levels: usize, mentions: u16, default: i16) -> Vec<u8> {
+    let mut condition = vec![0, 2];
+    condition.extend_from_slice(&default.to_be_bytes());
+    condition.extend_from_slice(&0u32.to_be_bytes());
+    for _ in 0..levels {
+        // And with two offsets, both to the child right after them.
+        let mut and = vec![0, 3, 2];
+        and.extend_from_slice(&9u32.to_be_bytes()[1..]);
+        and.extend_from_slice(&9u32.to_be_bytes()[1..]);
+        and.extend_from_slice(&condition);
+        condition = and;
+    }
+    with_conditions(
+        build_varc(&[1], &[&gated(10, 0)], Some(&mention_store(mentions)), None),
+        &condition_list(&[condition]),
+    )
+}
+
+#[test]
+fn deep_shared_value_conditions_cost_linear_work() {
+    // 20 And levels whose two offsets name the same child (2^20 paths)
+    // over a Value condition whose delta set walks 60,000 mentions of
+    // one region. Each table is evaluated once and the subtable's
+    // scalars are worked out once: 41 table visits, 60,000 scalar steps,
+    // and 60,000 delta values. Walking every path took 2^20 times that.
+    let table = deep_value_condition_table(20, 60_000, -30_000);
+    let varc = Varc::parse(&table).unwrap();
+    // At axis 0 = 1 the deltas add 60,000: the condition holds.
+    let mut eval = Eval::new(&[1.0]);
+    let c = varc.composite_in(1, &[1.0], &mut eval).unwrap();
+    assert_eq!(c.components.len(), 1);
+    assert_eq!(MAX_CONDITION_TABLES - eval.condition_visits_left, 41);
+    assert_eq!(MAX_COMPOSITE_WORK - eval.work_left, 120_000);
+    // At 0.25 they add 15,000: it does not.
+    assert!(varc.composite(1, &[0.25]).unwrap().components.is_empty());
+}
+
+#[test]
+fn delta_work_past_the_budget_adds_nothing() {
+    // Twenty components whose translation varies through the delta set
+    // of 60,000 region mentions. The first costs 120,000 units (the
+    // scalars, then the walk), each later one 60,000, so 16 fit the
+    // 2^20 budget and the rest keep their stored translation.
+    let flags = (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X) as u8;
+    let mut record = Vec::new();
+    for _ in 0..20 {
+        record.extend_from_slice(&[flags, 0x00, 0x05, 0x00]);
+        record.extend_from_slice(&0i16.to_be_bytes());
+    }
+    let table = build_varc(&[1], &[&record], Some(&mention_store(60_000)), None);
+    let varc = Varc::parse(&table).unwrap();
+    let c = varc.composite(1, &[1.0]).unwrap();
+    let tx: Vec<f32> = c.components.iter().map(|c| c.transform[4]).collect();
+    assert_eq!(tx[..16], [60_000.0; 16]);
+    assert_eq!(tx[16..], [0.0; 4]);
 }
 
 #[test]

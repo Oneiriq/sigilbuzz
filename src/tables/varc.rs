@@ -49,6 +49,7 @@
 //! This module only reads VARC. Subsetting lives in the
 //! `sigilbuzz-subset` crate.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
@@ -126,10 +127,19 @@ const NO_VARIATION: u32 = 0xFFFF_FFFF;
 /// ignored.
 const MAX_COMPONENT_AXES: usize = 4096;
 
-/// Condition tables one `composite_with_font_coords` call evaluates at
-/// most. And and Or tables can share children, so a small table can
-/// name a huge tree; past the budget every condition fails.
+/// Condition table visits one `composite_with_font_coords` call makes at
+/// most. Each table's result is kept for the call, so a table whose
+/// children share a subtree is evaluated once, not once per path; past
+/// the budget every condition fails.
 const MAX_CONDITION_TABLES: u32 = 1 << 16;
+
+/// Delta work one `composite_with_font_coords` call does at most: one
+/// unit per region index whose scalar it works out (once per
+/// MultiItemVariationData subtable and call) and one per delta value it
+/// walks (region indexes times values, per variation it applies). A
+/// component of a real font walks a few hundred values; past the budget
+/// no more deltas apply and conditions that need them fail.
+const MAX_COMPOSITE_WORK: u64 = 1 << 20;
 
 /// HarfBuzz's `HB_MAX_NESTING_LEVEL`: its sanitizer drops a condition
 /// nested deeper, which then does not hold.
@@ -272,12 +282,23 @@ impl<'a> Varc<'a> {
         coords: &[f32],
         font_coords: &[f32],
     ) -> Option<VarcComposite> {
+        let mut eval = Eval::new(coords);
+        self.composite_in(gid, font_coords, &mut eval)
+    }
+
+    /// [`Varc::composite_with_font_coords`] with the evaluation state
+    /// held by the caller, so tests can read the work it did.
+    fn composite_in(
+        &self,
+        gid: u16,
+        font_coords: &[f32],
+        eval: &mut Eval<'_>,
+    ) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
         let raw = *self.glyph_records.get(idx)?;
         let mut composite = VarcComposite::default();
         let mut r = Reader::new(raw);
         let mut total_coords = 0usize;
-        let mut condition_budget = MAX_CONDITION_TABLES;
         while !r.is_empty() {
             // A VarComponent stops when bytes run out. Reaching the
             // end mid-record means the font is malformed; we skip the
@@ -287,11 +308,11 @@ impl<'a> Varc<'a> {
                 break;
             };
             if let Some(index) = record.condition_index {
-                if !self.condition_holds(index, coords, &mut condition_budget) {
+                if !self.condition_holds(index, eval) {
                     continue;
                 }
             }
-            let Some(c) = self.resolve_component(&record, coords, font_coords) else {
+            let Some(c) = self.resolve_component(&record, font_coords, eval) else {
                 continue;
             };
             total_coords = total_coords.saturating_add(c.coords.len());
@@ -369,21 +390,22 @@ impl<'a> Varc<'a> {
         })
     }
 
-    /// Evaluates `record` at `coords`, the coords of the glyph the
-    /// component belongs to, in a font set to `font_coords`. `None` when
-    /// the component draws nothing.
+    /// Evaluates `record` at the coords of the glyph the component
+    /// belongs to (`eval.coords`), in a font set to `font_coords`.
+    /// `None` when the component draws nothing.
     fn resolve_component(
         &self,
         record: &ComponentRecord<'_>,
-        coords: &[f32],
         font_coords: &[f32],
+        eval: &mut Eval<'_>,
     ) -> Option<VarcComponent> {
         let gid = u16::try_from(record.gid).ok()?;
+        let coords = eval.coords;
 
         // Axis values and their deltas, in F2DOT14 units.
         let mut axis_values: Vec<f32> = record.axis_values.iter().map(|&v| v as f32).collect();
         if let Some(index) = record.axis_values_var_index {
-            self.add_deltas(index, coords, &mut axis_values);
+            self.add_deltas(index, &mut axis_values, eval);
         }
 
         // The child starts from the parent's coord vector, or with
@@ -415,7 +437,7 @@ impl<'a> Varc<'a> {
         // then divided down: F4.12 for angles, F6.10 for scales.
         let mut values: Vec<f32> = record.fields.iter().map(|&(_, v)| f32::from(v)).collect();
         if let Some(index) = record.transform_var_index {
-            self.add_deltas(index, coords, &mut values);
+            self.add_deltas(index, &mut values, eval);
         }
         let mut t = Decomposed::default();
         for (&(field, _), &v) in record.fields.iter().zip(&values) {
@@ -443,7 +465,8 @@ impl<'a> Varc<'a> {
         })
     }
 
-    /// Whether condition `index` of the ConditionList holds at `coords`.
+    /// Whether condition `index` of the ConditionList holds at
+    /// `eval.coords`.
     ///
     /// ```text
     ///   ConditionList: u32 count, Offset32 conditions[count]
@@ -452,7 +475,7 @@ impl<'a> Varc<'a> {
     ///
     /// A missing list, an index past it, and a null or out-of-range
     /// offset all name HarfBuzz's Null condition, which does not hold.
-    fn condition_holds(&self, index: u32, coords: &[f32], budget: &mut u32) -> bool {
+    fn condition_holds(&self, index: u32, eval: &mut Eval<'_>) -> bool {
         let Some(list) = self.condition_list else {
             return false;
         };
@@ -468,14 +491,14 @@ impl<'a> Varc<'a> {
         let Some(offset) = slot.and_then(|at| be_u32(list, at)) else {
             return false;
         };
-        match list.get(offset as usize..) {
-            Some(condition) if offset != 0 => self.evaluate_condition(condition, coords, 0, budget),
+        match usize::try_from(offset) {
+            Ok(at) if at != 0 => self.evaluate_condition(list, at, 0, eval),
             _ => false,
         }
     }
 
-    /// Evaluates the condition table at the start of `data`, as
-    /// HarfBuzz's `Condition::evaluate` does:
+    /// Evaluates the condition table at byte `at` of the ConditionList
+    /// `list`, as HarfBuzz's `Condition::evaluate` does:
     ///
     /// ```text
     ///   1 AxisRange: u16 format, u16 axisIndex, F2DOT14 min, F2DOT14 max
@@ -487,27 +510,44 @@ impl<'a> Varc<'a> {
     ///
     /// Offsets are from the start of the condition that holds them. A
     /// null offset names the Null condition, which does not hold, so
-    /// its negation does. A table cut short, an unknown format, a table
-    /// nested deeper than `MAX_CONDITION_DEPTH` (HarfBuzz's sanitizer
-    /// drops those), and every table once `budget` runs out do not
-    /// hold either.
+    /// its negation does. A table cut short or past the list, an
+    /// unknown format, a table nested deeper than `MAX_CONDITION_DEPTH`
+    /// (HarfBuzz's sanitizer drops those), and every table once the
+    /// call's visit budget runs out do not hold either.
+    ///
+    /// A table's result depends only on the coords, so the call keeps
+    /// it: a later visit, through another path into a shared subtree,
+    /// reads it back instead of walking the subtree again.
     fn evaluate_condition(
         &self,
-        data: &[u8],
-        coords: &[f32],
+        list: &[u8],
+        at: usize,
         depth: usize,
-        budget: &mut u32,
+        eval: &mut Eval<'_>,
     ) -> bool {
-        if depth >= MAX_CONDITION_DEPTH || *budget == 0 {
+        if depth >= MAX_CONDITION_DEPTH || eval.condition_visits_left == 0 {
             return false;
         }
-        *budget -= 1;
-        let child = |offset: usize, budget: &mut u32| -> bool {
-            let Some(at) = be_u24(data, offset) else {
-                return false;
-            };
-            match data.get(at..) {
-                Some(child) if at != 0 => self.evaluate_condition(child, coords, depth + 1, budget),
+        eval.condition_visits_left -= 1;
+        if let Some(&known) = eval.conditions.get(&at) {
+            return known;
+        }
+        let holds = self.condition_table(list, at, depth, eval);
+        eval.conditions.insert(at, holds);
+        holds
+    }
+
+    /// The uncached body of [`Self::evaluate_condition`].
+    fn condition_table(&self, list: &[u8], at: usize, depth: usize, eval: &mut Eval<'_>) -> bool {
+        let Some(data) = list.get(at..) else {
+            return false;
+        };
+        // The child condition behind the Offset24 at `field`.
+        let child = |field: usize, eval: &mut Eval<'_>| -> bool {
+            match be_u24(data, field) {
+                Some(off) if off != 0 => {
+                    self.evaluate_condition(list, at.saturating_add(off), depth + 1, eval)
+                }
                 _ => false,
             }
         };
@@ -520,7 +560,8 @@ impl<'a> Varc<'a> {
                 };
                 // HarfBuzz compares whole F2DOT14 values; an axis the
                 // coords do not reach is at its default.
-                let coord = coords
+                let coord = eval
+                    .coords
                     .get(usize::from(axis))
                     .map_or(0.0, |&c| hb_roundf(c * 16384.0));
                 f32::from(min as i16) <= coord && coord <= f32::from(max as i16)
@@ -530,8 +571,8 @@ impl<'a> Varc<'a> {
                     return false;
                 };
                 let mut value = [f32::from(default as i16)];
-                self.add_deltas(index, coords, &mut value);
-                value[0] > 0.0
+                // Out of delta budget the value is unknown, so it fails.
+                self.add_deltas(index, &mut value, eval) && value[0] > 0.0
             }
             Some(format @ (3 | 4)) => {
                 let Some(&count) = data.get(2) else {
@@ -542,27 +583,79 @@ impl<'a> Varc<'a> {
                 if data.len() < 3 + 3 * usize::from(count) {
                     return false;
                 }
-                let mut offsets = (0..usize::from(count)).map(|i| 3 + 3 * i);
+                let mut fields = (0..usize::from(count)).map(|i| 3 + 3 * i);
                 if format == 3 {
-                    offsets.all(|at| child(at, budget))
+                    fields.all(|field| child(field, eval))
                 } else {
-                    offsets.any(|at| child(at, budget))
+                    fields.any(|field| child(field, eval))
                 }
             }
-            Some(5) => data.len() >= 5 && !child(2, budget),
+            Some(5) => data.len() >= 5 && !child(2, eval),
             _ => false,
         }
     }
 
-    /// Adds the deltas of the variation index `index` at `coords` to
-    /// `values`. Nothing is added at the default instance (empty
+    /// Adds the deltas of the variation index `index` at `eval.coords`
+    /// to `values`, region by region into the stored values as HarfBuzz
+    /// adds them. Nothing is added at the default instance (empty
     /// coords), for `NO_VARIATION`, or without a store, as in HarfBuzz.
-    fn add_deltas(&self, index: u32, coords: &[f32], values: &mut [f32]) {
-        if coords.is_empty() || index == NO_VARIATION {
-            return;
+    ///
+    /// The region scalars of each subtable are worked out once per call
+    /// and kept. Working them out and walking the delta set are charged
+    /// to the call's work budget; once that runs out this adds nothing
+    /// and returns false.
+    fn add_deltas(&self, index: u32, values: &mut [f32], eval: &mut Eval<'_>) -> bool {
+        if eval.coords.is_empty() || index == NO_VARIATION {
+            return true;
         }
-        if let Some(store) = &self.var_store {
-            store.add_deltas((index >> 16) as u16, index & 0xFFFF, coords, values);
+        let Some(store) = &self.var_store else {
+            return true;
+        };
+        let Some(slot) = store.subtable_slot((index >> 16) as u16) else {
+            return true;
+        };
+        let regions = store.slot_region_count(slot) as u64;
+        let mut cost = regions.saturating_mul(values.len() as u64);
+        if !eval.scalars.contains_key(&slot) {
+            cost = cost.saturating_add(regions);
+        }
+        if cost > eval.work_left {
+            eval.work_left = 0;
+            return false;
+        }
+        eval.work_left -= cost;
+        let coords = eval.coords;
+        let scalars = eval
+            .scalars
+            .entry(slot)
+            .or_insert_with(|| store.slot_scalars(slot, coords));
+        store.add_slot_deltas(slot, index & 0xFFFF, scalars, values);
+        true
+    }
+}
+
+/// The state of one `composite_with_font_coords` call: what depends only
+/// on the glyph's coords, kept so it is worked out once, and the call's
+/// budgets.
+struct Eval<'c> {
+    /// The coords of the glyph the components belong to.
+    coords: &'c [f32],
+    /// Condition results by the table's offset in the ConditionList.
+    conditions: BTreeMap<usize, bool>,
+    condition_visits_left: u32,
+    /// Region scalars by MultiItemVariationData subtable slot.
+    scalars: BTreeMap<usize, Vec<f32>>,
+    work_left: u64,
+}
+
+impl<'c> Eval<'c> {
+    fn new(coords: &'c [f32]) -> Self {
+        Self {
+            coords,
+            conditions: BTreeMap::new(),
+            condition_visits_left: MAX_CONDITION_TABLES,
+            scalars: BTreeMap::new(),
+            work_left: MAX_COMPOSITE_WORK,
         }
     }
 }

@@ -431,7 +431,47 @@ impl<'a> MultiVarStore<'a> {
     /// Regions whose scalar is zero are skipped. Does nothing when the
     /// indices are out of range or the set is too short for its tuples.
     pub(crate) fn add_deltas(&self, outer: u16, inner: u32, coords: &[f32], out: &mut [f32]) {
-        let Some(sub) = self.subtable(outer) else {
+        let Some(slot) = self.subtable_slot(outer) else {
+            return;
+        };
+        let scalars = self.slot_scalars(slot, coords);
+        self.add_slot_deltas(slot, inner, &scalars, out);
+    }
+
+    /// The parsed subtable `outer` resolves to. Outers whose offsets
+    /// alias share a slot.
+    pub(crate) fn subtable_slot(&self, outer: u16) -> Option<usize> {
+        self.subtable_slots.get(usize::from(outer)).copied()
+    }
+
+    /// Region indexes of the subtable in `slot`: the length of its
+    /// scalar list, and how many tuples each of its delta sets holds.
+    pub(crate) fn slot_region_count(&self, slot: usize) -> usize {
+        self.subtables
+            .get(slot)
+            .map_or(0, |s| s.region_indexes.len())
+    }
+
+    /// The scalar of each region index of the subtable in `slot` at
+    /// `coords`, for [`Self::add_slot_deltas`]. Costs one step per
+    /// region index plus one evaluation per distinct region.
+    pub(crate) fn slot_scalars(&self, slot: usize, coords: &[f32]) -> Vec<f32> {
+        self.subtables
+            .get(slot)
+            .map_or_else(Vec::new, |s| self.scalars_for(&s.region_indexes, coords))
+    }
+
+    /// [`Self::add_deltas`] for the subtable in `slot`, with its region
+    /// scalars already worked out by [`Self::slot_scalars`]. Walks at
+    /// most `scalars.len() * out.len()` values.
+    pub(crate) fn add_slot_deltas(
+        &self,
+        slot: usize,
+        inner: u32,
+        scalars: &[f32],
+        out: &mut [f32],
+    ) {
+        let Some(sub) = self.subtables.get(slot) else {
             return;
         };
         let Some(&raw) = sub.delta_sets.get(inner as usize) else {
@@ -443,7 +483,7 @@ impl<'a> MultiVarStore<'a> {
         }
         let mut values = TupleFetcher::new(raw);
         let mut skip = 0usize;
-        for scalar in self.scalars_for(&sub.region_indexes, coords) {
+        for &scalar in scalars {
             if scalar == 0.0 {
                 skip = skip.saturating_add(out.len());
                 continue;
