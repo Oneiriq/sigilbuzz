@@ -59,7 +59,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::instance::{project_region_onto_kept_axes, AxisPin, F2Dot14};
-use crate::util::round_half_up;
+use crate::util::{round_half_up, WorkBudget};
+use crate::warnings::Warnings;
 use crate::SubsetError;
 
 mod iup;
@@ -104,6 +105,31 @@ pub(crate) struct GlyphPoints {
 /// optimizes its tuples to the same tolerance.
 const IUP_TOLERANCE: f32 = 0.5;
 
+/// Work units the rewrite may spend per byte of the source `gvar` on
+/// inferring sparse tuples, on top of [`MIN_WORK`]. A unit is one point
+/// delta inferred or written. Inferring a sparse tuple over all of its
+/// glyph's points, or writing it with every point, costs the point
+/// count, which a few bytes of tuple can claim thousands of times over.
+/// Real fonts spend well under one unit per byte.
+const WORK_PER_BYTE: u64 = 8;
+
+/// Inference work every rewrite may spend, however small the table.
+const MIN_WORK: u64 = 1 << 20;
+
+/// Point deltas the rewrite may decode per byte of the source `gvar`,
+/// on top of [`MIN_DECODE`]. A run of zeros packs 64 deltas into one
+/// byte, so decoding can outgrow the table that many times; each
+/// decoded delta is held until its glyph is written. Real fonts decode
+/// about one delta per byte.
+const DECODE_PER_BYTE: u64 = 16;
+
+/// Point deltas every rewrite may decode, however small the table.
+const MIN_DECODE: u64 = 1 << 20;
+
+/// What a rewrite reports when a glyph's tuples cannot all be decoded
+/// within the budget.
+const OVER_BUDGET: &str = "gvar partial: variation work exceeds its budget";
+
 /// [`bake_gvar_partial_with`] for a font whose default points are not
 /// known: tuples merge only when they list the same points, and sparse
 /// tuples keep their points.
@@ -114,7 +140,14 @@ pub(crate) fn bake_gvar_partial(
     pins: &[AxisPin],
     new_axis_count: u16,
 ) -> Result<Vec<u8>, SubsetError> {
-    bake_gvar_partial_with(gvar_bytes, coords, pins, new_axis_count, &|_| None)
+    bake_gvar_partial_with(
+        gvar_bytes,
+        coords,
+        pins,
+        new_axis_count,
+        &|_| None,
+        &Warnings::default(),
+    )
 }
 
 /// Bakes a partial-instancing rewrite of `gvar` against `coords` and
@@ -137,6 +170,7 @@ pub(crate) fn bake_gvar_partial_with(
     pins: &[AxisPin],
     new_axis_count: u16,
     points: &dyn Fn(u16) -> Option<GlyphPoints>,
+    warnings: &Warnings,
 ) -> Result<Vec<u8>, SubsetError> {
     if pins.iter().all(|p| matches!(p, AxisPin::Keep)) {
         // No pinning: passthrough preserves byte-identity, which the
@@ -183,6 +217,24 @@ pub(crate) fn bake_gvar_partial_with(
     // share one large range would multiply the work instead.
     let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(header.glyph_count as usize);
     let mut body_budget = gvar_bytes.len();
+    // The work of the whole rewrite, scaled to the table (see
+    // `WORK_PER_BYTE` and `DECODE_PER_BYTE`). Past the inference
+    // budget, tuples keep the points they list rather than being
+    // inferred over all of them; past the decoding budget, a glyph
+    // loses its variations. Both are reported, and the output and the
+    // memory held stay in proportion to the input.
+    let per_byte = |units: u64, floor: u64| {
+        WorkBudget::new(
+            (gvar_bytes.len() as u64)
+                .saturating_mul(units)
+                .saturating_add(floor),
+        )
+    };
+    let work = per_byte(WORK_PER_BYTE, MIN_WORK);
+    let decode = per_byte(DECODE_PER_BYTE, MIN_DECODE);
+    // The output so far, checked as it grows rather than once every
+    // body is held.
+    let mut written: u64 = 0;
     for gid in 0..header.glyph_count {
         let body = pull_glyph_body(gvar_bytes, &header, gid);
         body_budget = body_budget
@@ -200,9 +252,27 @@ pub(crate) fn bake_gvar_partial_with(
                 coords,
                 pins,
                 points: glyph_points.as_ref(),
+                work: &work,
+                decode: &decode,
+                warnings,
             };
-            rewrite_glyph_body(body, &glyph)?
+            match rewrite_glyph_body(body, &glyph) {
+                Err(SubsetError::Unsupported(OVER_BUDGET)) => {
+                    warnings.push(
+                        GVAR_TAG,
+                        0,
+                        OVER_BUDGET,
+                        "the variations of the glyphs past it",
+                    );
+                    Vec::new()
+                }
+                other => other?,
+            }
         };
+        written = written.saturating_add(new_body.len() as u64 + 1);
+        if written > u64::from(u32::MAX) {
+            return Err(SubsetError::Unsupported("gvar partial: offset overflow"));
+        }
         bodies.push(new_body);
     }
 
@@ -468,6 +538,31 @@ struct GlyphCtx<'a> {
     pins: &'a [AxisPin],
     /// The glyph's default points, when the caller knows them.
     points: Option<&'a GlyphPoints>,
+    /// The inference work left for the whole rewrite.
+    work: &'a WorkBudget,
+    /// The point deltas the whole rewrite may still decode.
+    decode: &'a WorkBudget,
+    warnings: &'a Warnings,
+}
+
+/// The `gvar` tag, for warnings.
+const GVAR_TAG: [u8; 4] = *b"gvar";
+
+impl GlyphCtx<'_> {
+    /// Spends `units` of the rewrite's work, or reports that inferring
+    /// tuples over every point stopped, so they keep their points.
+    fn afford(&self, units: usize) -> bool {
+        let ok = self.work.spend(units);
+        if !ok {
+            self.warnings.push(
+                GVAR_TAG,
+                0,
+                "gvar partial: variation work exceeds its budget; tuples keep their points",
+                "the inferred deltas of tuples whose default points moved",
+            );
+        }
+        ok
+    }
 }
 
 /// One source tuple that survives the projection, decoded.
@@ -588,7 +683,10 @@ fn rewrite_glyph_body(body: &[u8], glyph: &GlyphCtx<'_>) -> Result<Vec<u8>, Subs
                 }
             }
             Some((sum, false))
-        } else if let Some(points) = glyph.points {
+        } else if let Some(points) = glyph
+            .points
+            .filter(|p| glyph.afford(members.len().saturating_mul(p.before.len() + 4)))
+        {
             let mut sum = alloc::vec![(0.0_f32, 0.0_f32); points.before.len() + 4];
             for &m in members {
                 for (slot, d) in sum.iter_mut().zip(decoded[m].dense(points)) {
@@ -600,8 +698,8 @@ fn rewrite_glyph_body(body: &[u8], glyph: &GlyphCtx<'_>) -> Result<Vec<u8>, Subs
         } else {
             None
         };
-        // Without default points to infer merged deltas from, the
-        // members stay apart.
+        // Without default points to infer merged deltas from, or the
+        // work to infer them, the members stay apart.
         let tuples: Vec<Merged<'_, '_>> = match merged {
             Some((sum, dense)) => alloc::vec![Merged { first, sum, dense }],
             None => members
@@ -629,7 +727,14 @@ fn rewrite_glyph_body(body: &[u8], glyph: &GlyphCtx<'_>) -> Result<Vec<u8>, Subs
             let tuple = if dense {
                 dense_payload(&sum).map(|payload| (payload, true))
             } else {
-                sparse_tuple(d, &sum, glyph.points)
+                // Checking a sparse tuple of a moved glyph infers it
+                // over every point twice and may write every point.
+                let check = glyph.points.filter(|p| {
+                    p.after.is_none()
+                        || d.points.is_none()
+                        || glyph.afford(3usize.saturating_mul(p.before.len() + 4))
+                });
+                sparse_tuple(d, &sum, check)
             };
             let (payload, private) = tuple.ok_or(SubsetError::Unsupported(
                 "gvar partial: tuple payload exceeds u16 size",
@@ -925,20 +1030,22 @@ fn decode_tuples<'b>(
 
         // The all-points form packs as many deltas as the glyph has
         // points; recover the count from the delta stream itself.
+        // A tuple left with no Keep-axis peak applies everywhere alike:
+        // the instance baked its deltas into the default outline, so
+        // it goes, undecoded.
+        if region.all_zero_peak {
+            continue;
+        }
         let n = match &listed {
             Some(points) => points.len(),
             None => count_packed_deltas(deltas_bytes)?,
         };
+        if !glyph.decode.spend(n.saturating_mul(2).saturating_add(1)) {
+            return Err(SubsetError::Unsupported(OVER_BUDGET));
+        }
         let (xs, used_x) = read_packed_deltas_n(deltas_bytes, n)?;
         let (ys, _used_y) =
             read_packed_deltas_n(deltas_bytes.get(used_x..).unwrap_or_default(), n)?;
-
-        // A tuple left with no Keep-axis peak applies everywhere alike:
-        // the instance baked its deltas into the default outline, so
-        // it goes.
-        if region.all_zero_peak {
-            continue;
-        }
         out.push(Decoded {
             region,
             points: listed,

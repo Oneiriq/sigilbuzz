@@ -234,6 +234,7 @@ pub(super) fn partial_instance(
             pins,
             new_axis_count,
             &points,
+            &warnings,
         )?;
         tables.push((tag::GVAR, new_gvar));
     }
