@@ -17,8 +17,8 @@
 //!   * mixed Tibetan + Latin
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
-//! `src/ot/tibetan.rs` or the script_of arm in
-//! `src/unicode/mod.rs`.
+//! `src/ot/tibetan.rs` or the Script property table in
+//! `src/unicode/script_table.rs`.
 
 use sigilbuzz::{shape, Blob, Buffer, Face, Font};
 

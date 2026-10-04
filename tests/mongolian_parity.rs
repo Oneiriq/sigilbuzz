@@ -23,8 +23,8 @@
 //!
 //! A failure here is a parity drift against rustybuzz; fix in
 //! `src/ot/mongolian.rs`, `src/unicode/joining.rs` (Mongolian
-//! joining-type table), or the script_of arm in
-//! `src/unicode/mod.rs`.
+//! joining-type table), or the Script property table in
+//! `src/unicode/script_table.rs`.
 
 use sigilbuzz::{shape, Blob, Buffer, Direction, Face, Font};
 
@@ -273,6 +273,40 @@ fn explicit_horizontal_overrides_mongolian_default() {
     assert_eq!(shaped.len(), 1);
     assert_eq!(shaped.glyphs[0].y_advance, 0);
     assert_ne!(shaped.glyphs[0].x_advance, 0);
+}
+
+#[test]
+fn auto_vertical_needs_a_leading_mongolian_character() {
+    // The vertical default applies to text that starts with a
+    // Mongolian character of the Mongolian block: a letter, or the
+    // birga. A leading space, a quotation mark, or a Mongolian
+    // Supplement ornament keeps the text horizontal, as HarfBuzz lays
+    // out every text with no direction.
+    let blob = Blob::new(NOTO_MONGOLIAN);
+    let face = Face::parse(&blob, 0).expect("parse face");
+    let font = Font::new(face, 1000.0);
+    let vertical = |text: &str| {
+        let mut buffer = Buffer::new();
+        buffer.push_str(text);
+        let shaped = shape(&font, &buffer, &[]).expect("shape");
+        shaped
+            .glyphs
+            .iter()
+            .all(|g| g.x_advance == 0 && g.y_advance != 0)
+    };
+    assert!(vertical("\u{1820}\u{1821}"));
+    assert!(vertical("\u{1800}\u{1820}\u{1821}"));
+    assert!(vertical("\u{1820} abc"));
+    for text in [
+        " \u{1820}\u{1821}",
+        "\u{201C}\u{1820}\u{1821}",
+        "\u{11662}",
+        "\u{11662}\u{1820}\u{1821}",
+        "\u{1802}\u{1820}",
+        "abc \u{1820}",
+    ] {
+        assert!(!vertical(text), "{text:?}");
+    }
 }
 
 #[test]

@@ -34,7 +34,8 @@ mod script_tags;
 /// One bucket for each script HarfBuzz gives a shaper of its own
 /// (`hb_ot_shaper_categorize`), and a few more whose OpenType script
 /// tags fonts use (Latin, Greek, Cyrillic, Han). Every other script is
-/// [`Script::Other`].
+/// [`Script::Other`]. A character's bucket is that of its Unicode Script
+/// property (see [`script_of`]).
 ///
 /// The enum is `#[non_exhaustive]`: later releases add buckets
 /// without a breaking change, so a `match` outside this crate needs a
@@ -42,11 +43,14 @@ mod script_tags;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Script {
-    /// Basic Latin + supplements. Covers ASCII and Western European.
+    /// Latin (`Latn`), including Latin Extended Additional (Vietnamese)
+    /// and the other Latin blocks.
     Latin,
-    /// CJK unified ideographs and kana.
+    /// Han (`Hani`): the CJK ideographs of every extension, and
+    /// Hiragana (`Hira`) and Katakana (`Kana`).
     Han,
-    /// Arabic family: Arabic, Persian, Urdu presentations.
+    /// Arabic (`Arab`): Arabic, Persian, Urdu, the Arabic Supplement
+    /// and Extended blocks, and the presentation forms.
     Arabic,
     /// Hebrew.
     Hebrew,
@@ -78,14 +82,11 @@ pub enum Script {
     /// Khmer. The Khmer shaper applies.
     Khmer,
     /// Myanmar (Burmese, Shan, Mon). The Myanmar shaper applies.
-    /// Covers main block U+1000..U+109F plus Myanmar Extended-A
-    /// U+AA60..U+AA7F and Extended-B U+A9E0..U+A9FF.
     Myanmar,
     /// Thai. The Thai shaper applies: the default features, after
-    /// sara am splits into nikhahit and sara aa. Covers
-    /// U+0E00..U+0E7F.
+    /// sara am splits into nikhahit and sara aa.
     Thai,
-    /// Lao. Shaped like Thai. Covers U+0E80..U+0EFF.
+    /// Lao. Shaped like Thai.
     Lao,
     /// Hangul. A buffer of Hangul runs the Hangul shaper, which
     /// composes and decomposes syllables as the font needs and gives
@@ -93,55 +94,51 @@ pub enum Script {
     /// U+A960..U+A97F, U+D7B0..U+D7FF) the `ljmo` / `vjmo` / `tjmo`
     /// features.
     Hangul,
-    /// Tibetan (U+0F00..U+0FFF). Stacked above/below-base subjoined
-    /// consonants. The Universal Shaping Engine applies, as in
-    /// HarfBuzz.
+    /// Tibetan. Stacked above/below-base subjoined consonants. The
+    /// Universal Shaping Engine applies, as in HarfBuzz.
     Tibetan,
-    /// Mongolian (U+1800..U+18AF). Cursive-joining like Arabic, with
-    /// Free Variation Selectors (U+180B..U+180D, U+180F) overriding
-    /// the joining-form choice. The Universal Shaping Engine applies,
-    /// with the joining forms of [`crate::ot::mongolian`].
+    /// Mongolian, the Mongolian Supplement included. Cursive-joining
+    /// like Arabic, with Free Variation Selectors (U+180B..U+180D,
+    /// U+180F) overriding the joining-form choice. The Universal
+    /// Shaping Engine applies, with the joining forms of
+    /// [`crate::ot::mongolian`].
     Mongolian,
     /// N'Ko. Right-to-left alphabetic script for the Manding language
-    /// family (Bambara / Maninka / Dyula). USE pipeline; covers
-    /// U+07C0..U+07FF.
+    /// family (Bambara / Maninka / Dyula). USE pipeline.
     NKo,
     /// Buginese (Lontara). Brahmic script for the Bugis language of
-    /// South Sulawesi. USE pipeline; covers U+1A00..U+1A1F.
+    /// South Sulawesi. USE pipeline.
     Buginese,
     /// Tai Tham (Lanna). Brahmic script used for Northern Thai, Tai
-    /// Lue, Khün, and Lao Tham. USE pipeline; covers U+1A20..U+1AAF.
+    /// Lue, Khün, and Lao Tham. USE pipeline.
     TaiTham,
     /// Balinese. Brahmic script for Balinese / Sasak / Old Javanese.
-    /// USE pipeline; covers U+1B00..U+1B7F.
+    /// USE pipeline.
     Balinese,
     /// Sundanese. Brahmic script for the Sundanese language of West
-    /// Java. USE pipeline; covers U+1B80..U+1BBF.
+    /// Java. USE pipeline.
     Sundanese,
     /// Lepcha. Brahmic script of Sikkim used for the Lepcha language.
-    /// USE pipeline; covers U+1C00..U+1C4F.
+    /// USE pipeline.
     Lepcha,
     /// Limbu. Brahmic-derived script of Sikkim / Eastern Nepal used
-    /// for the Limbu language. USE pipeline; covers U+1900..U+194F.
+    /// for the Limbu language. USE pipeline.
     Limbu,
     /// Cham. Brahmic script of Cambodia and Vietnam used for the
-    /// Cham language. USE pipeline; covers U+AA00..U+AA5F.
+    /// Cham language. USE pipeline.
     Cham,
-    /// Brahmi (U+11000..U+1107F). The 3rd-century-BCE ancestor of
-    /// every Brahmic script. Historical / scholarly use only. SMP
-    /// block: codepoints are u32-wide. USE pipeline.
+    /// Brahmi. The 3rd-century-BCE ancestor of every Brahmic script.
+    /// Historical / scholarly use only. USE pipeline.
     Brahmi,
-    /// Sharada (U+11180..U+111DF). Historical Kashmiri / Sanskrit
-    /// script (8th century). Still used liturgically. USE pipeline.
+    /// Sharada. Historical Kashmiri / Sanskrit script (8th century).
+    /// Still used liturgically. USE pipeline.
     Sharada,
-    /// Khojki (U+11200..U+1124F). Historical script for Sindhi /
-    /// Khoja Ismaili community. USE pipeline.
+    /// Khojki. Historical script for the Sindhi / Khoja Ismaili
+    /// community. USE pipeline.
     Khojki,
-    /// Tirhuta (U+11480..U+114DF). Historical script for Maithili
-    /// / Sanskrit. USE pipeline.
+    /// Tirhuta. Historical script for Maithili / Sanskrit. USE pipeline.
     Tirhuta,
-    /// Modi (U+11600..U+1165F). Historical script for Marathi
-    /// (17th century). USE pipeline.
+    /// Modi. Historical script for Marathi (17th century). USE pipeline.
     Modi,
     /// Syriac (`Syrc`). The Arabic shaper applies, with the Syriac joining forms.
     Syriac,
@@ -463,130 +460,42 @@ impl Script {
     }
 }
 
-/// Returns the script bucket for a character.
+/// Returns the script bucket for a character: the bucket of its Unicode
+/// Script property (`Scripts.txt` of Unicode 18.0.0, the version
+/// HarfBuzz 14.5.0 uses), as HarfBuzz's `hb_unicode_script` reads it.
+/// Hiragana and Katakana fall in [`Script::Han`]. Common (digits,
+/// punctuation, the tatweel, the dandas), Inherited (combining marks),
+/// unassigned and private-use code points, and the scripts sigilbuzz
+/// has no bucket for are [`Script::Other`]: in a text, Common and
+/// Inherited characters take the script of the text around them (see
+/// [`crate::Buffer::script_runs`]).
 ///
-/// The older buckets (Latin through Modi, in declaration order) cover
-/// the Unicode blocks of their scripts, so the Common and Inherited
-/// characters inside those blocks land in them too. The buckets added
-/// in 0.22.0 (Syriac through Seal) take the code points the Unicode
-/// Script property gives their script (`Scripts.txt` of Unicode
-/// 18.0.0, the version HarfBuzz 14.5.0 uses). The fallthrough is
-/// [`Script::Other`], which the shaper treats with the generic path.
+/// Before 0.24.0 the older buckets (Latin through Modi, in declaration
+/// order) covered the Unicode blocks of their scripts instead, so a
+/// letter outside those blocks, such as Vietnamese U+1EF7 in Latin
+/// Extended Additional or U+08A0 in Arabic Extended-A, was
+/// [`Script::Other`], and the Common characters inside them took the
+/// block's script.
 ///
 /// # Examples
 ///
 /// ```
 /// use sigilbuzz::{script_of, UnicodeScript};
 ///
+/// assert_eq!(script_of('\u{1EF7}'), UnicodeScript::Latin);
+/// assert_eq!(script_of('\u{08A0}'), UnicodeScript::Arabic);
 /// assert_eq!(script_of('\u{A98F}'), UnicodeScript::Javanese);
 /// assert_eq!(script_of('\u{0712}'), UnicodeScript::Syriac);
 /// assert_eq!(script_of('\u{0531}'), UnicodeScript::Other);
+/// assert_eq!(script_of('1'), UnicodeScript::Other);
 /// ```
 #[must_use]
 pub const fn script_of(ch: char) -> Script {
-    let cp = ch as u32;
-    match cp {
-        // Basic Latin + Latin-1 Supplement + Latin Extended-A/B
-        0x0000..=0x024F => Script::Latin,
-        // Greek + Coptic + Greek Extended
-        0x0370..=0x03FF | 0x1F00..=0x1FFF => Script::Greek,
-        // Cyrillic + supplements
-        0x0400..=0x052F => Script::Cyrillic,
-        // Hebrew: main block plus the Hebrew presentation forms
-        // (U+FB1D..U+FB4F). Alphabetic Presentation Forms splits
-        // between Hebrew (U+FB1D..U+FB4F) and Armenian/Latin (below
-        // U+FB1D), so classify the Hebrew sub-block explicitly.
-        0x0590..=0x05FF | 0xFB1D..=0xFB4F => Script::Hebrew,
-        // Arabic + supplements. Note the Arabic Presentation Forms-A
-        // block (U+FB50..U+FDFF) starts immediately after the Hebrew
-        // presentation forms above, so no overlap.
-        0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => Script::Arabic,
-        // N'Ko: RTL alphabetic, Manding family. Block ends at U+07FF
-        // and abuts the Samaritan / Mandaic blocks at U+0800.
-        0x07C0..=0x07FF => Script::NKo,
-        // Devanagari
-        0x0900..=0x097F => Script::Devanagari,
-        // Bengali
-        0x0980..=0x09FF => Script::Bengali,
-        // Gurmukhi
-        0x0A00..=0x0A7F => Script::Gurmukhi,
-        // Gujarati
-        0x0A80..=0x0AFF => Script::Gujarati,
-        // Oriya (Odia)
-        0x0B00..=0x0B7F => Script::Oriya,
-        // Tamil
-        0x0B80..=0x0BFF => Script::Tamil,
-        // Telugu
-        0x0C00..=0x0C7F => Script::Telugu,
-        // Kannada
-        0x0C80..=0x0CFF => Script::Kannada,
-        // Malayalam
-        0x0D00..=0x0D7F => Script::Malayalam,
-        // Sinhala
-        0x0D80..=0x0DFF => Script::Sinhala,
-        // Thai
-        0x0E00..=0x0E7F => Script::Thai,
-        // Lao
-        0x0E80..=0x0EFF => Script::Lao,
-        // Myanmar (main + Extended-A + Extended-B)
-        0x1000..=0x109F | 0xAA60..=0xAA7F | 0xA9E0..=0xA9FF => Script::Myanmar,
-        // Limbu (Sikkim / Eastern Nepal).
-        0x1900..=0x194F => Script::Limbu,
-        // Buginese (Lontara, South Sulawesi).
-        0x1A00..=0x1A1F => Script::Buginese,
-        // Tai Tham (Lanna).
-        0x1A20..=0x1AAF => Script::TaiTham,
-        // Balinese.
-        0x1B00..=0x1B7F => Script::Balinese,
-        // Sundanese (West Java): main block + supplement
-        // (U+1CC0..U+1CCF holds Sundanese punctuation/numerals).
-        0x1B80..=0x1BBF | 0x1CC0..=0x1CCF => Script::Sundanese,
-        // Lepcha (Sikkim).
-        0x1C00..=0x1C4F => Script::Lepcha,
-        // Cham (Cambodia / Vietnam).
-        0xAA00..=0xAA5F => Script::Cham,
-        // --- Brahmi-family historical scripts (SMP) -------------
-        // Brahmi (3rd century BCE, ancestor of all Brahmic).
-        0x11000..=0x1107F => Script::Brahmi,
-        // Sharada (Kashmiri / Sanskrit, 8th century).
-        0x11180..=0x111DF => Script::Sharada,
-        // Khojki (Sindhi / Khoja Ismaili).
-        0x11200..=0x1124F => Script::Khojki,
-        // Tirhuta (Maithili / Sanskrit).
-        0x11480..=0x114DF => Script::Tirhuta,
-        // Modi (Marathi, 17th century).
-        0x11600..=0x1165F => Script::Modi,
-        // Hangul Jamo + Jamo Extended-A + Jamo Extended-B +
-        // precomposed Hangul Syllables + Hangul Compatibility Jamo,
-        // and the two Hangul tone marks (Script=Hangul in
-        // Scripts.txt), which the Hangul shaper moves.
-        0x1100..=0x11FF
-        | 0x302E..=0x302F
-        | 0x3130..=0x318F
-        | 0xA960..=0xA97F
-        | 0xAC00..=0xD7A3
-        | 0xD7B0..=0xD7FF => Script::Hangul,
-        // Tibetan: base block. Stacked subjoined consonants live
-        // in U+0F90..U+0FBC; the whole block routes through the
-        // Tibetan feature-loop shaper.
-        0x0F00..=0x0FFF => Script::Tibetan,
-        // Khmer + Khmer Symbols
-        0x1780..=0x17FF | 0x19E0..=0x19FF => Script::Khmer,
-        // Mongolian: main block. The Mongolian Supplement
-        // (U+11660..U+1167F) is not classified and falls through to
-        // `Other`. Noto Sans Mongolian's glyphs and the parity corpus
-        // sit in the main block.
-        0x1800..=0x18AF => Script::Mongolian,
-        // CJK unified ideographs + extensions A/B + Hiragana + Katakana
-        0x3040..=0x309F | 0x30A0..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF => Script::Han,
-        _ => {
-            let index = script_index(cp) as usize;
-            if index < script_table::BUCKETS.len() {
-                script_table::BUCKETS[index]
-            } else {
-                Script::Other
-            }
-        }
+    let index = script_index(ch as u32) as usize;
+    if index < script_table::BUCKETS.len() {
+        script_table::BUCKETS[index]
+    } else {
+        Script::Other
     }
 }
 
@@ -634,12 +543,15 @@ pub fn script_code(ch: char) -> [u8; 4] {
         .unwrap_or(*b"Zzzz")
 }
 
-/// True when the Unicode Script property of `ch` is Common or
-/// Inherited, so the character takes the script of the text around it
-/// (HarfBuzz's `hb_buffer_guess_segment_properties` skips them).
-pub(crate) const fn is_common_or_inherited_script(ch: char) -> bool {
+/// True when the Unicode Script property of `ch` is Common, Inherited,
+/// or Unknown (unassigned and private-use code points), the scripts
+/// HarfBuzz's `hb_buffer_guess_segment_properties` skips, so the
+/// character takes the script of the text around it.
+pub(crate) const fn is_scriptless(ch: char) -> bool {
     let index = script_index(ch as u32);
-    index == script_table::COMMON || index == script_table::INHERITED
+    index == script_table::COMMON
+        || index == script_table::INHERITED
+        || index == script_table::UNKNOWN
 }
 
 /// Returns `true` if the codepoint is a Hangul Jamo (Leading / Vowel /
@@ -695,31 +607,23 @@ pub(crate) const fn is_scriptless_default_ignorable(ch: char) -> bool {
 
 /// True for the characters that take the script of the text around
 /// them when text splits into script runs, as HarfBuzz's buffer takes
-/// the script of its first character that is not `COMMON` or
-/// `INHERITED`: every character the Unicode Script property gives
-/// Common or Inherited (the tatweel, the dandas, combining marks,
-/// punctuation), and the default ignorables of no script of their own
-/// (unassigned ones included), which GSUB and GPOS match across.
-/// Without these, `"e\u{0301}"` would split into two runs and break
-/// `ccmp` and any GSUB context across the mark.
+/// the script of its first character that is not `COMMON`,
+/// `INHERITED`, or `UNKNOWN`: every character the Unicode Script
+/// property gives Common or Inherited (the tatweel, the dandas,
+/// combining marks, digits, punctuation), the unassigned and
+/// private-use code points (Unknown), and the default ignorables of no
+/// script of their own, which GSUB and GPOS match across. Without
+/// these, `"e\u{0301}"` would split into two runs and break `ccmp` and
+/// any GSUB context across the mark.
 ///
-/// The blocks sigilbuzz listed by hand before it read the Script
-/// property stay in: ASCII and Latin-1 punctuation and symbols (with
-/// the ordinal indicators U+00AA and U+00BA), the combining mark
-/// blocks, and U+25CC.
+/// The combining mark blocks sigilbuzz listed by hand before it read
+/// the Script property stay in, so the two Cyrillic combining half
+/// marks U+FE2E and U+FE2F never split from their base either.
 pub(crate) const fn is_common_or_inherited(ch: char) -> bool {
     matches!(
         ch as u32,
-        0x0000..=0x0040
-            | 0x005B..=0x0060
-            | 0x007B..=0x007F
-            | 0x00A0..=0x00BF
-            | 0x0300..=0x036F
-            | 0x1DC0..=0x1DFF
-            | 0x20D0..=0x20FF
-            | 0xFE20..=0xFE2F
-            | 0x25CC
-    ) || is_common_or_inherited_script(ch)
+        0x0300..=0x036F | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F
+    ) || is_scriptless(ch)
         || is_scriptless_default_ignorable(ch)
 }
 

@@ -15,8 +15,7 @@
 //! (`Lm`, `Lo`, the marks, the numbers, the symbols, and unassigned and
 //! private-use code points). sigilbuzz knows a glyph from a mark or a
 //! default ignorable by its own properties, and reads the category of
-//! the other glyphs off the first character of their cluster. It has no
-//! symbol categories: the symbols end the word here.
+//! the other glyphs off the first character of their cluster.
 
 use alloc::vec::Vec;
 
@@ -45,17 +44,23 @@ fn is_word(g: &Glyph, first: Option<char>) -> bool {
 }
 
 /// `HB_ARABIC_GENERAL_CATEGORY_IS_WORD` for `ch`, as far as sigilbuzz
-/// knows the categories.
+/// knows the categories: the marks, the numbers, the symbols (`Sc`,
+/// `Sk`, `Sm`, `So`), the letters without case (`Lm`, `Lo`), and the
+/// unassigned and private-use code points.
 fn is_word_char(ch: char) -> bool {
     if crate::unicode::is_default_ignorable(ch) || ch.is_numeric() {
         return true;
     }
     match general_category_class(ch) {
-        Some(GeneralCategoryClass::Mark | GeneralCategoryClass::DecimalNumber) => true,
+        Some(
+            GeneralCategoryClass::Mark
+            | GeneralCategoryClass::DecimalNumber
+            | GeneralCategoryClass::Symbol,
+        ) => true,
         // Lm and Lo: the letters without case.
         Some(GeneralCategoryClass::Letter) => !ch.is_uppercase() && !ch.is_lowercase(),
         // Unassigned and private-use code points have no script.
-        None => crate::unicode::script_code(ch) == *b"Zzzz",
+        _ => crate::unicode::script_code(ch) == *b"Zzzz",
     }
 }
 
@@ -295,6 +300,45 @@ mod tests {
         assert!(glyphs.iter().all(|g| g.indic_position == 0));
         let offsets: Vec<i32> = glyphs[2..].iter().map(|g| g.x_offset).collect();
         assert_eq!(offsets, [-700, -600, -400, -200, 0, 200, 400]);
+    }
+
+    #[test]
+    fn symbols_count_into_the_word() {
+        // The mark, beth, then `middle`, then gamal, in visual
+        // right-to-left order. HarfBuzz counts a symbol (Sc, Sk, Sm,
+        // So) into the word the tiles fill, and a punctuation mark
+        // ends it.
+        let stretched = |middle: char| {
+            let text: alloc::string::String = ['\u{070F}', '\u{0712}', middle, '\u{0713}']
+                .iter()
+                .collect();
+            let gamal = u32::try_from(4 + middle.len_utf8()).unwrap();
+            let mut glyphs = alloc::vec![
+                letter(gamal, 600),
+                letter(4, 600),
+                letter(2, 600),
+                tile(1, STCH_FIXED, 0),
+                tile(2, STCH_REPEATING, 0),
+                tile(3, STCH_FIXED, 0),
+            ];
+            let advance = |id: u32| if id == 2 { 200 } else { 100 };
+            let cx = Stretch {
+                rtl: true,
+                advance: &advance,
+                text: &text,
+                level: ClusterLevel::MonotoneGraphemes,
+                max_len: 1000,
+            };
+            apply_stch(&mut glyphs, &cx);
+            glyphs.iter().filter(|g| g.glyph_id == 2).count()
+        };
+        // 1800 to fill, 200 fixed: the 200-wide tile repeats 8 times.
+        for symbol in ['+', '\u{20AC}', '^', '\u{00A9}'] {
+            assert_eq!(stretched(symbol), 8, "{symbol:?}");
+        }
+        // The word is beth alone: 600 to fill, so 2 tiles.
+        assert_eq!(stretched('!'), 2);
+        assert_eq!(stretched('A'), 2);
     }
 
     #[test]

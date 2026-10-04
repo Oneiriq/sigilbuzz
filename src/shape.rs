@@ -81,8 +81,8 @@
 //!
 //! When the caller never set a direction
 //! ([`crate::Buffer::has_explicit_direction`] is false) the buffer
-//! shapes as LTR, except that a Mongolian-dominant run switches to
-//! vertical top-to-bottom layout. An explicit
+//! shapes as LTR, except that text that starts with a Mongolian
+//! character switches to vertical top-to-bottom layout. An explicit
 //! [`crate::Direction::Ltr`] keeps Mongolian horizontal.
 //!
 //! # Clusters and buffer flags

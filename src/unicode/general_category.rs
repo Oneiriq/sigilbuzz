@@ -1,6 +1,6 @@
 //! The parts of `General_Category` and `Extended_Pictographic` that
-//! HarfBuzz's grapheme and native-direction rules and its synthesized
-//! glyph classes read.
+//! HarfBuzz's grapheme and native-direction rules, its synthesized
+//! glyph classes, and its Arabic `stch` stretch read.
 //!
 //! The tables in `general_category_table.rs` are generated from Unicode
 //! 17.0.0 `DerivedGeneralCategory.txt` and `emoji-data.txt` (snapshots
@@ -10,7 +10,12 @@
 use super::general_category_table::{CLASSES, EXTENDED_PICTOGRAPHIC, NONSPACING_MARKS};
 
 /// A coarse General_Category class.
+///
+/// The enum is `#[non_exhaustive]`: later releases may add classes
+/// without a breaking change, so a `match` outside this crate needs a
+/// wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GeneralCategoryClass {
     /// Lu, Ll, Lt, Lm, or Lo.
     Letter,
@@ -18,6 +23,8 @@ pub enum GeneralCategoryClass {
     Mark,
     /// Nd.
     DecimalNumber,
+    /// Sc, Sk, Sm, or So: currency, modifier, math, and other symbols.
+    Symbol,
 }
 
 /// Index of the inclusive range in `ranges` that holds `cp`.
@@ -36,7 +43,8 @@ fn find<T>(ranges: &[(u32, u32, T)], cp: u32) -> Option<usize> {
 }
 
 /// The [`GeneralCategoryClass`] of `ch`, or `None` for every other
-/// category (punctuation, symbols, separators, format characters, ...).
+/// category (punctuation, separators, letter and other numbers, format
+/// characters, unassigned and private-use code points, ...).
 ///
 /// # Examples
 ///
@@ -46,6 +54,7 @@ fn find<T>(ranges: &[(u32, u32, T)], cp: u32) -> Option<usize> {
 /// assert_eq!(general_category_class('a'), Some(GeneralCategoryClass::Letter));
 /// assert_eq!(general_category_class('\u{0301}'), Some(GeneralCategoryClass::Mark));
 /// assert_eq!(general_category_class('\u{0663}'), Some(GeneralCategoryClass::DecimalNumber));
+/// assert_eq!(general_category_class('$'), Some(GeneralCategoryClass::Symbol));
 /// assert_eq!(general_category_class(','), None);
 /// ```
 #[must_use]
@@ -106,8 +115,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classes_cover_letters_marks_and_digits() {
-        use GeneralCategoryClass::{DecimalNumber, Letter, Mark};
+    fn classes_cover_letters_marks_digits_and_symbols() {
+        use GeneralCategoryClass::{DecimalNumber, Letter, Mark, Symbol};
         assert_eq!(general_category_class('Z'), Some(Letter));
         assert_eq!(general_category_class('\u{0628}'), Some(Letter));
         assert_eq!(general_category_class('\u{02B0}'), Some(Letter)); // Lm
@@ -117,6 +126,14 @@ mod tests {
         assert_eq!(general_category_class(' '), None);
         assert_eq!(general_category_class('\u{200D}'), None); // Cf
         assert_eq!(general_category_class('\u{0378}'), None); // unassigned
+        assert_eq!(general_category_class('\u{20AC}'), Some(Symbol)); // Sc
+        assert_eq!(general_category_class('^'), Some(Symbol)); // Sk
+        assert_eq!(general_category_class('+'), Some(Symbol)); // Sm
+        assert_eq!(general_category_class('\u{00A9}'), Some(Symbol)); // So
+        assert_eq!(general_category_class('\u{1F600}'), Some(Symbol)); // So
+        assert_eq!(general_category_class('\u{2160}'), None); // Nl
+        assert_eq!(general_category_class('!'), None); // Po
+        assert_eq!(general_category_class('\u{E000}'), None); // Co
     }
 
     #[test]
