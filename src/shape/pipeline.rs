@@ -19,7 +19,7 @@ use super::{
 };
 use crate::buffer::{script_priority_for, Buffer, BufferFlags, Direction, Glyph, ShapedRun};
 use crate::error::{Error, Result};
-use crate::font::Font;
+use crate::font::{f2dot14_coords, Font};
 use crate::ot::arabic::{assign_from_types_in_context, JoiningContext, JoiningForm};
 use crate::unicode::joining::{joining_type, JoiningType};
 use crate::unicode::{script_of, Script};
@@ -77,12 +77,15 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let is_vertical = !direction.is_horizontal();
 
     let face = font.face();
+    // HarfBuzz keeps normalized coordinates as F2DOT14 integers
+    // (`hb_font_t::coords`), so every variation below reads the
+    // caller's coordinates rounded to multiples of 1/16384, halves up.
+    // Coordinates that all round to zero are the default instance,
+    // where HarfBuzz reads no variations at all.
+    let rounded_coords = f2dot14_coords(font.coords());
+    let coords = rounded_coords.as_slice();
     let cmap = face.cmap()?;
     let hmtx = face.hmtx()?;
-    // Vertical metrics and origin overrides are optional; only look
-    // them up when the caller has asked for vertical layout so
-    // horizontal callers keep the cheap "hmtx only" path.
-    let vmtx = if is_vertical { face.vmtx()? } else { None };
 
     let text = buffer.text();
     if text.is_empty() {
@@ -237,7 +240,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // left out here, as if the font had none.
     let var_store = gdef.as_ref().and_then(|g| g.item_variation_store());
     let select = |variations| {
-        crate::tables::layout::feature_variations::select(variations, font.coords(), var_store)
+        crate::tables::layout::feature_variations::select(variations, coords, var_store)
     };
     let gsub = face.gsub()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
@@ -751,27 +754,23 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // One `FontAdvances` serves the whole call: the origins, the
     // fallback spaces, and the `stch` stretch below ask it too, and it
     // keeps each glyph's phantom-point advance once computed.
-    let advances = position::FontAdvances::new(face, font.coords(), vmtx)?;
+    let advances = position::FontAdvances::new(face, coords, is_vertical)?;
     if is_vertical {
         // VVAR carries per-glyph vertical-advance deltas; applies
         // only when the font is variable and the user requested
         // non-default coords. Without VVAR, a varied glyf font takes
         // the advance from the glyph's varied phantom points. With
-        // no vmtx at all, fall back to an em-square advance so the
-        // run still stacks deterministically, using the hhea-reported
-        // line height as a reasonable default.
-        let hhea = face.hhea()?;
-        let fallback = (hhea.ascent as i32) - (hhea.descent as i32);
+        // no vmtx at all, every glyph advances by the ascender-to-
+        // descender height, as in HarfBuzz.
         for glyph in &mut glyphs {
             // HarfBuzz convention: vertical y_advance is negative in
             // both TTB and BTT, so the pen moves downward; BTT only
             // differs by the final reversal.
-            let raw = advances.v_advance(glyph.glyph_id).unwrap_or(fallback);
-            glyph.y_advance = raw.saturating_neg();
+            glyph.y_advance = advances.v_advance(glyph.glyph_id).saturating_neg();
             glyph.x_advance = 0;
         }
         // Offsets are relative to each glyph's horizontal origin.
-        position::subtract_vertical_origins(face, &advances, &mut glyphs)?;
+        position::subtract_vertical_origins(&advances, &mut glyphs);
     } else {
         // Without HVAR, a varied glyf font takes the advance from the
         // glyph's varied phantom points.
@@ -789,7 +788,7 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // deltas inside a ValueRecord actually respond to the user's
     // axis coords.
     let var = VarCtx {
-        coords: font.coords(),
+        coords,
         store: gdef.as_ref().and_then(|g| g.item_variation_store()),
     };
     let inputs = position::Inputs {

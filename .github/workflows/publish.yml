@@ -145,8 +145,16 @@ jobs:
       # stops with HTTP 429 partway, and a plain rerun of
       # `cargo publish --workspace` fails on the first crate that is already
       # up. So each attempt excludes the members whose version is already in
-      # the crates.io index, and a 429 waits and retries. Re-running a failed
-      # publish job resumes the same way.
+      # the crates.io index, and a 429 waits out the limit and retries.
+      #
+      # cargo also waits, after each upload, for the new versions to show up
+      # in the index before it publishes the crates that depend on them. When
+      # the index lags, it gives up with "unable to publish ... due to a
+      # timeout while waiting for published dependencies to be available"
+      # (0.23.0 hit this). That, and a crate cargo finds already up although
+      # the index check above missed it, only need the index to catch up, so
+      # they retry after a short wait. Re-running a failed publish job
+      # resumes the same way.
       #
       # cargo reads the token from the environment, which keeps it off the
       # command line.
@@ -175,7 +183,17 @@ jobs:
               jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null
           }
 
-          for attempt in $(seq 1 12); do
+          # Retries left for each kind of failure, and how long each waits.
+          # A rate limit clears one new crate every ten minutes; the index
+          # usually catches up within a minute or two.
+          rate_limit_retries=12
+          rate_limit_wait=660
+          index_retries=10
+          index_wait=90
+
+          attempt=0
+          while true; do
+            attempt=$((attempt + 1))
             excludes=()
             pending=0
             while read -r name version; do
@@ -199,17 +217,31 @@ jobs:
               exit 0
             fi
 
-            # Retry only a rate-limit refusal, or a crate that is up but not
-            # yet visible in the index. Anything else is a real failure.
-            if ! grep -qE 'status 429|already exists' "$log"; then
+            # Retry only a rate-limit refusal, or a failure that waits on the
+            # index: a crate that is up but not yet visible in it, or cargo
+            # timing out while it waits for a dependency it just published.
+            # Anything else is a real failure. A 429 takes the long wait even
+            # when the log has both.
+            if grep -qE 'status 429' "$log"; then
+              if [ "$rate_limit_retries" -eq 0 ]; then
+                echo "::error::crates.io still rate limits the publish after attempt $attempt"
+                exit 1
+              fi
+              rate_limit_retries=$((rate_limit_retries - 1))
+              echo "::notice::crates.io rate limit reached on attempt $attempt; retrying in $((rate_limit_wait / 60)) minutes"
+              sleep "$rate_limit_wait"
+            elif grep -qE 'already exists|due to a timeout while waiting for published dependencies' "$log"; then
+              if [ "$index_retries" -eq 0 ]; then
+                echo "::error::The crates.io index still lags after attempt $attempt"
+                exit 1
+              fi
+              index_retries=$((index_retries - 1))
+              echo "::notice::Waiting for the crates.io index on attempt $attempt; retrying in $index_wait seconds"
+              sleep "$index_wait"
+            else
               exit 1
             fi
-            echo "::notice::crates.io rate limit reached on attempt $attempt; retrying in 11 minutes"
-            sleep 660
           done
-
-          echo "::error::Crates are still unpublished after 12 attempts"
-          exit 1
 
       - name: Drop the package-verification dir
         run: rm -rf target/package

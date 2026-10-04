@@ -34,21 +34,21 @@ UPEM = 1000.
     2. `mark`  in anchor mode. arg1 = 5 (= 4 contour points + pp2
        phantom index 1; pp2 lives at `numContourPoints + 1`).
        arg2 = 0.
-       NOTE: phantom resolution looks up the phantom on the *parent*
-       composite (combo itself), not on the first child component.
-       Resolved translation = combo.pp2 - mark[0] = (500, 0) - (500,
-       0) = (0, 0).
+       NOTE: HarfBuzz does not read arg1 as a phantom point of the
+       parent composite. It indexes its running point list: the 4
+       points of `base`, then the 3 points and 4 phantom points of
+       `mark` itself, so arg1 = 5 is mark[1] = (550, 0), and the mark
+       moves by (550, 0) - mark[0] = (50, 0). sigilbuzz follows it.
 
-`combo` consequently flattens to the union of `base` and `mark` with
-no displacement. ttf-parser produces the same outline by its
-zero-translation default; sigilbuzz takes the phantom-anchor branch,
-computes pp2 from hmtx, and emits the matching outline.
+`combo` therefore draws `base` and `mark` moved 50 units right.
+ttf-parser ignores anchor mode and leaves the mark where it is, so the
+integration test reads HarfBuzz 14.5.0's outline for `combo`.
 
 The integration test in `tests/outline_parity.rs`:
 - Confirms by direct byte inspection that `combo` has at least one
   anchor-mode component (so the path is genuinely exercised).
 - Asserts every glyph's `Face::glyph_outline` matches ttf-parser's
-  callbacks within a 1e-2 epsilon.
+  callbacks within a 1e-2 epsilon, and HarfBuzz's points for `combo`.
 
 # How we sidestep fontTools' bounds-recompute
 

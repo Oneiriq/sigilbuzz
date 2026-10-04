@@ -304,16 +304,17 @@ fn scan_anchor_components(bytes: &[u8]) -> (usize, usize) {
 }
 
 #[test]
-fn phantom_anchor_fixture_outlines_match_ttf_parser() {
+fn phantom_anchor_fixture_outlines_match_harfbuzz() {
     // Hand-crafted fixture (see `tests/tools/build_phantom_anchor_fixture.py`)
-    // that exercises the composite phantom-anchor branch of
-    // `Glyf::outline`: gid 3 (`combo`) has one component in plain XY
-    // mode and one in anchor mode whose `arg1` is the parent's pp2
-    // index. The fixture is engineered so that the resolved phantom
-    // translation also equals (0, 0): ttf-parser ignores anchor mode
-    // and defaults its translation to (0, 0), so a parity test stays
-    // green while sigilbuzz still walks through `phantom_points()` /
-    // resolves pp2 from hmtx.
+    // whose gid 3 (`combo`) has one component in plain XY mode and one
+    // in anchor mode whose `arg1`, 5, lies past the 4 points placed
+    // before it. HarfBuzz indexes its running point list there: the
+    // square's 4 points, then the anchored mark's own 3 points and 4
+    // phantom points, so point 5 is the mark's (550, 0), and the mark
+    // moves by (550, 0) - (500, 0). ttf-parser ignores anchor mode and
+    // draws the mark where it is, so it is the reference for the other
+    // glyphs only. HarfBuzz 14.5.0 draws `combo` with these points (its
+    // first phantom point is the origin, so its left shift is zero).
     let bytes: &[u8] = include_bytes!("fixtures/phantom_anchor.ttf");
     let (anchor, phantom) = scan_anchor_components(bytes);
     assert!(
@@ -322,14 +323,33 @@ fn phantom_anchor_fixture_outlines_match_ttf_parser() {
     );
     assert!(
         phantom >= 1,
-        "fixture must carry at least one phantom-anchor component (arg1 past parent's contour points), got {phantom}"
+        "fixture must carry at least one component anchored past the points before it, got {phantom}"
     );
+    let harfbuzz_combo: [(SimpleOp, [f32; 2]); 11] = [
+        (SimpleOp::Move, [0.0, 0.0]),
+        (SimpleOp::Line, [500.0, 0.0]),
+        (SimpleOp::Line, [500.0, 500.0]),
+        (SimpleOp::Line, [0.0, 500.0]),
+        (SimpleOp::Line, [0.0, 0.0]),
+        (SimpleOp::Close, [0.0, 0.0]),
+        (SimpleOp::Move, [550.0, 0.0]),
+        (SimpleOp::Line, [600.0, 0.0]),
+        (SimpleOp::Line, [550.0, 50.0]),
+        (SimpleOp::Line, [550.0, 0.0]),
+        (SimpleOp::Close, [0.0, 0.0]),
+    ];
     // Per-glyph diagnostic to surface the offending gid clearly.
     let ours = Face::parse_bytes(bytes, 0).expect("sigilbuzz face");
     let theirs = ttf_parser::Face::parse(bytes, 0).expect("ttf-parser face");
     for gid in 0..theirs.number_of_glyphs() {
         let mut builder = CollectBuilder::default();
         let drew_theirs = theirs.outline_glyph(ttf_parser::GlyphId(gid), &mut builder);
+        if gid == 3 {
+            builder.ops = harfbuzz_combo
+                .iter()
+                .map(|&(op, [x, y])| (op, [x, y, 0.0, 0.0, 0.0, 0.0]))
+                .collect();
+        }
         let ours_outline = ours.glyph_outline(gid).expect("our outline");
         match (drew_theirs, ours_outline) {
             (None, None) => {}
@@ -360,6 +380,44 @@ fn phantom_anchor_fixture_outlines_match_ttf_parser() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn anchors_to_vertical_phantom_points_without_vmtx_match_harfbuzz() {
+    // The phantom-anchor fixture has no `vmtx`. HarfBuzz then gives
+    // every glyph a top side bearing of zero and a vertical advance of
+    // an em, so the anchored mark's top phantom point (running list
+    // index 9: the square's 4 points, the mark's 3, then its pp1 and
+    // pp2) is (0, yMax) = (0, 50) and its bottom one (index 10) is
+    // (0, 50 - 1000). Rewriting `combo`'s anchor from 5 to 9 and 10
+    // moves the mark's point 0, (500, 0), there. HarfBuzz 14.5.0 draws
+    // the rewritten fonts with these marks.
+    let fixture: &[u8] = include_bytes!("fixtures/phantom_anchor.ttf");
+    let face = Face::parse_bytes(fixture, 0).expect("fixture face");
+    let glyf = face.record(*b"glyf").expect("glyf").offset as usize;
+    let combo = glyf + face.loca().expect("loca").range(3).expect("combo").0 as usize;
+    // The header, the square's flags, glyph id and byte offsets, then
+    // the mark's flags and glyph id: `arg1` and `arg2` follow.
+    let anchor = combo + 10 + 6 + 4;
+    assert_eq!(fixture[anchor..anchor + 2], [5, 0], "fixture layout");
+    for (arg1, (dx, dy)) in [(9u8, (-500.0f32, 50.0f32)), (10, (-500.0, -950.0))] {
+        let mut bytes = fixture.to_vec();
+        bytes[anchor] = arg1;
+        let face = Face::parse_bytes(&bytes, 0).expect("patched face");
+        let outline = face.glyph_outline(3).expect("outline").expect("drew");
+        let mark: Vec<(f32, f32)> = outline.ops()[6..]
+            .iter()
+            .filter_map(|op| match *op {
+                PathOp::MoveTo { x, y } | PathOp::LineTo { x, y } => Some((x, y)),
+                _ => None,
+            })
+            .collect();
+        let want: Vec<(f32, f32)> = [(500.0, 0.0), (550.0, 0.0), (500.0, 50.0), (500.0, 0.0)]
+            .iter()
+            .map(|&(x, y)| (x + dx, y + dy))
+            .collect();
+        assert_eq!(mark, want, "arg1 = {arg1}");
     }
 }
 

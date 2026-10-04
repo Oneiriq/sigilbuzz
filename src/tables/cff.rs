@@ -19,10 +19,12 @@
 //! the headers of the INDEX structures, which costs the same for ten
 //! glyphs or sixty thousand. The one extra pass is over the FDSelect
 //! range records of a CID-keyed font, to see whether they ascend and
-//! can be binary-searched. Charstrings, subroutines, and the Font
-//! DICT and Private DICT of a CID-keyed glyph are located when that
-//! glyph is drawn, so malformed data in one of them fails only the
-//! glyphs that use it.
+//! can be binary-searched. Ranges that do not ascend take a second
+//! pass, which records the span each range ends up with, so lookups
+//! binary-search those instead. Charstrings, subroutines, and the
+//! Font DICT and Private DICT of a CID-keyed glyph are located when
+//! that glyph is drawn, so malformed data in one of them fails only
+//! the glyphs that use it.
 //!
 //! Charstring execution is a Type 2 interpreter covering the outline
 //! path-drawing operators, stem hints (parsed and skipped), and
@@ -32,8 +34,9 @@
 //! draws the base character and then the accent at `(adx, ady)`, as
 //! HarfBuzz and FreeType do. The two are named by Standard Encoding
 //! code and found through the charset, in name-keyed fonts only.
-//! Other deprecated Type 1 operators (`callothersubr`, `pop`, and the
-//! like) are rejected.
+//! `dotsection` clears the operand stack and does nothing else, as in
+//! HarfBuzz and FreeType. Other deprecated Type 1 operators
+//! (`callothersubr`, `pop`, and the like) are rejected.
 
 mod charset;
 mod charstring;
@@ -44,7 +47,7 @@ use crate::error::{Error, Result};
 use crate::tables::outline::OutlineSink;
 use crate::tables::parse::Reader;
 
-pub(crate) use charstring::{BlendContext, Interp2};
+pub(crate) use charstring::{BlendContext, CharstringSink, Interp2, RegionCache};
 pub(crate) use dict::FdSelect;
 pub(crate) use index::{read_index2, Index};
 
@@ -73,7 +76,7 @@ pub struct Cff<'a> {
 }
 
 /// The Private DICT layout of a `CFF ` table.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum FontDicts<'a> {
     /// A name-keyed font: one Private DICT, whose Local Subrs serve
     /// every glyph.
@@ -202,6 +205,12 @@ impl<'a> Cff<'a> {
     /// own charstring drew, then the base glyph, then the accent glyph
     /// moved to the accent origin.
     pub fn outline<S: OutlineSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
+        self.draw(glyph_id, sink)
+    }
+
+    /// [`Cff::outline`] into any [`CharstringSink`], such as one that
+    /// keeps the points in the `f64` the charstring is evaluated in.
+    pub(crate) fn draw<S: CharstringSink>(&self, glyph_id: u16, sink: &mut S) -> Result<bool> {
         let gid = usize::from(glyph_id);
         if gid >= self.char_strings.len() {
             return Ok(false);
@@ -216,12 +225,12 @@ impl<'a> Cff<'a> {
     /// Runs glyph `gid`'s charstring into `sink` and returns the seac
     /// its `endchar` asked for. `component` is the origin of a seac base
     /// or accent; a seac inside one fails.
-    fn run_charstring<S: OutlineSink>(
+    fn run_charstring<S: CharstringSink>(
         &self,
         gid: usize,
         local_subrs: Index<'a>,
         sink: &mut S,
-        component: Option<(f32, f32)>,
+        component: Option<(f64, f64)>,
     ) -> Result<Option<Seac>> {
         let cs = self.char_strings.get(gid)?;
         let mut interp = Interp::new(self.global_subrs, local_subrs, sink, false);
@@ -240,7 +249,7 @@ impl<'a> Cff<'a> {
     /// `(adx, ady)`, finding both through the charset. Both use the
     /// Local Subrs of the glyph that asked for them. CID-keyed fonts
     /// name glyphs by CID, not SID, so seac is unsupported there.
-    fn draw_seac<S: OutlineSink>(
+    fn draw_seac<S: CharstringSink>(
         &self,
         seac: Seac,
         local_subrs: Index<'a>,
@@ -263,13 +272,13 @@ impl<'a> Cff<'a> {
     /// FD has no Font DICT, or whose Font DICT has no Private DICT,
     /// gets an empty one.
     fn local_subrs(&self, gid: usize) -> Result<Index<'a>> {
-        match self.fonts {
-            FontDicts::Single(local) => Ok(local),
+        match &self.fonts {
+            FontDicts::Single(local) => Ok(*local),
             FontDicts::Cid {
                 fd_array,
                 fd_select,
             } => {
-                let fd = usize::from(fd_select.map_or(0, |s| s.fd_for_glyph(gid)));
+                let fd = usize::from(fd_select.as_ref().map_or(0, |s| s.fd_for_glyph(gid)));
                 if fd >= fd_array.len() {
                     return Ok(Index::default());
                 }
@@ -316,6 +325,7 @@ pub(crate) mod op_code {
     pub const HVCURVETO: u8 = 31;
 
     // Escaped (prefix 12).
+    pub const ESC_DOTSECTION: u8 = 0;
     pub const ESC_HFLEX: u8 = 34;
     pub const ESC_FLEX: u8 = 35;
     pub const ESC_HFLEX1: u8 = 36;

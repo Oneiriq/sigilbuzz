@@ -11,8 +11,8 @@ use super::machine::{self, syllable};
 use super::IndicConfig;
 use crate::buffer::{ClusterLevel, Glyph};
 use crate::ot::syllabic::stage::{
-    add_user_features, apply_alternate_feature, apply_stage, has_feature, user_disabled,
-    FeatureFlags as F, MapFeature, StageFeature, GLOBAL_MASK,
+    add_user_features, apply_alternate_feature, apply_stage, has_feature, FeatureFlags as F,
+    MapFeature, StageFeature, GLOBAL_MASK,
 };
 use crate::ot::syllabic::{
     cat, categories, insert_dotted_circles, pos, set_syllables, setup_syllables, syllable_ranges,
@@ -126,15 +126,22 @@ pub(super) struct Plan<'a> {
 impl Plan<'_> {
     /// HarfBuzz's `hb_indic_would_substitute_feature_t::would_substitute`
     /// for feature `tag` over `glyphs`.
+    ///
+    /// HarfBuzz tries the lookups of the stage its feature map puts the
+    /// feature in: the feature's own, and the required feature's when
+    /// that has the tag. A feature the map lacks, because the language
+    /// system does not list it or the caller turned it off, has no
+    /// stage, so nothing substitutes, whatever a required feature with
+    /// the tag holds.
     pub(super) fn would_substitute(&self, tag: [u8; 4], glyphs: &[u32]) -> bool {
         let Some(runner) = self.runner.as_ref() else {
             return false;
         };
-        if user_disabled(self.features, tag) {
+        let prio = self.config.script_priority;
+        if !has_feature(runner, self.features, tag, prio) {
             return false;
         }
         let ids: Vec<u16> = glyphs.iter().map(|&g| g as u16).collect();
-        let prio = self.config.script_priority;
         feature_would_substitute(runner.gsub(), self.gdef, tag, prio, &ids, Joiners::MANUAL)
     }
 

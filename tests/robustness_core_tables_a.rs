@@ -120,8 +120,8 @@ fn cff_fd_select_with_unsorted_ranges_is_not_expanded() {
 fn cff_fd_select_unsorted_lookup_walks_to_the_last_range() {
     // First glyphs alternate between 1 and 0, so every range but one
     // is empty or covers only glyph 0, and only the last range, which
-    // runs to the sentinel, covers the last glyph. Its lookup has to
-    // scan all 65,535 ranges, once.
+    // runs to the sentinel, covers the last glyph. Opening the table
+    // works that out in one pass over the 65,535 ranges.
     const N: usize = 65_535;
     let firsts: Vec<u16> = (0..N).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
     let cff = cid_cff_with_fd_ranges(N, &firsts, N as u16);
@@ -138,6 +138,24 @@ fn cff_fd_select_with_one_glyph_ranges_draws_every_glyph_without_quadratic_cost(
     // now binary-searched.
     const N: usize = 65_535;
     let firsts: Vec<u16> = (0..N as u16).collect();
+    let cff = cid_cff_with_fd_ranges(N, &firsts, N as u16);
+    let parsed = Cff::parse(&cff).unwrap();
+    for gid in 0..N as u16 {
+        assert!(parsed.outline(gid, &mut Outline::new()).unwrap());
+    }
+}
+
+#[test]
+fn cff_fd_select_with_unsorted_one_glyph_ranges_draws_every_glyph_without_quadratic_cost() {
+    // 65,535 one-glyph ranges in order except that ranges 1 and 2 trade
+    // places, so the binary search over the records does not apply. A
+    // lookup used to scan from the front, through every range below
+    // the glyph, so drawing every glyph from one held `Cff` read about
+    // two billion range records. Opening the table now works out the
+    // span each range keeps, once, and lookups binary-search those.
+    const N: usize = 65_535;
+    let mut firsts: Vec<u16> = (0..N as u16).collect();
+    firsts.swap(1, 2);
     let cff = cid_cff_with_fd_ranges(N, &firsts, N as u16);
     let parsed = Cff::parse(&cff).unwrap();
     for gid in 0..N as u16 {

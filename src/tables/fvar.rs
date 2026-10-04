@@ -48,7 +48,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::tables::parse::Reader;
+use crate::tables::parse::{hb_round_to, Reader};
 
 /// One variation axis. Coordinates are in user design space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,48 +68,61 @@ pub struct VariationAxis {
 }
 
 impl VariationAxis {
-    /// Normalizes a user-space coordinate into `[-1.0, 1.0]` per
-    /// the OpenType spec. Values outside `[min, max]` clamp to
-    /// `-1.0` / `1.0` respectively. The default value maps to
-    /// `0.0`, with a piecewise-linear ramp to either endpoint.
+    /// Normalizes a user-space coordinate into `[-1.0, 1.0]` the way
+    /// HarfBuzz's `normalize_axis_value` does. The range first widens
+    /// to take in the default, if the font's minimum or maximum does
+    /// not (`min (default, min)` to `max (default, max)`); values
+    /// outside it clamp to its ends. The default value maps to `0.0`,
+    /// with a linear ramp to `-1.0` at the minimum and `1.0` at the
+    /// maximum. The result is not rounded; see
+    /// [`Fvar::normalize_coords`].
     ///
-    /// Malformed fvar inputs (`min > max`, a `NaN` bound, or a
-    /// `NaN` user value) return `0.0` (the default instance) rather
-    /// than panicking; `f32::clamp` has a documented panic contract
-    /// on inverted or non-finite bounds that would otherwise bubble
-    /// up into the shape pipeline.
+    /// A `NaN` user value or a non-finite bound returns `0.0` (the
+    /// default instance) rather than panicking. Bounds read from a
+    /// font are always finite.
+    ///
+    /// ```
+    /// use sigilbuzz::tables::VariationAxis;
+    ///
+    /// let wght = VariationAxis {
+    ///     tag: *b"wght",
+    ///     min_value: 100.0,
+    ///     default_value: 400.0,
+    ///     max_value: 900.0,
+    ///     flags: 0,
+    ///     axis_name_id: 256,
+    /// };
+    /// assert_eq!(wght.normalize(650.0), 0.5);
+    /// assert_eq!(wght.normalize(250.0), -0.5);
+    /// assert_eq!(wght.normalize(2000.0), 1.0);
+    /// ```
     #[must_use]
     pub fn normalize(&self, user: f32) -> f32 {
-        // Refuse to run the comparison pipeline on any non-finite
-        // bound or inverted range: `f32::clamp` panics in those
-        // cases, and the rest of the function would divide by NaN.
         if !self.min_value.is_finite()
             || !self.default_value.is_finite()
             || !self.max_value.is_finite()
-            || self.min_value > self.max_value
             || user.is_nan()
         {
             return 0.0;
         }
-        let clamped = user.clamp(self.min_value, self.max_value);
-        if clamped < self.default_value {
-            let denom = self.default_value - self.min_value;
-            if denom == 0.0 {
-                return 0.0;
-            }
-            (clamped - self.default_value) / denom
-        } else if clamped > self.default_value {
-            let denom = self.max_value - self.default_value;
-            if denom == 0.0 {
-                return 0.0;
-            }
-            (clamped - self.default_value) / denom
-        } else {
+        // HarfBuzz's `get_coordinates`: "Ensure order, to simplify
+        // client math." The range always holds the default, so
+        // `min <= max` and `clamp` cannot panic.
+        let default = self.default_value;
+        let min = self.min_value.min(default);
+        let max = self.max_value.max(default);
+        let v = user.clamp(min, max);
+        // Each denominator is positive: `v` lies strictly between the
+        // default and the end it divides by.
+        if v == default {
             0.0
+        } else if v < default {
+            (v - default) / (default - min)
+        } else {
+            (v - default) / (max - default)
         }
     }
 }
-
 /// A parsed `fvar` table.
 #[derive(Debug, Clone)]
 pub struct Fvar {
@@ -195,6 +208,38 @@ impl Fvar {
     /// normalized `[-1.0, 1.0]` vector the variation store wants.
     /// `user_coords` must be indexed in the same order as
     /// [`Fvar::axes`]; missing entries default to the axis default.
+    ///
+    /// Each coordinate is [`VariationAxis::normalize`]d and then
+    /// rounded to 16.16 fixed point (a multiple of 1/65536, halves
+    /// up), as HarfBuzz's `hb_ot_var_normalize_coords` rounds it before
+    /// `avar` maps it. Pass the result through
+    /// [`crate::tables::Avar::remap_all`] when the font has `avar`.
+    /// Shaping rounds the coordinates once more, to F2DOT14, which is
+    /// all the precision HarfBuzz keeps.
+    ///
+    /// ```
+    /// use sigilbuzz::tables::{Fvar, VariationAxis};
+    /// # let axis = VariationAxis {
+    /// #     tag: *b"wght",
+    /// #     min_value: 100.0,
+    /// #     default_value: 400.0,
+    /// #     max_value: 900.0,
+    /// #     flags: 0,
+    /// #     axis_name_id: 256,
+    /// # };
+    /// // (700 - 400) / (900 - 400) = 0.6, which 16.16 holds as
+    /// // 39322 / 65536.
+    /// assert_eq!(axis.normalize(700.0), 0.6);
+    /// # let mut bytes = vec![0, 1, 0, 0, 0, 16, 0, 2, 0, 1, 0, 20, 0, 0, 0, 0];
+    /// # bytes.extend_from_slice(b"wght");
+    /// # for v in [100i32, 400, 900] {
+    /// #     bytes.extend_from_slice(&(v << 16).to_be_bytes());
+    /// # }
+    /// # bytes.extend_from_slice(&[0, 0, 1, 0]);
+    /// let fvar = Fvar::parse(&bytes)?;
+    /// assert_eq!(fvar.normalize_coords(&[700.0]), [39322.0 / 65536.0]);
+    /// # Ok::<(), sigilbuzz::Error>(())
+    /// ```
     #[must_use]
     pub fn normalize_coords(&self, user_coords: &[f32]) -> Vec<f32> {
         self.axes
@@ -202,7 +247,7 @@ impl Fvar {
             .enumerate()
             .map(|(i, axis)| {
                 let user = user_coords.get(i).copied().unwrap_or(axis.default_value);
-                axis.normalize(user)
+                hb_round_to(axis.normalize(user), 65536.0)
             })
             .collect()
     }
@@ -311,6 +356,39 @@ mod tests {
         let n = fvar.normalize_coords(&[700.0]); // wght only, wdth defaults
         assert!((n[0] - 0.6).abs() < 1e-3); // (700-400)/(900-400)
         assert!((n[1] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_range_that_misses_the_default_widens_to_take_it_in() {
+        // HarfBuzz's `get_coordinates` reads the range as
+        // `min (default, min)` to `max (default, max)`.
+        let axis = VariationAxis {
+            tag: *b"wght",
+            min_value: 500.0,
+            default_value: 400.0,
+            max_value: 900.0,
+            flags: 0,
+            axis_name_id: 0,
+        };
+        assert_eq!(axis.normalize(300.0), 0.0);
+        assert_eq!(axis.normalize(450.0), 0.1);
+        assert_eq!(axis.normalize(900.0), 1.0);
+    }
+
+    #[test]
+    fn normalize_coords_rounds_to_16_16_like_harfbuzz() {
+        let axes = [VariationAxis {
+            tag: *b"wght",
+            min_value: 100.0,
+            default_value: 400.0,
+            max_value: 900.0,
+            flags: 0,
+            axis_name_id: 0,
+        }];
+        let fvar = Fvar::parse(&build_fvar(&axes)).unwrap();
+        // 0.6 * 65536 = 39321.6, and -1/3 * 65536 = -21845.33.
+        assert_eq!(fvar.normalize_coords(&[700.0]), [39322.0 / 65536.0]);
+        assert_eq!(fvar.normalize_coords(&[300.0]), [-21845.0 / 65536.0]);
     }
 
     #[test]

@@ -299,28 +299,68 @@ fn vertical_order_advances_and_origins_match_rustybuzz() {
     }
 }
 
-/// Top-to-bottom runs in real fonts: glyf outlines without `vmtx`
-/// (Open Sans: the vertical origin centers the glyph box in the
-/// ascender-to-descender span), CFF outlines (Source Code Pro: the
-/// origin falls back to the ascender), and `vmtx` with marks (Noto
-/// Sans Mongolian: the origin is the box top plus the top side
-/// bearing, the mark's advance is zeroed in both axes, and the mark
-/// attaches to its base).
+/// HarfBuzz 14.5.0's top-to-bottom run of `text` with the font file
+/// `name`, from `tests/fixtures/vertical_shaping.expected`, which
+/// `tests/tools/vertical_shaping_expected.py` regenerates.
+fn harfbuzz_vertical(name: &str, text: &str) -> Vec<(u32, i32, i32, i32, i32)> {
+    let cps: Vec<String> = text.chars().map(|c| format!("{:04X}", c as u32)).collect();
+    let key = format!("static {name} default {}", cps.join(","));
+    let line = include_str!("fixtures/vertical_shaping.expected")
+        .lines()
+        .find(|l| {
+            l.strip_prefix(&key)
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+        .unwrap_or_else(|| panic!("no HarfBuzz record for {key}"));
+    line[key.len()..]
+        .split_whitespace()
+        .map(|g| {
+            let v: Vec<i64> = g.split(',').map(|n| n.parse().unwrap()).collect();
+            (
+                v[0] as u32,
+                v[1] as i32,
+                v[2] as i32,
+                v[3] as i32,
+                v[4] as i32,
+            )
+        })
+        .collect()
+}
+
+/// Top-to-bottom runs in real fonts, against HarfBuzz: glyf outlines
+/// without `vmtx` (Open Sans: the vertical origin centers the glyph box
+/// in the ascender-to-descender span), CFF outlines (Source Code Pro:
+/// the same, with the box of the CFF outline; rustybuzz falls back to
+/// the ascender there, so it is not the reference), and `vmtx` with
+/// marks (Noto Sans Mongolian: the origin is the top phantom point, the
+/// box top plus the top side bearing, the mark's advance is zeroed in
+/// both axes, and the mark attaches to its base).
 #[test]
-fn real_fonts_match_rustybuzz_top_to_bottom() {
-    let cases: [(&[u8], &str); 5] = [
-        (include_bytes!("fixtures/opensans_regular.ttf"), "AVAT"),
-        (include_bytes!("fixtures/opensans_regular.ttf"), "A b"),
+fn real_fonts_match_harfbuzz_top_to_bottom() {
+    let cases: [(&[u8], &str, &str); 5] = [
+        (
+            include_bytes!("fixtures/opensans_regular.ttf"),
+            "opensans_regular.ttf",
+            "AVAT",
+        ),
+        (
+            include_bytes!("fixtures/opensans_regular.ttf"),
+            "opensans_regular.ttf",
+            "A b",
+        ),
         (
             include_bytes!("fonts/SourceCodePro-Latin-Subset.otf"),
+            "SourceCodePro-Latin-Subset.otf",
             "Abc",
         ),
         (
             include_bytes!("fonts/NotoSansMongolian-Regular.ttf"),
+            "NotoSansMongolian-Regular.ttf",
             "\u{1820}\u{1885}",
         ),
         (
             include_bytes!("fonts/NotoSansMongolian-Regular.ttf"),
+            "NotoSansMongolian-Regular.ttf",
             "\u{1820}\u{1821}\u{1822}",
         ),
     ];
@@ -331,19 +371,14 @@ fn real_fonts_match_rustybuzz_top_to_bottom() {
             .map(|(id, _, xa, ya, xo, yo)| (id, xa, ya, xo, yo))
             .collect()
     };
-    for (data, text) in cases {
+    for (data, name, text) in cases {
         assert_eq!(
             positions(sigilbuzz_vertical(data, text, Direction::Ttb)),
-            positions(rustybuzz_vertical(
-                data,
-                text,
-                rustybuzz::Direction::TopToBottom
-            )),
+            harfbuzz_vertical(name, text),
             "TTB {text:?}"
         );
     }
 }
-
 #[test]
 fn vertical_without_vmtx_falls_back_to_em_square() {
     // Font without a vmtx/vhea: shaping vertically should still

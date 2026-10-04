@@ -1,4 +1,4 @@
-//! GSUB FeatureVariations and `rvrn` against HarfBuzz and rustybuzz.
+//! GSUB FeatureVariations and `rvrn` against HarfBuzz.
 //! `tests/feature_variations_gpos_parity.rs` covers GPOS.
 //!
 //! Rubik Variable (`tests/fixtures/rubik_vf.ttf`) has a GSUB 1.1 whose
@@ -11,14 +11,15 @@
 //!
 //! Every expectation here is HarfBuzz 14.5.0's output (uharfbuzz
 //! 0.56.2, `hb.shape` with `guess_segment_properties`): glyph id,
-//! cluster, x advance, x offset, y offset. rustybuzz 0.20, which reads
-//! FeatureVariations condition format 1, agrees on the user-space
-//! cases, and the tests check that too.
+//! cluster, x advance, x offset, y offset. rustybuzz 0.20 is not a
+//! reference here: through ttf-parser 0.25 it truncates the normalized
+//! `fvar` coordinate to F2DOT14 (`(v * 16384.0) as i16`) and maps that
+//! through `avar` in integer arithmetic, where HarfBuzz rounds it to
+//! 16.16, maps it in floating point, and rounds it to F2DOT14 last, so
+//! at `wght` 700 two of its advances are 1 unit off.
 
 use std::time::{Duration, Instant};
 
-use rustybuzz::ttf_parser::Tag;
-use rustybuzz::{Face as RbFace, UnicodeBuffer, Variation};
 use sigilbuzz::{shape, Blob, Buffer, Face, Feature, Font};
 
 const RUBIK: &[u8] = include_bytes!("fixtures/rubik_vf.ttf");
@@ -457,58 +458,16 @@ fn font_rows(
         .collect()
 }
 
-fn rustybuzz_rows(user: f32, text: &str) -> Vec<Row> {
-    let mut face = RbFace::from_slice(RUBIK, 0).unwrap();
-    face.set_variations(&[Variation {
-        tag: Tag::from_bytes(b"wght"),
-        value: user,
-    }]);
-    let mut buffer = UnicodeBuffer::new();
-    buffer.push_str(text);
-    buffer.guess_segment_properties();
-    let out = rustybuzz::shape(&face, &[], buffer);
-    out.glyph_infos()
-        .iter()
-        .zip(out.glyph_positions())
-        .map(|(i, p)| (i.glyph_id, i.cluster, p.x_advance, p.x_offset, p.y_offset))
-        .collect()
-}
-
 #[test]
 fn gsub_rvrn_follows_harfbuzz_in_user_space() {
-    // Glyph ids, clusters, and offsets match exactly. An advance may be
-    // 1 unit off: HarfBuzz rounds the `fvar` coordinate to F2DOT14
-    // before `avar` maps it, and sigilbuzz (like rustybuzz) maps the
-    // unrounded value, so HVAR sees a slightly different coordinate.
-    // At `wght` 700 that moves four advances by 1. The normalized cases
-    // below give both engines the same coordinate and match exactly.
-    let mut advance_diffs = 0;
+    // The coordinates go through `fvar` and `avar` the way HarfBuzz's
+    // `hb_ot_var_normalize_coords` takes them, rounded to 16.16 before
+    // `avar` and to F2DOT14 after, so the advances match exactly too.
     for &(wght, text, expected) in USER {
         let rows = sigilbuzz_rows(None, Some(wght), text, &[]);
-        let without_advance = |rows: &[Row]| -> Vec<(u32, u32, i32, i32)> {
-            rows.iter().map(|&(g, c, _, x, y)| (g, c, x, y)).collect()
-        };
-        assert_eq!(
-            without_advance(&rows),
-            without_advance(expected),
-            "wght {wght} {text:?}"
-        );
-        for (got, want) in rows.iter().zip(expected) {
-            assert!((got.2 - want.2).abs() <= 1, "wght {wght} {text:?}");
-            advance_diffs += usize::from(got.2 != want.2);
-        }
-    }
-    assert!(advance_diffs <= 4, "{advance_diffs} advances differ");
-}
-
-#[test]
-fn gsub_rvrn_follows_rustybuzz_in_user_space() {
-    for &(wght, text, _) in USER {
-        let rows = sigilbuzz_rows(None, Some(wght), text, &[]);
-        assert_eq!(rows, rustybuzz_rows(wght, text), "wght {wght} {text:?}");
+        assert_eq!(rows, expected, "wght {wght} {text:?}");
     }
 }
-
 #[test]
 fn gsub_rvrn_follows_harfbuzz_at_normalized_coordinates() {
     for &(coord, text, expected) in NORMALIZED {
@@ -858,4 +817,116 @@ fn the_rvrn_value_picks_the_alternate_and_rvrn_positions_too() {
     assert_eq!(rows(&[rvrn(4)]), [(68, 0, 1239, 0, 0)]);
     assert_eq!(rows(&[rvrn(255)]), [(68, 0, 1239, 0, 0)]);
     assert_eq!(rows(&[rvrn(0)]), [(68, 0, 1139, 0, 0)]);
+}
+
+/// A ScriptList with `DFLT` and `latn`, whose default language systems
+/// both list feature 0 and make feature 1 their required feature.
+fn script_list_with_required_feature_1() -> Vec<u8> {
+    let mut out = vec![0, 2];
+    out.extend_from_slice(b"DFLT\0\x0E");
+    out.extend_from_slice(b"latn\0\x0E");
+    out.extend_from_slice(&[0, 4, 0, 0]);
+    // No lookupOrder, required feature 1, feature 0.
+    out.extend_from_slice(&[0, 0, 0, 1, 0, 1, 0, 0]);
+    out
+}
+
+/// A FeatureList of `(tag, lookups)` features, in order.
+fn feature_list(features: &[(&[u8; 4], &[u16])]) -> Vec<u8> {
+    let mut out = (features.len() as u16).to_be_bytes().to_vec();
+    let mut offset = 2 + 6 * features.len();
+    for (tag, lookups) in features {
+        out.extend_from_slice(*tag);
+        out.extend_from_slice(&(offset as u16).to_be_bytes());
+        offset += 4 + 2 * lookups.len();
+    }
+    for (_, lookups) in features {
+        out.extend_from_slice(&[0, 0]); // featureParamsOffset
+        out.extend_from_slice(&(lookups.len() as u16).to_be_bytes());
+        for l in *lookups {
+            out.extend_from_slice(&l.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// A LookupList of AlternateSubst lookups, one per `(glyph,
+/// alternates)` entry, each with one format 1 subtable.
+fn alternate_lookup_list(lookups: &[(u16, &[u16])]) -> Vec<u8> {
+    let mut out = (lookups.len() as u16).to_be_bytes().to_vec();
+    let bodies: Vec<Vec<u8>> = lookups
+        .iter()
+        .map(|&(glyph, alternates)| {
+            // Lookup header: type 3, no flags, one subtable at 8.
+            let mut body = vec![0, 3, 0, 0, 0, 1, 0, 8];
+            // Subtable: format 1, Coverage after the one AlternateSet,
+            // which sits at 8.
+            let coverage = 8 + 2 + 2 * alternates.len();
+            body.extend_from_slice(&[0, 1]);
+            body.extend_from_slice(&(coverage as u16).to_be_bytes());
+            body.extend_from_slice(&[0, 1, 0, 8]);
+            body.extend_from_slice(&(alternates.len() as u16).to_be_bytes());
+            for a in alternates {
+                body.extend_from_slice(&a.to_be_bytes());
+            }
+            body.extend_from_slice(&[0, 1, 0, 1]);
+            body.extend_from_slice(&glyph.to_be_bytes());
+            body
+        })
+        .collect();
+    let mut offset = 2 + 2 * lookups.len();
+    for body in &bodies {
+        out.extend_from_slice(&(offset as u16).to_be_bytes());
+        offset += body.len();
+    }
+    for body in &bodies {
+        out.extend_from_slice(body);
+    }
+    out
+}
+
+/// Open Sans with a GSUB of three AlternateSubst lookups: 0 from `a`
+/// (glyph 68) to `b`, `c`, `d` (69 to 71), 1 from `e` (72) to `f`, `g`
+/// (73, 74), and 2 from `h` (75) to `i`, `j` (76, 77). Feature 0,
+/// `rvrn`, has lookups 0 and 1, and feature 1, the required feature,
+/// tagged `required_tag`, has lookups 0 and 2.
+fn open_sans_with_required_and_rvrn(required_tag: &[u8; 4]) -> Vec<u8> {
+    let gsub = layout_table(
+        &script_list_with_required_feature_1(),
+        &feature_list(&[(b"rvrn", &[0, 1]), (required_tag, &[0, 2])]),
+        &alternate_lookup_list(&[(68, &[69, 70, 71]), (72, &[73, 74]), (75, &[76, 77])]),
+        None,
+    );
+    with_tables(OPEN_SANS, &[(*b"GSUB", gsub)])
+}
+
+#[test]
+fn a_lookup_rvrn_shares_with_the_required_feature_takes_no_alternate_past_the_first() {
+    // HarfBuzz 14.5.0 runs the required feature with the global mask
+    // and merges it with `rvrn` in stage 0. With `rvrn` above 1, which
+    // takes mask bits of its own, lookup 0, which both have, reads an
+    // alternate index from the OR of the two masks and substitutes
+    // nothing. Lookup 1, `rvrn`'s alone, takes the caller's alternate,
+    // and lookup 2, the required feature's alone, the first. The
+    // required feature's tag is either one no pass applies, or `rvrn`
+    // itself, whose stage is stage 0.
+    let rvrn = |value| Feature {
+        tag: *b"rvrn",
+        value,
+    };
+    for tag in [b"zreq", b"rvrn"] {
+        let font = open_sans_with_required_and_rvrn(tag);
+        let ids = |features: &[Feature]| -> Vec<u32> {
+            font_rows(&font, None, None, "aeh", features)
+                .iter()
+                .map(|r| r.0)
+                .collect()
+        };
+        let tag = core::str::from_utf8(tag).unwrap();
+        assert_eq!(ids(&[]), [69, 73, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(1)]), [69, 73, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(2)]), [68, 74, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(3)]), [68, 72, 76], "{tag}");
+        assert_eq!(ids(&[rvrn(0)]), [69, 72, 76], "{tag}");
+    }
 }

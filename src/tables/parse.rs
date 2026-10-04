@@ -180,6 +180,74 @@ pub(crate) fn abs_f32(x: f32) -> f32 {
     f32::from_bits(x.to_bits() & 0x7fff_ffff)
 }
 
+/// The largest integer not above `x`.
+///
+/// `f32::floor` is not available in `core` on the minimum supported Rust
+/// version. Every `f32` of magnitude 2^23 or more is already an integer, so
+/// only smaller values need the truncate-and-step-down below. Infinities
+/// and NaN come back unchanged.
+pub(crate) fn floor_f32(x: f32) -> f32 {
+    if x.is_nan() || abs_f32(x) >= 8_388_608.0 {
+        return x;
+    }
+    // Exact: the value fits an i32 and the truncation is a whole number.
+    let truncated = x as i32 as f32;
+    if truncated > x {
+        truncated - 1.0
+    } else {
+        truncated
+    }
+}
+
+/// HarfBuzz's `roundf`, which `hb-algs.hh` redefines as
+/// `floorf (x + .5f)`: halves round up, toward positive infinity, so
+/// `-2.5` rounds to `-2`. The addition happens in `f32`, as in HarfBuzz,
+/// so the largest `f32` below one half rounds to one.
+pub(crate) fn hb_roundf(x: f32) -> f32 {
+    floor_f32(x + 0.5)
+}
+
+/// `x` rounded with [`hb_roundf`] to a multiple of `1 / scale`, for a
+/// power-of-two `scale`: 65536 for HarfBuzz's 16.16 coordinates, 16384
+/// for F2DOT14. Scaling by a power of two is exact, so only the rounding
+/// changes the value.
+pub(crate) fn hb_round_to(x: f32, scale: f32) -> f32 {
+    hb_roundf(x * scale) / scale
+}
+
+/// [`hb_roundf`] as an `i32`, saturating at the type's bounds; NaN gives 0.
+pub(crate) fn hb_round(x: f32) -> i32 {
+    // `as` saturates and maps NaN to zero.
+    hb_roundf(x) as i32
+}
+
+/// [`abs_f32`] for an `f64`, which charstrings are evaluated in.
+pub(crate) fn abs_f64(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & 0x7fff_ffff_ffff_ffff)
+}
+
+/// [`floor_f32`] for an `f64`: every `f64` of magnitude 2^52 or more is
+/// already an integer.
+pub(crate) fn floor_f64(x: f64) -> f64 {
+    if x.is_nan() || abs_f64(x) >= 4_503_599_627_370_496.0 {
+        return x;
+    }
+    // Exact: the value fits an i64 and the truncation is a whole number.
+    let truncated = x as i64 as f64;
+    if truncated > x {
+        truncated - 1.0
+    } else {
+        truncated
+    }
+}
+
+/// HarfBuzz's `roundf` on a `double`, `floor (x + .5)` (hb-algs.hh), as
+/// it rounds the charstring extents it computes in `double`: halves
+/// round up, and the addition happens in `f64`.
+pub(crate) fn hb_roundf64(x: f64) -> f64 {
+    floor_f64(x + 0.5)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +268,73 @@ mod tests {
         }
         assert!(abs_f32(f32::NAN).is_nan());
         assert!(abs_f32(-f32::NAN).is_sign_positive());
+    }
+
+    #[test]
+    fn floor_f32_matches_std_floor() {
+        for x in [
+            0.0f32,
+            -0.0,
+            0.25,
+            -0.25,
+            1.0,
+            -1.0,
+            2.5,
+            -2.5,
+            8_388_607.5,
+            -8_388_607.5,
+            16_777_216.0,
+            f32::MIN,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert_eq!(floor_f32(x), x.floor(), "{x}");
+        }
+        assert!(floor_f32(f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn hb_round_rounds_halves_up() {
+        assert_eq!(hb_round(13.5), 14);
+        assert_eq!(hb_round(-13.5), -13);
+        assert_eq!(hb_round(-13.6), -14);
+        assert_eq!(hb_round(-0.5), 0);
+        assert_eq!(hb_round(0.49), 0);
+        // The sum is rounded to f32 first, as in HarfBuzz.
+        assert_eq!(hb_round(0.499_999_97), 1);
+        assert_eq!(hb_round(f32::NAN), 0);
+        assert_eq!(hb_round(1e20), i32::MAX);
+        assert_eq!(hb_round(-1e20), i32::MIN);
+        assert_eq!(hb_roundf(-2.5), -2.0);
+    }
+
+    #[test]
+    fn f64_helpers_match_std() {
+        for x in [
+            0.0f64,
+            -0.0,
+            0.25,
+            -0.25,
+            2.5,
+            -2.5,
+            749.499_9,
+            4_503_599_627_370_495.5,
+            -4_503_599_627_370_495.5,
+            9_007_199_254_740_992.0,
+            f64::MIN,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(abs_f64(x).to_bits(), x.abs().to_bits(), "{x}");
+            assert_eq!(floor_f64(x), x.floor(), "{x}");
+        }
+        assert!(floor_f64(f64::NAN).is_nan());
+        // Halves up.
+        assert_eq!(hb_roundf64(-2.5), -2.0);
+        assert_eq!(hb_roundf64(2.5), 3.0);
+        assert_eq!(hb_roundf64(749.499_999_9), 749.0);
     }
 
     #[test]

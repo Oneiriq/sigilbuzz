@@ -168,15 +168,16 @@ pub(super) fn read_local_subrs<'a>(
 // FDSelect.
 // ----------------------------------------------------------------------------
 
-/// A lazy view of an FDSelect table, which maps each glyph to the
-/// Font DICT in the FDArray that holds its Private DICT. Shared with
-/// CFF2.
+/// An FDSelect table, which maps each glyph to the Font DICT in the
+/// FDArray that holds its Private DICT. Shared with CFF2.
 ///
 /// Opening it checks that the table fits and, for formats 3 and 4,
 /// whether the ranges ascend, which takes one pass over the range
-/// records. [`Self::fd_for_glyph`] then reads only what the one glyph
-/// it is asked about needs, so nothing is expanded per glyph up front.
-#[derive(Debug, Clone, Copy)]
+/// records. Ranges that do not ascend take a second pass, which works
+/// out where they end up (see [`FdRanges`]). Either way
+/// [`Self::fd_for_glyph`] binary-searches, so nothing is expanded per
+/// glyph and no lookup scans the ranges.
+#[derive(Debug, Clone)]
 pub(crate) enum FdSelect<'a> {
     /// Format 0: one FD index byte per glyph, exactly `n_glyphs` bytes.
     Bytes(&'a [u8]),
@@ -188,7 +189,13 @@ pub(crate) enum FdSelect<'a> {
 /// u8 FD) or format 4 (`Range4`: u32 first glyph, u16 FD), followed by
 /// a sentinel glyph id that ends the last range. Format 4 is what lets
 /// a CFF2 font have more than 256 Font DICTs.
-#[derive(Debug, Clone, Copy)]
+///
+/// Ranges are expected to ascend, and then range `i` covers its first
+/// glyph up to the next range's first glyph (the sentinel for the last
+/// range). Unsorted ranges resolve the way a front-to-back fill would:
+/// the same span, minus any glyph an earlier range's span already
+/// passed.
+#[derive(Debug, Clone)]
 pub(crate) struct FdRanges<'a> {
     /// The packed range records.
     ranges: &'a [u8],
@@ -198,10 +205,34 @@ pub(crate) struct FdRanges<'a> {
     sentinel: usize,
     /// Glyph count from the CharStrings INDEX.
     n_glyphs: usize,
-    /// True when no range starts before the one ahead of it. Such
+    /// `None` when no range starts before the one ahead of it. Such
     /// ranges cannot overlap, since each ends where the next begins, so
-    /// the one range that can hold a glyph is found by binary search.
-    ascending: bool,
+    /// the one range that can hold a glyph is found by binary search
+    /// over the records. Unsorted ranges get their spans worked out
+    /// when the table is opened.
+    spans: Option<Spans>,
+}
+
+/// What a front-to-back fill leaves of unsorted FDSelect ranges.
+///
+/// The fill gives range `i` the glyphs from `max(first_i, filled)` up to
+/// its end, where `filled` is the furthest end of the ranges before it,
+/// so it never reclaims a glyph. The ranges that keep a glyph therefore
+/// keep disjoint spans in ascending order. Each span after the first
+/// starts where the one before it ends: a range after the first starts
+/// at or below the end of the range before it, which `filled` covers,
+/// and a range that keeps nothing ends at or below `filled`, so it does
+/// not move it. The spans thus cover `start` up to the end of the last
+/// one without a gap, and the end of each, read from its range record,
+/// is all a binary search needs.
+#[derive(Debug, Clone)]
+struct Spans {
+    /// The first glyph of the first span.
+    start: usize,
+    /// The ranges that keep a glyph, in order, as range indices. There
+    /// are at most as many as there are glyphs or ranges, whichever is
+    /// fewer, at 4 bytes each.
+    ranges: Vec<u32>,
 }
 
 impl<'a> FdSelect<'a> {
@@ -249,16 +280,20 @@ impl<'a> FdSelect<'a> {
     /// The FD index for `gid`. A glyph that no range covers maps to
     /// FD 0. See [`FdRanges`] for how ranges resolve.
     pub(crate) fn fd_for_glyph(&self, gid: usize) -> u16 {
-        match *self {
+        match self {
             Self::Bytes(fds) => fds.get(gid).copied().map_or(0, u16::from),
             Self::Ranges(ranges) => ranges.fd_for_glyph(gid),
         }
     }
 
-    /// True when lookups binary-search the ranges.
+    /// The number of spans worked out for ranges that do not ascend, or
+    /// `None` when there was nothing to work out.
     #[cfg(test)]
-    pub(crate) fn binary_searches(&self) -> bool {
-        matches!(self, Self::Ranges(r) if r.ascending)
+    pub(crate) fn span_count(&self) -> Option<usize> {
+        match self {
+            Self::Ranges(r) => r.spans.as_ref().map(|s| s.ranges.len()),
+            Self::Bytes(_) => None,
+        }
     }
 }
 
@@ -266,7 +301,8 @@ impl<'a> FdRanges<'a> {
     fn new(ranges: &'a [u8], wide: bool, sentinel: usize, n_glyphs: usize) -> Self {
         // `Cff::parse` and `Cff2::parse` run this for every outline drawn
         // through `Face`, so it reads each first glyph once, straight
-        // from its record.
+        // from its record, and allocates only for ranges that do not
+        // ascend.
         let ascending = if wide {
             ascends(
                 ranges
@@ -280,12 +316,43 @@ impl<'a> FdRanges<'a> {
                     .map(|r| usize::from(u16::from_be_bytes([r[0], r[1]]))),
             )
         };
-        Self {
+        let mut out = Self {
             ranges,
             wide,
             sentinel,
             n_glyphs,
-            ascending,
+            spans: None,
+        };
+        if !ascending {
+            out.spans = Some(out.fill_spans());
+        }
+        out
+    }
+
+    /// Runs the front-to-back fill over the ranges once, keeping every
+    /// range that keeps a glyph. See [`Spans`].
+    fn fill_spans(&self) -> Spans {
+        let mut start = 0;
+        let mut kept: Vec<u32> = Vec::new();
+        // Glyphs below `filled` were covered by an earlier range's span,
+        // so no later range may claim them.
+        let mut filled = 0usize;
+        for i in 0..self.len() {
+            let from = self.first(i).max(filled);
+            let end = self.end(i);
+            if from < end {
+                if kept.is_empty() {
+                    start = from;
+                }
+                // A range index fits in a u32: format 4 counts its
+                // ranges in one.
+                kept.push(i as u32);
+            }
+            filled = filled.max(end);
+        }
+        Spans {
+            start,
+            ranges: kept,
         }
     }
 
@@ -331,17 +398,10 @@ impl<'a> FdRanges<'a> {
     }
 
     /// The FD for `gid`, or 0 when no range covers it.
-    ///
-    /// Ranges are expected to ascend, and then range `i` covers its
-    /// first glyph up to the next range's first glyph (the sentinel for
-    /// the last range). Unsorted ranges resolve the way a front-to-back
-    /// fill would: the same span, minus any glyph an earlier range
-    /// already passed.
     fn fd_for_glyph(&self, gid: usize) -> u16 {
-        if self.ascending {
-            self.search(gid)
-        } else {
-            self.scan(gid)
+        match &self.spans {
+            None => self.search(gid),
+            Some(spans) => self.search_spans(spans, gid),
         }
     }
 
@@ -367,23 +427,18 @@ impl<'a> FdRanges<'a> {
         }
     }
 
-    /// Front-to-back scan for ranges that do not ascend. It stops at
-    /// the range that covers `gid`, or as soon as no later range can.
-    fn scan(&self, gid: usize) -> u16 {
-        // Glyphs below `filled` were covered by an earlier range's span,
-        // so no later range may claim them.
-        let mut filled = 0usize;
-        for i in 0..self.len() {
-            let end = self.end(i);
-            if gid >= self.first(i).max(filled) && gid < end {
-                return self.fd(i);
-            }
-            filled = filled.max(end);
-            if filled > gid {
-                break;
-            }
+    /// Binary search over the spans of unsorted ranges. The first span
+    /// that ends past `gid` holds it if it starts at or before `gid`.
+    /// A span after the first starts where the one before it ends, at
+    /// or before `gid`, so only the first span can start past it.
+    fn search_spans(&self, spans: &Spans, gid: usize) -> u16 {
+        let k = spans
+            .ranges
+            .partition_point(|&i| self.end(i as usize) <= gid);
+        match spans.ranges.get(k) {
+            Some(&i) if k > 0 || gid >= spans.start => self.fd(i as usize),
+            _ => 0,
         }
-        0
     }
 }
 

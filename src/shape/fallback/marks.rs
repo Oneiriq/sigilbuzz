@@ -10,7 +10,7 @@
 //! Lao, and Tibetan classes are first folded into the positional
 //! classes they stand for.
 
-use super::extents::{glyph_extents, Extents};
+use super::extents::Extents;
 use crate::buffer::{char_class, Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
@@ -91,7 +91,6 @@ pub(in crate::shape) fn recategorize_combining_class(u: char, class: u8) -> u8 {
 /// What fallback mark positioning reads besides the glyphs.
 pub(in crate::shape) struct MarkPositioner<'a> {
     pub(in crate::shape) face: &'a Face<'a>,
-    pub(in crate::shape) coords: &'a [f32],
     pub(in crate::shape) gdef: Option<&'a Gdef<'a>>,
     /// The direction the run is shaped in.
     pub(in crate::shape) direction: Direction,
@@ -162,8 +161,7 @@ impl MarkPositioner<'_> {
         // The marks' places depend on their base.
         crate::shape::glyph_flags::unsafe_to_break(glyphs, base, end, self.level);
         let base_glyph = glyphs[base];
-        let Some(mut base_extents) =
-            glyph_extents(self.face, self.coords, base_glyph.glyph_id as u16)?
+        let Some(mut base_extents) = self.advances.glyph_extents(base_glyph.glyph_id as u16)?
         else {
             // Without extents, zero the marks and go home.
             self.zero_mark_advances(&mut glyphs[base + 1..end]);
@@ -246,7 +244,7 @@ impl MarkPositioner<'_> {
     /// against `base` (the extents of what it stacks on), and grows
     /// `base` by the mark.
     fn position_mark(&self, base: &mut Extents, g: &mut Glyph, class: u8) -> Result<()> {
-        let Some(mark) = glyph_extents(self.face, self.coords, g.glyph_id as u16)? else {
+        let Some(mark) = self.advances.glyph_extents(g.glyph_id as u16)? else {
             return Ok(());
         };
         let upem = i32::from(self.face.head()?.units_per_em);
