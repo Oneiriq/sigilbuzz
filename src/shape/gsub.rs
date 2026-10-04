@@ -220,7 +220,7 @@ pub(super) fn apply_gsub_lookup(
     let Some(lookup) = gsub.lookup_list().get(lookup_idx) else {
         return;
     };
-    if !lookup_may_apply(&gsub.lookup_accel(lookup_idx, &lookup), glyphs) {
+    if gsub.has_cache() && !lookup_may_apply(&gsub.lookup_accel(lookup_idx, &lookup), glyphs) {
         return;
     }
     let cx = GsubCx { gsub, gdef, flags };
@@ -244,17 +244,24 @@ pub(super) fn lookup_may_apply(accel: &Accel<'_, '_>, glyphs: &[Glyph]) -> bool 
 
 /// True when GSUB lookup `index` may change `glyphs` (see
 /// [`lookup_may_apply`]); false for a lookup the table does not have.
+///
+/// This is a check ahead of setting a lookup up, and only pays off with
+/// the font's digests: without them (a font's first call) it answers
+/// true and leaves the check to the lookup itself, which would
+/// otherwise search every subtable's coverage twice.
 pub(crate) fn gsub_lookup_may_apply(gsub: &Gsub<'_>, index: u16, glyphs: &[Glyph]) -> bool {
-    gsub.lookup_list()
-        .get(index)
-        .is_some_and(|lookup| lookup_may_apply(&gsub.lookup_accel(index, &lookup), glyphs))
+    gsub.lookup_list().get(index).is_some_and(|lookup| {
+        !gsub.has_cache() || lookup_may_apply(&gsub.lookup_accel(index, &lookup), glyphs)
+    })
 }
 
 /// [`gsub_lookup_may_apply`] over bare glyph ids.
 pub(crate) fn gsub_lookup_may_apply_to_ids(gsub: &Gsub<'_>, index: u16, ids: &[u16]) -> bool {
     gsub.lookup_list().get(index).is_some_and(|lookup| {
-        gsub.lookup_accel(index, &lookup)
-            .may_apply(ids.iter().copied())
+        !gsub.has_cache()
+            || gsub
+                .lookup_accel(index, &lookup)
+                .may_apply(ids.iter().copied())
     })
 }
 

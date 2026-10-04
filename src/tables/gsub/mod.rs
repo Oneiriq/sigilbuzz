@@ -228,6 +228,12 @@ impl<'a> Gsub<'a> {
         self
     }
 
+    /// True when the view has the font's cache, so its lookup
+    /// accelerators are digests rather than coverages read per use.
+    pub(crate) const fn has_cache(&self) -> bool {
+        self.cache.is_some()
+    }
+
     /// What feature resolution (`crate::ot::layout_select`) reads of
     /// this view.
     pub(crate) fn layout_view(&self) -> LayoutView<'a> {
