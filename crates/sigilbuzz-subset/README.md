@@ -46,7 +46,10 @@ such as `COLR`, `CPAL`, `MVAR` and `DSIG`, stay, since no glyph ID changes, but 
 font, or pins some axes and leaves the rest variable. It moves `glyf` outlines (inferred
 points and composite offsets included), the advances and side bearings their phantom
 points give, the `cvt ` values `cvar` varies, and the `BASE` coordinates the store
-varies, the way HarfBuzz's instancer does. Glyph instructions stay, as they do in
+varies, the way HarfBuzz's instancer does. A `CFF2` instance rounds every blended value
+to a whole unit and takes its side bearings, `head` box and `hhea` extremes from its
+outlines, as HarfBuzz does. `OS/2` gets the new `usWeightClass`, `usWidthClass` and
+`xAvgCharWidth`, and `post` the new `italicAngle`. Glyph instructions stay, as they do in
 HarfBuzz unless it is asked to drop hinting.
 
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,

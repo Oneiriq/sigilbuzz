@@ -69,6 +69,9 @@
 //! (see [`InstancedOutput::warnings`] for what each one leaves), except
 //! for CFF2 charstrings, which fail the instance. Real fonts use at
 //! most about 12.5% of any budget, so none of this applies to them.
+//! A CFF2 instance measures its glyphs' outlines for their metrics
+//! after the charstring bake, which has run the same subroutines
+//! within its budget.
 //!
 //! [`subset`] runs every kept glyph of a `CFF ` or `CFF2` table through
 //! its subroutine calls (see "For CFF and CFF2 fonts" below), charging
