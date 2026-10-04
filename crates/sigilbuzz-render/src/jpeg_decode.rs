@@ -8,11 +8,11 @@
 //! - **8-bit precision only.** All real-world font sbix JPEGs are 8-bit.
 //! - **Baseline sequential DCT (SOF0)** plus **progressive DCT (SOF2)**
 //!   with spectral selection and successive approximation: first DC
-//!   and AC scans and DC and AC refinement scans (T.81 G.1.2). All the
-//!   scans of a progressive frame together may visit at most 1024
-//!   coefficients per 8x8 block, which a valid scan script never
-//!   needs; a stream past that is [`RenderError::BadJpeg`]. No
+//!   and AC scans and DC and AC refinement scans (T.81 G.1.2). No
 //!   arithmetic coding (SOF9..15), no hierarchical (SOFE).
+//! - **One frame per stream.** A second SOF is
+//!   [`RenderError::BadJpeg`], as in libjpeg, so the scan budget below
+//!   bounds the whole stream.
 //! - **YCbCr** (3-component) and **grayscale** (1-component).
 //! - **Sampling factors:** 4:4:4, 4:2:2, 4:2:0, and any combination
 //!   where each component's max sampling factor is `<= 2`.
@@ -25,6 +25,11 @@
 //!   of entropy-coded data, so a frame header that declares more
 //!   blocks than eight per remaining input byte is rejected before
 //!   any sample buffer is allocated.
+//! - **Bounded scan work.** The scans of the stream's frame together
+//!   may visit at most 1024 coefficients per 8x8 block, which a valid
+//!   scan script never needs (each coefficient coded once and refined
+//!   at most 13 times costs 896); a stream past that is
+//!   [`RenderError::BadJpeg`].
 //!
 //! Output is a premultiplied RGBA [`ColorPixmap`] with alpha = 255
 //! (JPEG has no transparency channel).
@@ -95,13 +100,15 @@ const MAX_HUFF_TABLES: usize = 4;
 /// Hard cap on quantization table count. Same logic: 4 destinations.
 const MAX_QT_TABLES: usize = 4;
 
-/// Coefficient visits a progressive frame's scans may make per 8x8
-/// block, summed over every scan: a scan of band `Ss..=Se` costs
+/// Coefficient visits the scans of a stream may make per 8x8 block of
+/// its one frame, summed over every scan: a scan of band `Ss..=Se` costs
 /// `Se - Ss + 1` per block it covers. A valid script codes each bit of
 /// each coefficient once, which costs at most 64 * 14 = 896 (the first
 /// scan plus one refinement per bit, `Al <= 13`), so only a stream
 /// that repeats scans runs out. The cap keeps a few bytes per scan
-/// from making the decoder walk every block again and again.
+/// from making the decoder walk every block again and again; since a
+/// stream holds one frame, it bounds the whole stream at 1024 visits
+/// per block.
 const SCAN_WORK_PER_BLOCK: u64 = 1024;
 
 // ---------------------------------------------------------------------------
@@ -116,8 +123,8 @@ const SCAN_WORK_PER_BLOCK: u64 = 1024;
 /// max h/v is `<= 2`. Both baseline (SOF0) and progressive (SOF2,
 /// spectral selection and successive approximation, refinement scans
 /// included) modes are handled. Arithmetic coding, 16-bit precision,
-/// hierarchical mode, restart markers, and JPEG2000 / TIFF return
-/// [`RenderError::BadJpeg`].
+/// hierarchical mode, restart markers, a second frame, and JPEG2000 /
+/// TIFF return [`RenderError::BadJpeg`].
 ///
 /// # Errors
 /// Returns [`RenderError::BadJpeg`] on any structural problem,
@@ -371,6 +378,13 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_sof(&mut self, progressive: bool) -> Result<(), RenderError> {
+        // A stream holds one frame. libjpeg stops at a second SOF
+        // (JERR_SOF_DUPLICATE); so does this decoder, which would
+        // otherwise size and walk a fresh frame, with a fresh scan
+        // budget, for every SOF a stream repeats.
+        if !self.components.is_empty() {
+            return Err(RenderError::BadJpeg("second SOF"));
+        }
         let body = self.read_segment()?;
         if body.len() < 6 {
             return Err(RenderError::BadJpeg("truncated SOF"));

@@ -333,3 +333,35 @@ fn idct_cos_table_matches_inline_cosines() {
         assert_eq!(a, b);
     }
 }
+
+#[test]
+fn a_second_frame_is_an_error() {
+    // A stream holds one frame. Each SOF used to size a fresh frame
+    // with a fresh scan budget, so a stream of frames multiplied the
+    // work, as libjpeg's JERR_SOF_DUPLICATE prevents.
+    use super::encode::{encode_progressive, libjpeg_script, Image};
+    let img = Image::random(16, 16, &[(1, 1)], 9, 40, 3);
+    let one = encode_progressive(&img, &libjpeg_script(1));
+    let sof = marker_pos(&one, MARKER_SOF2) - 1;
+    let len = usize::from(u16::from_be_bytes([one[sof + 2], one[sof + 3]]));
+    let frame_header = one[sof..sof + 2 + len].to_vec();
+    // The header again after the last scan, before EOI.
+    let mut two = one[..one.len() - 2].to_vec();
+    two.extend_from_slice(&frame_header);
+    two.extend_from_slice(&[0xFF, MARKER_EOI]);
+    assert!(decode_jpeg(&one).is_ok());
+    assert_eq!(
+        decode_jpeg(&two).unwrap_err(),
+        RenderError::BadJpeg("second SOF")
+    );
+    // A baseline header repeated before its scan.
+    let base = build_constant_jpeg(0, 0, 0);
+    let sof = marker_pos(&base, MARKER_SOF0) - 1;
+    let len = usize::from(u16::from_be_bytes([base[sof + 2], base[sof + 3]]));
+    let mut twice = base[..sof + 2 + len].to_vec();
+    twice.extend_from_slice(&base[sof..]);
+    assert_eq!(
+        decode_jpeg(&twice).unwrap_err(),
+        RenderError::BadJpeg("second SOF")
+    );
+}
