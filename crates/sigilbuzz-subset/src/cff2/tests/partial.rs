@@ -639,3 +639,112 @@ fn a_null_subtable_offset_numbers_cff2_blends_as_the_store_does() {
     assert_eq!(store.subtable_count(), 1);
     assert_eq!(parsed.char_strings[0], &[239, 149, 140, 16, 139, 21]);
 }
+
+/// Two axes, one subtable: region 0 lies on axis 0 alone and region 1
+/// on axis 1 alone. Pinning axis 0 at 1 folds region 0's deltas into
+/// the masters and keeps region 1's.
+fn one_region_per_axis() -> Vec<u8> {
+    build_ivs2_for_cff2(
+        &[
+            [(0.0, 1.0, 1.0), (0.0, 0.0, 0.0)],
+            [(0.0, 0.0, 0.0), (0.0, 1.0, 1.0)],
+        ],
+        &[(alloc::vec![0, 1], alloc::vec![])],
+    )
+}
+
+/// `0.5` and `-0.5` as 16.16 pushes.
+const HALF: &[u8] = &[255, 0, 0, 0x80, 0];
+const MINUS_HALF: &[u8] = &[255, 0xFF, 0xFF, 0x80, 0];
+
+/// A charstring of `stale` zeros no operator reads, a master of 0, and
+/// `pairs` pairs of chained one-master blends, `fold 0 1 blend -fold 0
+/// 1 blend`, each taking the last blend's result as its master; then
+/// `hmoveto`. With axis 0 pinned at 1, every blend moves `fold` or
+/// `-fold` into that first master.
+fn chained_blends(stale: usize, pairs: usize, fold: &[u8], minus_fold: &[u8]) -> Vec<u8> {
+    let mut cs = alloc::vec![139u8; stale + 1];
+    for _ in 0..pairs {
+        cs.extend_from_slice(fold);
+        cs.extend_from_slice(&[139, 140, 16]);
+        cs.extend_from_slice(minus_fold);
+        cs.extend_from_slice(&[139, 140, 16]);
+    }
+    cs.push(22);
+    cs
+}
+
+/// Bakes `cs` with axis 0 pinned at 1 and axis 1 kept: the tokens the
+/// bake charges and the baked charstring.
+fn chain_work(cs: &[u8]) -> (usize, Vec<u8>) {
+    let cff = build_synthetic_cff2(&[cs], &[0], Some(&one_region_per_axis()));
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let (out, left) =
+        crate::cff2::partial::bake_cff2_partial_within(&cff, &[1.0, 0.0], &pins, usize::MAX)
+            .expect("partial bake");
+    let parsed = parse_cff2(&out).expect("parse");
+    (usize::MAX - left, parsed.char_strings[0].to_vec())
+}
+
+#[test]
+fn chained_blends_fold_into_their_master_at_the_same_work_per_blend() {
+    // Every blend folds into the first master, whose push sits before
+    // everything the chain writes and changes length with each fold (1
+    // byte for 0, 5 for 0.5; 1 and 2 bytes for 0 and 1, integers). The
+    // fold rewrites it in place, so each pair of blends costs the same
+    // whatever the chain's length: its 8 tokens, and for each blend a
+    // delta folded and one written.
+    let integers: (&[u8], &[u8]) = (&[140], &[138]);
+    for (fold, minus_fold) in [(HALF, MINUS_HALF), integers] {
+        let (short, _) = chain_work(&chained_blends(0, 1_000, fold, minus_fold));
+        let (long, cs) = chain_work(&chained_blends(0, 50_000, fold, minus_fold));
+        assert_eq!(long - short, 49_000 * 12, "12 tokens a pair");
+        assert_eq!(short, 1_000 * 12 + 2, "and the master and hmoveto");
+        // The folds cancel: the master is back at 0, and each blend
+        // keeps region 1's delta.
+        let mut expected = alloc::vec![139u8];
+        for _ in 0..100_000 {
+            expected.extend_from_slice(&[139, 140, 16]);
+        }
+        expected.push(22);
+        assert_eq!(cs, expected);
+    }
+}
+
+#[test]
+fn stale_operands_under_a_chain_add_no_work_per_blend() {
+    // 500 operands sit under the chain until hmoveto clears them. Each
+    // costs its push and nothing per blend.
+    for pairs in [1_000, 10_000] {
+        let (bare, _) = chain_work(&chained_blends(0, pairs, HALF, MINUS_HALF));
+        let (stale, cs) = chain_work(&chained_blends(500, pairs, HALF, MINUS_HALF));
+        assert_eq!(stale - bare, 500);
+        assert_eq!(cs[..502], [139u8; 502]);
+        assert_eq!(cs.len(), 502 + 2 * pairs * 3);
+    }
+}
+
+#[test]
+fn an_operand_past_the_cff2_stack_limit_fails_the_bake() {
+    // CFF2 allows 513 operands; HarfBuzz's interpreter stops at the
+    // 514th push, and so does the bake, whether the pushes come from
+    // the charstring or from the subroutines it calls.
+    let ivs = one_region_per_axis();
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let overflows = |r: Result<Vec<u8>, SubsetError>| matches!(r, Err(SubsetError::Unsupported(m)) if m.contains("operand stack overflow"));
+    let mut cs = alloc::vec![139u8; 513];
+    cs.push(22);
+    let cff = build_synthetic_cff2(&[&cs], &[0], Some(&ivs));
+    let out = bake_cff2_partial(&cff, &[1.0, 0.0], &pins).expect("513 operands");
+    assert_eq!(parse_cff2(&out).unwrap().char_strings[0], &cs[..]);
+    cs.insert(0, 139);
+    let cff = build_synthetic_cff2(&[&cs], &[0], Some(&ivs));
+    assert!(overflows(bake_cff2_partial(&cff, &[1.0, 0.0], &pins)));
+
+    // Subroutine 0 pushes 100 zeros and returns; six calls push 600.
+    let mut subr = alloc::vec![139u8; 100];
+    subr.push(11);
+    let cs: Vec<u8> = [32u8, 10].repeat(6).into_iter().chain([22]).collect();
+    let cff = build_synthetic_cff2_with_local_subrs(&[&cs], &[0], &[&subr], Some(&ivs));
+    assert!(overflows(bake_cff2_partial(&cff, &[1.0, 0.0], &pins)));
+}
