@@ -6,10 +6,10 @@
 //! kinds of data:
 //!
 //! - [`FaceCache`], which depends on the font data alone: for GSUB and
-//!   GPOS, the lookup accelerators (see [`crate::tables::layout::accel`])
-//!   and the language systems resolved for each combination of script
-//!   tags, language and FeatureVariations record a run used (see
-//!   [`crate::ot::layout_select`]).
+//!   GPOS, the lookup accelerators (see [`crate::tables::layout::accel`]),
+//!   the language systems resolved for each combination of script tags,
+//!   language and FeatureVariations record a run used, and the merged
+//!   lookups of each shaping stage (see [`crate::ot::layout_select`]).
 //!   [`Font::with_coords`](super::Font::with_coords) and
 //!   [`Font::with_size`](super::Font::with_size) keep it.
 //! - [`InstanceCache`], which depends on the variation coordinates too:
@@ -31,11 +31,11 @@
 //! output does not depend on what is cached.
 //!
 //! Memory is bounded per font. For each of GSUB and GPOS: one pointer
-//! per lookup, 24 bytes per subtable of each lookup a run reached, and
-//! at most 16 resolved language systems of at most 1024 features and
-//! 16384 lookup indices each. For the glyph caches: at most
-//! [`GLYPH_CACHE_MAX`] four-byte entries for each of the three,
-//! whatever the glyph count.
+//! per lookup, 24 bytes per subtable of each lookup a run reached, at
+//! most 16 resolved language systems of at most 1024 features and 16384
+//! lookup indices each, and at most 64 stage plans of at most 4096
+//! lookups each. For the glyph caches: at most [`GLYPH_CACHE_MAX`]
+//! four-byte entries for each of the three, whatever the glyph count.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
