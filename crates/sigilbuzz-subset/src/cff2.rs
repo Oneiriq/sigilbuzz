@@ -8,10 +8,11 @@
 //! a font carries a single FontDict. The [`parse_cff2`] reader
 //! synthesizes the implicit "every gid -> FD 0" mapping in that case.
 //!
-//! The Type 2 charstring scanner from [`crate::cff`] already accepts
-//! both flavors: it stops at `OP_RETURN` / `OP_ENDCHAR` /
-//! end-of-stream, and recognizes `vsindex` / `blend` so CFF2-specific
-//! ops don't confuse the operand-stack tracking. The byte-level emitter
+//! The subsetter's charstring walk from [`crate::cff`] runs both
+//! flavors: it stops at `OP_RETURN` / `OP_ENDCHAR` / end-of-stream, and
+//! for CFF2 runs `vsindex` and `blend` against the VariationStore's
+//! region counts, starting from the `vsindex` each Private DICT sets,
+//! so blended stem hints size the hint masks. The byte-level emitter
 //! primitives ([`crate::cff::encode_index`],
 //! [`crate::cff::encode_dict_int`], [`crate::cff::renumber_charstring`])
 //! are shared with CFF1. CFF2's smaller surface (no Name / String /
@@ -130,6 +131,9 @@ struct ParsedCff2<'a> {
     /// DICTs that name the same Private DICT share one parse.
     per_fd_private: Vec<&'a [u8]>,
     per_fd_local_subrs: Vec<Rc<Vec<&'a [u8]>>>,
+    /// Per-FD: the `vsindex` the Private DICT sets (0 when it sets
+    /// none), which a charstring blends with until it picks another.
+    per_fd_vsindex: Vec<u16>,
     /// Per-FD: the first Font DICT that names the same Private DICT
     /// (its own index when none before it does). A bake writes each
     /// Private DICT once, however many Font DICTs name it.
@@ -216,6 +220,7 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
     // name one Private DICT; it and its Local Subrs are read once.
     let mut per_fd_private: Vec<&[u8]> = Vec::with_capacity(fd_array.len());
     let mut per_fd_local_subrs: Vec<Rc<Vec<&[u8]>>> = Vec::with_capacity(fd_array.len());
+    let mut per_fd_vsindex: Vec<u16> = Vec::with_capacity(fd_array.len());
     let mut private_of: Vec<usize> = Vec::with_capacity(fd_array.len());
     let mut first_fd_of: BTreeMap<(u32, u32), usize> = BTreeMap::new();
     for (i, fd_bytes) in fd_array.iter().enumerate() {
@@ -246,8 +251,14 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
             }
             (None, _) => (&[][..], Rc::default(), i),
         };
+        let vsindex = if first == i {
+            private_vsindex(priv_bytes)?
+        } else {
+            per_fd_vsindex.get(first).copied().unwrap_or(0)
+        };
         per_fd_private.push(priv_bytes);
         per_fd_local_subrs.push(locals);
+        per_fd_vsindex.push(vsindex);
         private_of.push(first);
     }
 
@@ -289,10 +300,29 @@ fn parse_cff2(data: &[u8]) -> Result<ParsedCff2<'_>, SubsetError> {
         fd_array,
         per_fd_private,
         per_fd_local_subrs,
+        per_fd_vsindex,
         private_of,
         fd_select,
         vstore_blob,
     })
+}
+
+/// The `vsindex` a CFF2 Private DICT sets: the last operand of its last
+/// `vsindex` operator (22), clamped to `0..=65535` as the core reads
+/// it, or 0 when it has none.
+fn private_vsindex(private: &[u8]) -> Result<u16, SubsetError> {
+    if private.is_empty() {
+        return Ok(0);
+    }
+    let mut vsindex = 0;
+    for entry in walk_dict(private)? {
+        if entry.op == 22 {
+            if let Some(v) = entry.operands.last().and_then(|o| o.int_value) {
+                vsindex = u16::try_from(v.max(0)).unwrap_or(u16::MAX);
+            }
+        }
+    }
+    Ok(vsindex)
 }
 
 // Type 2 op codes consumed by the baker. Duplicates of crate::cff
@@ -327,6 +357,10 @@ const OP_HVCURVETO: u8 = 31;
 
 const MAX_BAKE_DEPTH: u8 = 10;
 
+/// Operands a CFF2 charstring may stack: the CFF2 limit, which
+/// HarfBuzz's interpreter enforces too.
+const MAX_STACK: usize = 513;
+
 /// Minimum number of charstring tokens (operand pushes plus operators,
 /// counted inside inlined subroutines too) one bake may process.
 const MIN_BAKE_TOKENS: usize = 1 << 22;
@@ -356,7 +390,7 @@ fn charge_token(budget: &mut usize, err: &'static str) -> Result<(), SubsetError
 
 /// Resolves the absolute subroutine index a `callsubr` / `callgsubr`
 /// operand selects, or `None` when it falls outside `subrs`.
-fn biased_subr<'s>(subrs: &[&'s [u8]], operand: f32) -> Option<&'s [u8]> {
+fn biased_subr<'s>(subrs: &[&'s [u8]], operand: f64) -> Option<&'s [u8]> {
     // Float-to-int casts saturate, and NaN maps to 0.
     let raw = operand as i32;
     let abs = i64::from(raw) + i64::from(subr_bias(subrs.len()));
@@ -506,6 +540,30 @@ fn decode_operand_f32(data: &[u8], pos: usize) -> Option<(f32, usize)> {
         Some((raw as f32 / 65536.0, 5))
     } else {
         None
+    }
+}
+
+/// Decodes a single push operand at `data[pos..]` into an f64 plus
+/// byte-length: [`decode_operand_f32`] without rounding a 16.16 value.
+fn decode_operand_f64(data: &[u8], pos: usize) -> Option<(f64, usize)> {
+    if data.get(pos) == Some(&255) {
+        let bytes = data.get(pos + 1..pos + 5)?;
+        let raw = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        return Some((f64::from(raw) / 65536.0, 5));
+    }
+    decode_operand_f32(data, pos).map(|(v, len)| (f64::from(v), len))
+}
+
+/// Encodes `v` as a Type 2 push: a whole number in `i16` range in the
+/// shortest integer form, anything else in the 16.16 fixed form.
+fn encode_charstring_number_f64(v: f64, out: &mut Vec<u8>) {
+    if v == v.round() && (-32768.0..=32767.0).contains(&v) {
+        // A whole number in range: the integer forms are exact.
+        encode_charstring_number(v as f32, out);
+    } else {
+        // Float-to-int casts saturate, and NaN maps to 0.
+        let [a, b, c, d] = ((v * 65536.0).round() as i32).to_be_bytes();
+        out.extend_from_slice(&[255, a, b, c, d]);
     }
 }
 

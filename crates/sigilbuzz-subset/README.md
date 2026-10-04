@@ -28,7 +28,9 @@ For TrueType fonts:
 
 CFF and CFF2 fonts are supported too, including CID-keyed CFF. When glyphs are dropped,
 the `CFF ` or `CFF2` table is rebuilt around the kept ones, and every other table follows
-the same rules as above. A `CFF2` table keeps its own variation data. A kept `CFF ` glyph
+the same rules as above. A `CFF2` table keeps its own variation data. Each kept glyph runs
+through its subroutines the way `hb-subset` reads it, so hinted fonts subset whole: a hint
+mask counts the stems its glyph declared anywhere, and blended `CFF2` stem hints count. A kept `CFF ` glyph
 drawn by `seac` (an accented character) keeps its base and accent glyphs. `hb-subset`
 does the same for a seac in the glyph's own charstring; this subsetter also follows one
 that a subroutine ends, which sigilbuzz draws.
@@ -44,8 +46,15 @@ such as `COLR`, `CPAL`, `MVAR` and `DSIG`, stay, since no glyph ID changes, but 
 font, or pins some axes and leaves the rest variable. It moves `glyf` outlines (inferred
 points and composite offsets included), the advances and side bearings their phantom
 points give, the `cvt ` values `cvar` varies, and the `BASE` coordinates the store
-varies, the way HarfBuzz's instancer does. Glyph instructions stay, as they do in
+varies, the way HarfBuzz's instancer does. A `CFF2` instance rounds every blended value
+to a whole unit and takes its side bearings, `head` box and `hhea` extremes from its
+outlines, as HarfBuzz does. `OS/2` gets the new `usWeightClass`, `usWidthClass` and
+`xAvgCharWidth`, and `post` the new `italicAngle`. Glyph instructions stay, as they do in
 HarfBuzz unless it is asked to drop hinting.
+
+`instance` takes normalized coordinates. `instance_user` takes axis values in the units
+`fvar` gives (`wght` 700, say), pins or keeps each axis by tag, and normalizes them the
+way HarfBuzz does.
 
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
 a Device table, an anchor), or a malformed vertical metrics table (`vhea`, `vmtx`,

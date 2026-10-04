@@ -5,6 +5,7 @@ use super::*;
 
 mod glyph_bake;
 mod gpos_bake;
+mod user_and_style;
 
 const RUBIK: &[u8] = include_bytes!("../../../../tests/fixtures/rubik_vf.ttf");
 const SOURCE_SANS: &[u8] = include_bytes!("../../../../tests/fonts/SourceSans3VF-Latin-Subset.otf");

@@ -246,7 +246,7 @@ fn build_ivs1_for_cff2(
 }
 
 /// Builds a synthetic CFF2 with local subroutines per Font DICT.
-fn build_synthetic_cff2_with_local_subrs(
+pub(super) fn build_synthetic_cff2_with_local_subrs(
     charstrings: &[&[u8]],
     fd_select: &[u8],
     local_subrs: &[&[u8]],

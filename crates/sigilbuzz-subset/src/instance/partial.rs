@@ -13,9 +13,10 @@ use super::gdef_store::GdefBake;
 use super::metrics::{bake_vorg, mvar_defaults, VorgBake};
 use super::metrics_var::{bake_hvar_partial_with, bake_mvar_partial, bake_vvar_partial_with};
 use super::store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
+use super::style::AxisLocations;
 use super::{
-    plan_coords, post_avar, push_base, push_glyf_tables, push_metric_tables, AxisPin,
-    InstanceInput, InstancedOutput,
+    plan_coords, post_avar, push_base, push_glyf_tables, push_metric_tables, push_style_tables,
+    AxisPin, InstanceInput, InstancedOutput,
 };
 use crate::base::BaseBake;
 use crate::sfnt;
@@ -70,9 +71,13 @@ use crate::SubsetError;
 /// `input.drop_var_tables` is not read here. The output keeps live
 /// axes, so the trimmed variation tables always stay: they drive
 /// those axes.
+///
+/// `locations` holds the user value of each pinned axis, which sets the
+/// `OS/2` and `post` fields that follow from `wght`, `wdth` and `slnt`.
 pub(super) fn partial_instance(
     face: &Face<'_>,
     input: &InstanceInput,
+    locations: &AxisLocations,
 ) -> Result<InstancedOutput, SubsetError> {
     let pins = &input.axis_pins;
     let coords = &input.coords;
@@ -134,6 +139,15 @@ pub(super) fn partial_instance(
         .map(|(&c, pin)| if *pin == AxisPin::Keep { 0.0 } else { c })
         .collect();
     let mvar_bake = mvar_defaults(face, &plan, pins)?;
+    // CFF2 VarStore + blend-operator rewrite (optional). VarStore
+    // region trim via `bake_ivs_partial`; charstrings re-emit blend
+    // ops with the surviving regions and pre-scaled deltas. It runs
+    // before the metrics, which draw the outlines within the work it
+    // allowed.
+    if let Ok(cff2_bytes) = face.table_bytes(tag::CFF2) {
+        let new_cff2 = crate::cff2::bake_cff2_partial(cff2_bytes, &plan, pins)?;
+        tables.push((tag::CFF2, new_cff2));
+    }
     let glyf_bake = if fold_glyphs {
         Some(push_glyf_tables(
             face,
@@ -160,12 +174,12 @@ pub(super) fn partial_instance(
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
     }
-    if let Some(os2_bytes) = mvar_bake.os2.clone() {
-        tables.push((*b"OS/2", os2_bytes));
-    }
-    if let Some(post_bytes) = mvar_bake.post.clone() {
-        tables.push((tag::POST, post_bytes));
-    }
+    let avg_char_width = match (&glyf_bake, &metrics_bake) {
+        (Some(b), _) => b.avg_char_width,
+        (None, Some(m)) => m.avg_char_width,
+        (None, None) => 0,
+    };
+    push_style_tables(face, &mvar_bake, avg_char_width, locations, &mut tables);
 
     // HVAR / VVAR / MVAR rewrites (optional). A malformed table is
     // dropped (its metrics stop varying) and reported.
@@ -220,14 +234,6 @@ pub(super) fn partial_instance(
         &warnings,
     )? {
         tables.push((tag::GPOS, b));
-    }
-
-    // CFF2 VarStore + blend-operator rewrite (optional). VarStore
-    // region trim via `bake_ivs_partial`; charstrings re-emit blend
-    // ops with the surviving regions and pre-scaled deltas.
-    if let Ok(cff2_bytes) = face.table_bytes(tag::CFF2) {
-        let new_cff2 = crate::cff2::bake_cff2_partial(cff2_bytes, &plan, pins)?;
-        tables.push((tag::CFF2, new_cff2));
     }
 
     // gvar tuple-projection rewrite (optional). Pin-axis support
@@ -293,7 +299,7 @@ pub(super) fn partial_instance(
         let left_out = glyf_bake
             .as_ref()
             .map(|b| &b.vmtx)
-            .or(metrics_bake.as_ref())
+            .or(metrics_bake.as_ref().map(|m| &m.vmtx))
             .is_some_and(|v| v.left_out.contains(&rec.tag));
         if left_out || (rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped) {
             continue;

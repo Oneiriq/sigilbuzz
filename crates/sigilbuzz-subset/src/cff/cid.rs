@@ -1,13 +1,12 @@
 //! CID-keyed CFF1 subsetting: FDArray and FDSelect rebuild with
 //! per-FD subroutine keep-sets.
 
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::charset::extract_kept_charset_sids;
-use super::charstring::{
-    compute_cross_fd_globals, compute_kept_subrs, renumber_charstring_impl, scan_subr_calls,
-    SubrKind,
-};
+use super::charstring::{cross_fd_globals, kept_position, rewrite_calls, Remap, SubrCall};
 use super::emit::{
     emit_charset_auto, emit_fd_select_auto, encode_dict_int, encode_dict_offset_placeholder,
     encode_index, parse_fd_select, patch_dict_offset,
@@ -17,6 +16,7 @@ use super::reader::{
     OP_CHARSTRINGS, OP_ENCODING, OP_FD_ARRAY, OP_FD_SELECT, OP_PRIVATE,
 };
 use super::serialise_private_dict;
+use super::walk::{walk_budget, CharstringWalk, FdWalk};
 use crate::SubsetError;
 
 // ----------------------------------------------------------------------------
@@ -31,13 +31,13 @@ use crate::SubsetError;
 //
 //   1. Walk FDSelect, capture old FD index per kept gid.
 //   2. Build the kept-FD set (union of FDs referenced by the kept gid set).
-//   3. For each kept FD, walk every kept charstring it owns + its
-//      Private DICT's local subr INDEX, computing the per-FD subroutine
-//      keep-set (transitive through callsubr/callgsubr).
+//   3. For each kept FD, run every kept charstring it owns through its
+//      subroutine calls, computing the per-FD subroutine keep-set and
+//      the call sites of every body reached (see `walk`).
 //   4. Renumber FDs to a 0..N compact range; rewrite FDSelect with the
 //      new FD indices.
-//   5. Renumber per-FD local subrs (reuse renumber_charstring with the
-//      FD-specific renumber tables).
+//   5. Renumber per-FD local subrs at the call sites the walk found,
+//      with the FD-specific renumber tables.
 //   6. Rebuild the FDArray INDEX with placeholder-patched Font DICTs
 //      whose Private DICT (size, off) and Subrs offsets get patched once
 //      the layout lands.
@@ -244,13 +244,18 @@ pub(super) fn subset_cid_keyed(
 
     // For each source FD, capture (Font DICT bytes, parsed entries,
     // optional Private DICT info, Private DICT bytes, Local Subr INDEX).
+    // Font DICTs that name the same Private DICT share one read of it
+    // and of its Local Subr INDEX.
     struct FdInfo<'a> {
         font_dict_entries: Vec<DictEntry>,
         private_dict: &'a [u8],
         private: Option<(u32, u32)>,
-        local_subrs: Vec<&'a [u8]>,
+        local_subrs: Rc<Vec<&'a [u8]>>,
     }
     let mut fd_infos: Vec<FdInfo<'_>> = Vec::with_capacity(fd_array_entries.len());
+    // Private DICT (size, offset) -> its bytes and Local Subr INDEX.
+    type Privates<'a> = BTreeMap<(u32, u32), (&'a [u8], Rc<Vec<&'a [u8]>>)>;
+    let mut privates: Privates<'_> = BTreeMap::new();
     for fd_bytes in &fd_array_entries {
         let entries = walk_dict(fd_bytes)?;
         // The last well-formed Private operator wins.
@@ -259,15 +264,23 @@ pub(super) fn subset_cid_keyed(
             .rev()
             .filter(|e| e.op == OP_PRIVATE)
             .find_map(private_operands);
-        let (private_dict, local_subrs): (&[u8], Vec<&[u8]>) = match priv_info {
-            Some((size, off)) => read_private_dict(
-                cff_bytes,
-                size,
-                off,
-                read_index,
-                "CFF1 CID Private DICT past end",
-            )?,
-            None => (&[][..], Vec::new()),
+        let (private_dict, local_subrs): (&[u8], Rc<Vec<&[u8]>>) = match priv_info {
+            Some(key) => match privates.get(&key) {
+                Some((dict, locals)) => (dict, Rc::clone(locals)),
+                None => {
+                    let (dict, locals) = read_private_dict(
+                        cff_bytes,
+                        key.0,
+                        key.1,
+                        read_index,
+                        "CFF1 CID Private DICT past end",
+                    )?;
+                    let locals = Rc::new(locals);
+                    privates.insert(key, (dict, Rc::clone(&locals)));
+                    (dict, locals)
+                }
+            },
+            None => (&[][..], Rc::default()),
         };
         fd_infos.push(FdInfo {
             font_dict_entries: entries,
@@ -305,36 +318,26 @@ pub(super) fn subset_cid_keyed(
         .map(|&old| fd_pos_of[usize::from(old)] as u8)
         .collect();
 
-    // Step 3: per-kept-FD subroutine keep-set.
-    // For each kept FD f (old index): collect every kept charstring whose
-    // gid maps to f; then compute_kept_subrs over those charstrings using
-    // f's local_subrs and the global_subrs.
-    //
-    // Globals are shared across all FDs. We union the per-FD global
-    // keep-set to a single global keep-set.
-    let mut kept_global_set: alloc::vec::Vec<bool> = alloc::vec![false; parsed.global_subrs.len()];
-    let mut per_fd_kept_local: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
+    // Step 3: run every kept glyph through its subroutine calls, FD by
+    // FD (see `walk`). The subroutines reached are the ones kept: each
+    // FD's locals, and the globals, shared across FDs. Each body's call
+    // sites are found with its masks sized by the stems its callers
+    // declared.
+    let mut walk = CharstringWalk::new(&parsed.global_subrs, None, walk_budget(cff_bytes.len()));
+    let mut fd_walks: Vec<FdWalk<'_>> = Vec::with_capacity(kept_fds_sorted.len());
+    let mut charstring_calls: Vec<Vec<SubrCall>> = alloc::vec![Vec::new(); kept_gids.len()];
     for &old_fd in &kept_fds_sorted {
-        let fd_local_subrs = &fd_infos[old_fd as usize].local_subrs;
-        // Charstrings whose source-FD is old_fd.
-        let mut cs_for_this_fd: Vec<&[u8]> = Vec::new();
+        let mut fd_walk = FdWalk::new(fd_infos[old_fd as usize].local_subrs.as_slice(), 0);
         for (i, &gid) in kept_gids.iter().enumerate() {
             if kept_fd_old[i] == old_fd {
-                cs_for_this_fd.push(parsed.char_strings[gid as usize]);
+                charstring_calls[i] =
+                    walk.glyph(&mut fd_walk, parsed.char_strings[gid as usize])?;
             }
         }
-        let (kept_local, kept_global) =
-            compute_kept_subrs(&cs_for_this_fd, fd_local_subrs, &parsed.global_subrs)?;
-        for &gi in &kept_global {
-            kept_global_set[gi as usize] = true;
-        }
-        per_fd_kept_local.push(kept_local);
+        fd_walks.push(fd_walk);
     }
-    let kept_global_idx: Vec<u32> = kept_global_set
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &k)| if k { Some(i as u32) } else { None })
-        .collect();
+    let per_fd_kept_local: Vec<Vec<u32>> = fd_walks.iter().map(FdWalk::kept_locals).collect();
+    let kept_global_idx = walk.kept_globals();
 
     let old_global_count = parsed.global_subrs.len();
 
@@ -344,31 +347,20 @@ pub(super) fn subset_cid_keyed(
     // rebuilt CFF, where every FD shares the same global INDEX, we
     // must duplicate the global per kept FD that uses it and rewrite
     // each caller's `callgsubr` operand to point at *that* FD's copy.
-    let cross_fd_mask = compute_cross_fd_globals(&parsed.global_subrs, 0)?;
+    let cross_fd_mask = cross_fd_globals(
+        old_global_count,
+        kept_global_idx.iter().map(|&g| {
+            (
+                g as usize,
+                walk.global_calls(g as usize).unwrap_or_default(),
+            )
+        }),
+    );
 
-    // Per-kept-FD local renumber tables.
-    let mut per_fd_local_renumber: Vec<Vec<Option<u32>>> =
-        Vec::with_capacity(kept_fds_sorted.len());
-    for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
-        let local_count = fd_infos[old_fd as usize].local_subrs.len();
-        let mut renumber: Vec<Option<u32>> = alloc::vec![None; local_count];
-        for (new_i, &old_i) in per_fd_kept_local[i].iter().enumerate() {
-            renumber[old_i as usize] = Some(new_i as u32);
-        }
-        per_fd_local_renumber.push(renumber);
-    }
-
-    // Determine which (cross-FD global, kept-FD) duplicates are needed.
-    // A duplicate is needed iff a kept charstring or kept local subr in
-    // FD f calls (transitively) the cross-FD global. Conservatively
-    // request a duplicate for every (cross-FD-global, FD) pair where
-    // the global is *reached* from any caller in that FD.
-    //
-    // Reachability: walk every kept charstring and every kept local
-    // subr in FD f; collect the set of globals they reach via the
-    // global-call graph. Intersect with cross_fd_mask to get the
-    // duplicates needed for FD f. Each FD's target list is sorted by
-    // source global index.
+    // Determine which (cross-FD global, kept-FD) duplicates are needed:
+    // one for every cross-FD global a glyph of the FD reached, through
+    // its charstring, its locals or other globals. Each FD's target
+    // list is sorted by source global index.
     //
     // The rebuilt Global Subr INDEX holds the kept non-cross-FD globals
     // plus one duplicate per (cross-FD global, FD) pair. Its count is a
@@ -381,68 +373,17 @@ pub(super) fn subset_cid_keyed(
         .count();
     let mut layout_len = n_non_cross;
     let mut per_fd_cross_fd_targets: Vec<Vec<u32>> = Vec::with_capacity(kept_fds_sorted.len());
-    for (fd_pos, &old_fd) in kept_fds_sorted.iter().enumerate() {
-        // Bodies that originate calls in this FD: kept charstrings
-        // belonging to old_fd plus all kept locals in old_fd.
-        let fd_local_subrs = &fd_infos[old_fd as usize].local_subrs;
-        let mut seed_bodies: Vec<&[u8]> = Vec::new();
-        for (i, &gid) in kept_gids.iter().enumerate() {
-            if kept_fd_old[i] == old_fd {
-                seed_bodies.push(parsed.char_strings[gid as usize]);
-            }
-        }
-        for &kept_local_old in &per_fd_kept_local[fd_pos] {
-            seed_bodies.push(fd_local_subrs[kept_local_old as usize]);
-        }
-        // Reachable globals: transitive closure through global call
-        // graph. We use the source-font global INDEX because the new
-        // INDEX hasn't been built yet.
-        let mut reached = alloc::vec![false; old_global_count];
-        let mut frontier: Vec<u32> = Vec::new();
-        for body in &seed_bodies {
-            for call in scan_subr_calls(body, fd_local_subrs.len(), old_global_count)? {
-                if call.kind == SubrKind::Global {
-                    let idx = call.index_after_bias;
-                    if idx >= 0 && (idx as usize) < old_global_count {
-                        let i = idx as usize;
-                        if !reached[i] {
-                            reached[i] = true;
-                            frontier.push(i as u32);
-                        }
-                    }
-                }
-            }
-        }
-        while let Some(g) = frontier.pop() {
-            let body = parsed.global_subrs[g as usize];
-            for call in scan_subr_calls(body, fd_local_subrs.len(), old_global_count)? {
-                if call.kind == SubrKind::Global {
-                    let idx = call.index_after_bias;
-                    if idx >= 0 && (idx as usize) < old_global_count {
-                        let i = idx as usize;
-                        if !reached[i] {
-                            reached[i] = true;
-                            frontier.push(i as u32);
-                        }
-                    }
-                }
-            }
-        }
+    for fd_walk in &fd_walks {
         let mut targets: Vec<u32> = Vec::new();
-        for (g, ((&hit, &cross), &kept)) in reached
-            .iter()
-            .zip(&cross_fd_mask)
-            .zip(&kept_global_set)
-            .enumerate()
-        {
-            if hit && cross && kept {
+        for g in fd_walk.reached_globals() {
+            if cross_fd_mask.get(g as usize).copied().unwrap_or(false) {
                 layout_len += 1;
                 if layout_len > usize::from(u16::MAX) {
                     return Err(SubsetError::Unsupported(
                         "CFF1 CID rebuilt Global Subr INDEX exceeds 65535 entries",
                     ));
                 }
-                targets.push(g as u32);
+                targets.push(g);
             }
         }
         per_fd_cross_fd_targets.push(targets);
@@ -484,29 +425,52 @@ pub(super) fn subset_cid_keyed(
     }
     let new_global_count = new_global_layout.len();
 
-    // Step 5: rewrite each kept charstring with its FD's local-renumber
-    // table + the shared global-renumber table + the FD's cross-FD
-    // override table.
+    // Each FD's kept locals take their positions among the FD's kept
+    // ones; the globals take the layout above, or the FD's duplicate.
+    // A call's source subroutine is worked out with the bias of the FD
+    // that runs the body (see `rewrite_calls`), so one global body
+    // serves FDs whose local INDEXes have different biases.
+    let local_maps: Vec<_> = per_fd_kept_local
+        .iter()
+        .map(|kept| move |old: usize| kept_position(kept, old))
+        .collect();
+    let global_maps: Vec<_> = per_fd_cross_fd_override
+        .iter()
+        .map(|overrides| {
+            let global_renumber = &global_renumber;
+            move |old: usize| {
+                override_slot(overrides, old)
+                    .or_else(|| global_renumber.get(old).copied().flatten())
+            }
+        })
+        .collect();
+    let fd_remaps = |fd_pos: usize| {
+        let old_fd = usize::from(kept_fds_sorted[fd_pos]);
+        (
+            Remap {
+                old_count: fd_infos[old_fd].local_subrs.len(),
+                new_count: per_fd_kept_local[fd_pos].len(),
+                new_index: &local_maps[fd_pos],
+            },
+            Remap {
+                old_count: old_global_count,
+                new_count: new_global_count,
+                new_index: &global_maps[fd_pos],
+            },
+        )
+    };
+
+    // Step 5: rewrite each kept charstring with its FD's maps, at the
+    // call sites the walk found.
     let mut new_charstrings: Vec<Vec<u8>> = Vec::with_capacity(kept_gids.len());
     for (i, &gid) in kept_gids.iter().enumerate() {
-        let old_fd = kept_fd_old[i];
-        let new_fd_pos = fd_pos_of[usize::from(old_fd)];
-        let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
-        let fd_local_renumber = &per_fd_local_renumber[new_fd_pos];
-        let new_local_count = per_fd_kept_local[new_fd_pos].len();
-        let overrides = &per_fd_cross_fd_override[new_fd_pos];
-        let mut cs = parsed.char_strings[gid as usize].to_vec();
-        renumber_charstring_impl(
-            &mut cs,
-            fd_local_subrs_old.len(),
-            old_global_count,
-            new_local_count,
-            new_global_count,
-            fd_local_renumber,
-            &global_renumber,
-            |old_g| override_slot(overrides, old_g),
-        )?;
-        new_charstrings.push(cs);
+        let (local, global) = fd_remaps(fd_pos_of[usize::from(kept_fd_old[i])]);
+        new_charstrings.push(rewrite_calls(
+            parsed.char_strings[gid as usize],
+            &charstring_calls[i],
+            &local,
+            &global,
+        )?);
     }
 
     // Renumber each kept local subr (per-FD). Locals are FD-scoped so
@@ -514,25 +478,15 @@ pub(super) fn subset_cid_keyed(
     let mut new_per_fd_local_subrs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(kept_fds_sorted.len());
     for (i, &old_fd) in kept_fds_sorted.iter().enumerate() {
         let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
-        let kept_local_idx = &per_fd_kept_local[i];
-        let fd_local_renumber = &per_fd_local_renumber[i];
-        let new_local_count = kept_local_idx.len();
-        let mut new_locals: Vec<Vec<u8>> = kept_local_idx
-            .iter()
-            .map(|&idx| fd_local_subrs_old[idx as usize].to_vec())
-            .collect();
-        let overrides = &per_fd_cross_fd_override[i];
-        for sub in &mut new_locals {
-            renumber_charstring_impl(
-                sub,
-                fd_local_subrs_old.len(),
-                old_global_count,
-                new_local_count,
-                new_global_count,
-                fd_local_renumber,
-                &global_renumber,
-                |old_g| override_slot(overrides, old_g),
-            )?;
+        let (local, global) = fd_remaps(i);
+        let mut new_locals: Vec<Vec<u8>> = Vec::with_capacity(per_fd_kept_local[i].len());
+        for &idx in &per_fd_kept_local[i] {
+            new_locals.push(rewrite_calls(
+                fd_local_subrs_old[idx as usize],
+                fd_walks[i].local_calls(idx as usize).unwrap_or_default(),
+                &local,
+                &global,
+            )?);
         }
         new_per_fd_local_subrs.push(new_locals);
     }
@@ -545,48 +499,41 @@ pub(super) fn subset_cid_keyed(
     // `callgsubr` operands using `global_renumber` (cross-FD overrides
     // are inapplicable because by definition this body never calls a
     // local). A non-cross-FD global that calls a cross-FD global would
-    // itself become cross-FD by `compute_cross_fd_globals`'s transitive
-    // pass, so this branch only sees globals whose entire reach stays
-    // inside the non-cross-FD tier.
+    // itself become cross-FD by `cross_fd_globals`'s transitive pass,
+    // so this branch only sees globals whose entire reach stays inside
+    // the non-cross-FD tier.
     //
-    // Cross-FD duplicates re-encode against the *original* FD's local
-    // INDEX (sized to that FD's source local_subrs.len()), then route
-    // local-subr operands through that FD's local-renumber table and
-    // global-subr operands through that FD's cross-FD override (so
-    // recursive cross-FD calls land on the correct duplicate).
+    // Cross-FD duplicates route local-subr operands through that FD's
+    // local map, with that FD's local bias, and global-subr operands
+    // through that FD's cross-FD override (so recursive cross-FD calls
+    // land on the correct duplicate).
+    let canonical_global = |old: usize| global_renumber.get(old).copied().flatten();
+    let no_local = |_: usize| None;
+    let canonical = (
+        Remap {
+            old_count: 0,
+            new_count: 0,
+            new_index: &no_local,
+        },
+        Remap {
+            old_count: old_global_count,
+            new_count: new_global_count,
+            new_index: &canonical_global,
+        },
+    );
     let mut new_global_subrs: Vec<Vec<u8>> = Vec::with_capacity(new_global_layout.len());
     for &(old_g, dup_for_fd) in &new_global_layout {
-        let mut body = parsed.global_subrs[old_g as usize].to_vec();
-        if let Some(old_fd) = dup_for_fd {
-            let fd_pos = fd_pos_of[usize::from(old_fd)];
-            let fd_local_subrs_old = &fd_infos[old_fd as usize].local_subrs;
-            let new_local_count = per_fd_kept_local[fd_pos].len();
-            let overrides = &per_fd_cross_fd_override[fd_pos];
-            renumber_charstring_impl(
-                &mut body,
-                fd_local_subrs_old.len(),
-                old_global_count,
-                new_local_count,
-                new_global_count,
-                &per_fd_local_renumber[fd_pos],
-                &global_renumber,
-                |old_g| override_slot(overrides, old_g),
-            )?;
+        let source = parsed.global_subrs[old_g as usize];
+        let calls = walk.global_calls(old_g as usize).unwrap_or_default();
+        let body = if let Some(old_fd) = dup_for_fd {
+            let (local, global) = fd_remaps(fd_pos_of[usize::from(old_fd)]);
+            rewrite_calls(source, calls, &local, &global)?
         } else {
-            // Non-cross-FD: zero-sized local pool because the body
-            // never issues a `callsubr`. If it did, the empty local
-            // renumber table would surface a hard error.
-            renumber_charstring_impl(
-                &mut body,
-                0,
-                old_global_count,
-                0,
-                new_global_count,
-                &[],
-                &global_renumber,
-                |_| None,
-            )?;
-        }
+            // Non-cross-FD: an empty local pool because the body never
+            // issues a `callsubr`. If it did, the call would surface a
+            // hard error.
+            rewrite_calls(source, calls, &canonical.0, &canonical.1)?
+        };
         new_global_subrs.push(body);
     }
 

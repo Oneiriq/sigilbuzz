@@ -5,7 +5,8 @@
 //! in through composites and ligatures. Every table that survives is
 //! rewritten so glyph references point at the new, compacted glyph order.
 //! [`instance()`] bakes variable-font axis coordinates into a static font or
-//! pins some axes and keeps the rest.
+//! pins some axes and keeps the rest; [`instance_user`] takes the axis
+//! values in user units, as HarfBuzz's instancer does.
 //!
 //! # Pipeline
 //!
@@ -69,6 +70,13 @@
 //! (see [`InstancedOutput::warnings`] for what each one leaves), except
 //! for CFF2 charstrings, which fail the instance. Real fonts use at
 //! most about 12.5% of any budget, so none of this applies to them.
+//! A CFF2 instance measures its glyphs' outlines for their metrics
+//! after the charstring bake, which has run the same subroutines
+//! within its budget.
+//!
+//! [`subset`] runs every kept glyph of a `CFF ` or `CFF2` table through
+//! its subroutine calls (see "For CFF and CFF2 fonts" below), charging
+//! 64 tokens per byte of the table, plus 2^22, and fails past that.
 //!
 //! # What happens to each table
 //!
@@ -122,6 +130,13 @@
 //!
 //! - A kept `CFF ` glyph whose charstring ends in the seac form of
 //!   `endchar` keeps the base and accent glyphs it draws.
+//! - Each kept glyph runs through its subroutine calls as HarfBuzz's
+//!   subsetter interprets it: a hint mask takes one bit per stem the
+//!   glyph declared, in its charstring or any subroutine, a CFF2
+//!   `blend` drops as many deltas as its store's regions give (so
+//!   blended stem hints count), and subroutines nest at most 10 deep.
+//!   The subroutines reached are kept and renumbered where they are
+//!   called; a renumbered call that no longer fits its push grows.
 //! - If every glyph survives, the font passes through and only the SFNT
 //!   directory is rebuilt. Every table is copied unchanged except
 //!   `kern`, `kerx`, and `morx`, and the layout tables (`BASE`
@@ -227,7 +242,10 @@ pub use cff2::subset_non_identity as subset_cff2_non_identity;
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
-pub use instance::{instance, AxisPin, F2Dot14, InstanceInput, InstancedOutput};
+pub use instance::{
+    instance, instance_user, AxisLimit, AxisPin, F2Dot14, InstanceInput, InstancedOutput,
+    UserInstanceInput,
+};
 pub use warnings::SubsetWarning;
 
 use warnings::Warnings;
