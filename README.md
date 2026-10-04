@@ -12,7 +12,7 @@ same output for the same input every time.
 
 ## Status
 
-The current release is 0.23.0. sigilbuzz is still pre-1.0, so a minor release can
+The current release is 0.23.1. sigilbuzz is still pre-1.0, so a minor release can
 change the API. The names exported from the crate root are the ones I intend to keep
 stable. [docs/STABILITY.md](docs/STABILITY.md) lists them.
 

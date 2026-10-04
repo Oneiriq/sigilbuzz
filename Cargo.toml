@@ -18,11 +18,11 @@ repository = "https://github.com/Oneiriq/sigilbuzz"
 [workspace.dependencies]
 # Shared version pin. Companion crates use `sigilbuzz = { workspace = true }`
 # to pick up the shaper.
-sigilbuzz = { path = ".", version = "0.23.0" }
+sigilbuzz = { path = ".", version = "0.23.1" }
 
 [package]
 name = "sigilbuzz"
-version = "0.23.0"
+version = "0.23.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
