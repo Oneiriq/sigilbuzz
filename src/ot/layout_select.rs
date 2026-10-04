@@ -264,7 +264,7 @@ impl<'a> LayoutView<'a> {
         tag: [u8; 4],
         script_priority: &[[u8; 4]],
     ) -> Option<Vec<u16>> {
-        match self.map(script_priority).as_deref() {
+        match self.map(script_priority) {
             Some(map) => map.feature_lookups(tag),
             None => feature_lookup_indices(
                 &self.script_list,
@@ -278,7 +278,7 @@ impl<'a> LayoutView<'a> {
 
     /// [`lists_feature`] for this view.
     pub(crate) fn lists(&self, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
-        match self.map(script_priority).as_deref() {
+        match self.map(script_priority) {
             Some(map) => map.lists(tag),
             None => lists_feature(
                 &self.script_list,
@@ -292,7 +292,7 @@ impl<'a> LayoutView<'a> {
 
     /// [`listed_feature_lookups`] for this view.
     pub(crate) fn listed_lookups(&self, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Vec<u16> {
-        match self.map(script_priority).as_deref() {
+        match self.map(script_priority) {
             Some(map) => map.listed_lookups(tag),
             None => listed_feature_lookups(
                 &self.script_list,
@@ -306,7 +306,7 @@ impl<'a> LayoutView<'a> {
 
     /// [`required_feature`] for this view.
     pub(crate) fn required(&self, script_priority: &[[u8; 4]]) -> Option<([u8; 4], Vec<u16>)> {
-        match self.map(script_priority).as_deref() {
+        match self.map(script_priority) {
             Some(map) => map.required.clone(),
             None => required_feature(
                 &self.script_list,
@@ -319,8 +319,9 @@ impl<'a> LayoutView<'a> {
 
     /// The resolved language system of a run whose candidate script
     /// tags are `script_priority`, from the font's cache: `None`
-    /// without one, or when the language system is too large to keep.
-    fn map(&self, script_priority: &[[u8; 4]]) -> Option<Cow<'_, FeatureMap>> {
+    /// without one, when the language system is too large to keep, or
+    /// when the cache already keeps as many as it may.
+    fn map(&self, script_priority: &[[u8; 4]]) -> Option<&'a FeatureMap> {
         let maps = self.maps?;
         let key = MapKey {
             script_priority,
@@ -531,9 +532,10 @@ impl KeyedMap {
 }
 
 /// The language systems one table has resolved, kept by a
-/// [`crate::Font`] across shaping calls: at most [`MAP_SLOTS`] of them.
-/// Past that, a run's language system is walked each time, as it is
-/// without a cache.
+/// [`crate::Font`] across shaping calls: the first [`MAP_SLOTS`] a font
+/// is shaped with. A run with any other key walks its language system
+/// per query, as it does without a cache, rather than resolving all of
+/// it for each query.
 pub(crate) struct FeatureMaps {
     slots: [OnceBox<KeyedMap>; MAP_SLOTS],
 }
@@ -547,12 +549,8 @@ impl FeatureMaps {
     }
 
     /// The map for `key`, built with `build` the first time, or `None`
-    /// when it is too large to keep.
-    fn get(
-        &self,
-        key: &MapKey<'_>,
-        build: impl Fn() -> Option<FeatureMap>,
-    ) -> Option<Cow<'_, FeatureMap>> {
+    /// when it is too large to keep or every slot keeps another key.
+    fn get(&self, key: &MapKey<'_>, build: impl Fn() -> Option<FeatureMap>) -> Option<&FeatureMap> {
         for slot in &self.slots {
             let keyed = match slot.get() {
                 Some(keyed) => keyed,
@@ -564,10 +562,10 @@ impl FeatureMaps {
                 }),
             };
             if keyed.matches(key) {
-                return keyed.map.as_ref().map(Cow::Borrowed);
+                return keyed.map.as_ref();
             }
         }
-        build().map(Cow::Owned)
+        None
     }
 
     /// Heap bytes the kept maps hold.
@@ -1226,8 +1224,10 @@ mod tests {
                 tags.extend(unknown);
                 for record in records {
                     let features = ActiveFeatures::new(list, record);
-                    let cache = LayoutCache::new(table, &lookups, 1 << 20);
                     for languages in languages {
+                        // One cache per language keeps every priority's
+                        // language system within the cache's slots.
+                        let cache = LayoutCache::new(table, &lookups, 1 << 20);
                         let walk = LayoutView {
                             script_list,
                             features,
@@ -1263,6 +1263,38 @@ mod tests {
     }
 
     const LATN: &[[u8; 4]] = &[*b"latn"];
+
+    #[test]
+    fn language_systems_past_the_slots_are_walked_not_resolved() {
+        let maps = FeatureMaps::new();
+        let built = core::cell::Cell::new(0);
+        let build = || {
+            built.set(built.get() + 1);
+            Some(FeatureMap {
+                lang_sys: false,
+                entries: Vec::new(),
+                required: None,
+                global_vert: None,
+            })
+        };
+        let languages: Vec<[[u8; 4]; 1]> = (0..MAP_SLOTS as u8 + 8)
+            .map(|i| [[b'L', b'0' + i / 10, b'0' + i % 10, b' ']])
+            .collect();
+        let key = |i: usize| MapKey {
+            script_priority: LATN,
+            language_tags: &languages[i],
+            record: None,
+        };
+        for round in 0..3 {
+            for i in 0..languages.len() {
+                let kept = maps.get(&key(i), build).is_some();
+                assert_eq!(kept, i < MAP_SLOTS, "language {i}, round {round}");
+            }
+        }
+        // Each kept key was resolved once, and the others never: their
+        // queries walk the language system instead.
+        assert_eq!(built.get(), MAP_SLOTS);
+    }
 
     #[test]
     fn stage_plans_are_kept_per_key() {
