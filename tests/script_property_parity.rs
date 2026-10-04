@@ -1,5 +1,5 @@
-//! Script runs from the Unicode Script property, and leading marks
-//! with no script, against HarfBuzz.
+//! Script runs from the Unicode Script property, leading marks with no
+//! script, and symbols in an Arabic `stch` word, against HarfBuzz.
 //!
 //! Every expectation here is HarfBuzz 14.5.0's output (uharfbuzz
 //! 0.56.2, `hb.shape` with no features, script and direction guessed,
@@ -17,7 +17,8 @@
 //! and Sinhala Archaic Numbers lost their shapers. Text with no
 //! script-bearing character took the direction of its first strong
 //! character, so Arabic marks before a tatweel were reversed, where
-//! HarfBuzz's invalid script is left to right.
+//! HarfBuzz's invalid script is left to right. And the `stch` stretch
+//! ended its word at a symbol, which HarfBuzz counts into the word.
 
 use sigilbuzz::{script_of, shape, Blob, Buffer, Direction, Face, Font, UnicodeScript};
 
@@ -26,6 +27,7 @@ const AMIRI: &[u8] = include_bytes!("fixtures/amiri_regular.ttf");
 const MONGOLIAN: &[u8] = include_bytes!("fonts/NotoSansMongolian-Regular.ttf");
 const DEVANAGARI: &[u8] = include_bytes!("fonts/NotoSansDevanagari-Regular.ttf");
 const SINHALA: &[u8] = include_bytes!("fonts/NotoSansSinhala-Regular.ttf");
+const SYRIAC: &[u8] = include_bytes!("fonts/NotoSansSyriac-Subset.ttf");
 
 /// Glyph id, cluster, advance along the direction, x offset, y offset.
 type Row = (u32, u32, i32, i32, i32);
@@ -294,6 +296,78 @@ fn leading_arabic_marks_before_a_tatweel_sort_left_to_right() {
                 (5477, 4, 185, 0, 0),
                 (1438, 0, 0, 0, 0),
                 (1441, 0, 0, -92, -112),
+            ],
+        },
+    ]);
+}
+
+#[test]
+fn a_symbol_counts_into_the_stch_word() {
+    // The abbreviation mark stretches over the rest of its word. A
+    // math (Sm) or currency (Sc) symbol in the word counts into its
+    // width, so the two repeating tiles (55) come 4 times each; an
+    // exclamation mark (Po) ends the word, and they come once each.
+    // The font has no glyph for the symbols: their .notdef counts all
+    // the same.
+    check(&[
+        Case {
+            font: SYRIAC,
+            text: "\u{070F}\u{0712}+\u{0713}\u{0715}",
+            direction: Some(Direction::Rtl),
+            expected: &[
+                (18, 7, 525, 0, 0),
+                (16, 5, 718, 0, 0),
+                (0, 4, 600, 0, 0),
+                (9, 2, 958, 0, 0),
+                (53, 0, 0, -2804, 0),
+                (55, 0, 0, -2478, 0),
+                (55, 0, 0, -2276, 0),
+                (55, 0, 0, -2074, 0),
+                (55, 0, 0, -1872, 0),
+                (54, 0, 0, -1637, 0),
+                (55, 0, 0, -1167, 0),
+                (55, 0, 0, -965, 0),
+                (55, 0, 0, -763, 0),
+                (55, 0, 0, -561, 0),
+                (52, 0, 0, -326, 0),
+            ],
+        },
+        Case {
+            font: SYRIAC,
+            text: "\u{070F}\u{0712}\u{20AC}\u{0713}\u{0715}",
+            direction: Some(Direction::Rtl),
+            expected: &[
+                (18, 9, 525, 0, 0),
+                (16, 7, 718, 0, 0),
+                (0, 4, 600, 0, 0),
+                (9, 2, 958, 0, 0),
+                (53, 0, 0, -2804, 0),
+                (55, 0, 0, -2478, 0),
+                (55, 0, 0, -2276, 0),
+                (55, 0, 0, -2074, 0),
+                (55, 0, 0, -1872, 0),
+                (54, 0, 0, -1637, 0),
+                (55, 0, 0, -1167, 0),
+                (55, 0, 0, -965, 0),
+                (55, 0, 0, -763, 0),
+                (55, 0, 0, -561, 0),
+                (52, 0, 0, -326, 0),
+            ],
+        },
+        Case {
+            font: SYRIAC,
+            text: "\u{070F}\u{0712}!\u{0713}\u{0715}",
+            direction: Some(Direction::Rtl),
+            expected: &[
+                (18, 7, 525, 0, 0),
+                (16, 5, 718, 0, 0),
+                (0, 4, 600, 0, 0),
+                (9, 2, 958, 0, 0),
+                (53, 0, 0, -1674, 0),
+                (55, 0, 0, -1348, 0),
+                (54, 0, 0, -1113, 0),
+                (55, 0, 0, -643, 0),
+                (52, 0, 0, -408, 0),
             ],
         },
     ]);

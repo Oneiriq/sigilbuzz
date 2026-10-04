@@ -15,11 +15,12 @@
 //!   for the C API's `hb_buffer_guess_segment_properties`. These two
 //!   snapshots are Unicode 18.0.0, the version HarfBuzz 14.5.0 reads.
 //! - `src/unicode/general_category_table.rs`: the letter (L*), mark
-//!   (Mn, Mc, Me), and decimal number (Nd) ranges of
-//!   `General_Category`, the nonspacing mark (Mn) ranges on their own,
-//!   and `Extended_Pictographic` from `emoji-data.txt`, for HarfBuzz's
-//!   grapheme and native-direction rules, its synthesized glyph
-//!   classes, and its fallback mark positioning.
+//!   (Mn, Mc, Me), decimal number (Nd), and symbol (Sc, Sk, Sm, So)
+//!   ranges of `General_Category`, the nonspacing mark (Mn) ranges on
+//!   their own, and `Extended_Pictographic` from `emoji-data.txt`, for
+//!   HarfBuzz's grapheme and native-direction rules, its synthesized
+//!   glyph classes, its fallback mark positioning, and the word an
+//!   Arabic `stch` stretch fills.
 //! - `src/unicode/normalize/decompose_table.rs`: the canonical
 //!   `Decomposition_Mapping` of every character, from
 //!   `UnicodeData.txt`.
@@ -50,7 +51,7 @@
 //!
 //! - `ArabicShaping.txt`: every data line.
 //! - `DerivedGeneralCategory.txt`: the Lu, Ll, Lt, Lm, Lo, Mn, Mc, Me,
-//!   Nd, and Cf lines.
+//!   Nd, Sc, Sk, Sm, So, and Cf lines.
 //! - `BidiMirroring.txt`: every data line (the commented-out list of
 //!   mirrored characters without a mirror glyph is dropped).
 //! - `Scripts.txt`: every data line.
@@ -122,7 +123,9 @@ const BIDI_CLASS_RS: &str = "src/unicode/bidi_class_table.rs";
 const BIDI_BRACKETS_RS: &str = "src/unicode/bidi_brackets_table.rs";
 
 /// The General_Category values the snapshot keeps.
-const KEPT_CATEGORIES: &[&str] = &["Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Cf"];
+const KEPT_CATEGORIES: &[&str] = &[
+    "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Sc", "Sk", "Sm", "So", "Cf",
+];
 
 /// Maximum emitted line width, matching the crate's rustfmt setting.
 const MAX_WIDTH: usize = 100;
@@ -393,6 +396,7 @@ fn generate_categories() -> String {
             "Lu" | "Ll" | "Lt" | "Lm" | "Lo" => 'L',
             "Mn" | "Mc" | "Me" => 'M',
             "Nd" => 'N',
+            "Sc" | "Sk" | "Sm" | "So" => 'S',
             _ => continue,
         };
         let (start, end) = parse_range(&row[0]);
@@ -413,9 +417,13 @@ fn generate_categories() -> String {
     file_header(&mut out, &[&categories, &emoji]);
     out.push_str("// Code point ranges read best in hex without digit separators.\n");
     out.push_str("#![allow(clippy::unreadable_literal)]\n\n");
-    out.push_str("use super::general_category::GeneralCategoryClass::{self, DecimalNumber, Letter, Mark};\n\n");
-    out.push_str("/// Letters (Lu, Ll, Lt, Lm, Lo), marks (Mn, Mc, Me), and decimal\n");
-    out.push_str("/// numbers (Nd). Sorted, non-overlapping, inclusive.\n");
+    out.push_str(concat!(
+        "use super::general_category::GeneralCategoryClass::",
+        "{self, DecimalNumber, Letter, Mark, Symbol};\n\n",
+    ));
+    out.push_str("/// Letters (Lu, Ll, Lt, Lm, Lo), marks (Mn, Mc, Me), decimal numbers\n");
+    out.push_str("/// (Nd), and symbols (Sc, Sk, Sm, So). Sorted, non-overlapping,\n");
+    out.push_str("/// inclusive.\n");
     out.push_str("pub(super) static CLASSES: &[(u32, u32, GeneralCategoryClass)] = &[\n");
     let items: Vec<String> = runs(&classes, ' ')
         .iter()
@@ -423,7 +431,8 @@ fn generate_categories() -> String {
             let name = match c {
                 'L' => "Letter",
                 'M' => "Mark",
-                _ => "DecimalNumber",
+                'N' => "DecimalNumber",
+                _ => "Symbol",
             };
             format!("(0x{s:04X}, 0x{e:04X}, {name})")
         })
