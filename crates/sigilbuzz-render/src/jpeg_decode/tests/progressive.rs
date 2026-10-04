@@ -1,7 +1,9 @@
 //! Progressive (SOF2) decode tests built from synthetic two-scan
 //! streams.
 
+use super::encode::{encode_baseline, encode_progressive, scan, spectral_script, Image};
 use super::*;
+use alloc::format;
 
 /// Build a minimal **progressive** (SOF2) grayscale JPEG that
 /// encodes a single 8x8 block via two scans:
@@ -269,4 +271,128 @@ fn progressive_ac_refinement_scan_is_unsupported() {
         err,
         RenderError::BadJpeg("progressive AC refinement scans not supported")
     ));
+}
+
+/// Sampling layouts the decoder accepts: grayscale, then YCbCr 4:4:4,
+/// 4:2:2, 4:2:0, and 4:4:0, then grayscale that declares 2x2 sampling,
+/// which a one-component frame ignores.
+const LAYOUTS: [&[(u8, u8)]; 6] = [
+    &[(1, 1)],
+    &[(1, 1), (1, 1), (1, 1)],
+    &[(2, 1), (1, 1), (1, 1)],
+    &[(2, 2), (1, 1), (1, 1)],
+    &[(1, 2), (1, 1), (1, 1)],
+    &[(2, 2)],
+];
+
+/// Frame sizes: whole blocks, whole MCUs, and sizes that end partway
+/// through a block or an MCU, where non-interleaved scans visit fewer
+/// blocks than the MCU grid holds.
+const SIZES: [(u16, u16); 6] = [(8, 8), (1, 1), (20, 12), (33, 17), (16, 16), (47, 9)];
+
+#[test]
+fn progressive_ac_coefficients_land_at_their_zigzag_index() {
+    // AC energy at zig-zag 1, 2, and 5: natural (0,1), (1,0), (0,2).
+    // A coefficient mapped through the zig-zag table twice lands at
+    // the wrong frequency, so the block no longer matches baseline.
+    let mut block = [0i16; 64];
+    block[0] = 40;
+    block[1] = 30;
+    block[2] = -20;
+    block[5] = 12;
+    block[63] = 3;
+    let img = Image {
+        width: 8,
+        height: 8,
+        sampling: vec![(1, 1)],
+        blocks: vec![vec![block]],
+    };
+    let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+    let progressive = decode_jpeg(&encode_progressive(&img, &spectral_script(1))).unwrap();
+    assert_same_pixels(&progressive, &baseline, "one block");
+    // The block is not flat, so the check has teeth.
+    assert_ne!(baseline.get(0, 0), baseline.get(7, 0));
+}
+
+#[test]
+fn progressive_spectral_selection_matches_baseline() {
+    // The same coefficients coded as one baseline scan and as a
+    // spectral-selection progressive script decode to the same pixels
+    // for every layout and size.
+    for (li, layout) in LAYOUTS.iter().enumerate() {
+        for (si, &(w, h)) in SIZES.iter().enumerate() {
+            let seed = 0x9E37_79B9 ^ ((li as u32) << 8) ^ si as u32;
+            let img = Image::random(w, h, layout, seed, 40, 3);
+            let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+            let script = spectral_script(layout.len());
+            let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+            assert_eq!(
+                (progressive.width, progressive.height),
+                (u32::from(w), u32::from(h))
+            );
+            assert_same_pixels(&progressive, &baseline, &format!("{layout:?} at {w}x{h}"));
+        }
+    }
+}
+
+#[test]
+fn progressive_eob_runs_and_zero_runs_match_baseline() {
+    // Sparse blocks: most AC bands are empty, so the AC scans code
+    // long EOB runs across blocks, and the few nonzero values sit
+    // behind runs of more than 16 zeros (ZRL).
+    for layout in [LAYOUTS[0], LAYOUTS[3]] {
+        let img = Image::random(64, 48, layout, 0x0BAD_5EED, 9, 40);
+        let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+        let script = spectral_script(layout.len());
+        let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+        assert_same_pixels(&progressive, &baseline, &format!("{layout:?}"));
+    }
+}
+
+#[test]
+fn progressive_single_component_dc_scans_visit_only_the_sample_blocks() {
+    // 4:2:0 at 20x12: the luma MCU grid is 4x2 blocks, but its samples
+    // fill only 3x2. A luma-only DC scan codes 6 blocks; reading 8
+    // would take the chroma scans' bits.
+    let img = Image::random(20, 12, LAYOUTS[3], 7, 30, 4);
+    let mut script = vec![scan(vec![0], 0, 0, 0, 0), scan(vec![1, 2], 0, 0, 0, 0)];
+    script.extend(spectral_script(3).into_iter().skip(1));
+    let baseline = decode_jpeg(&encode_baseline(&img)).unwrap();
+    let progressive = decode_jpeg(&encode_progressive(&img, &script)).unwrap();
+    assert_same_pixels(&progressive, &baseline, "luma-only DC scan");
+}
+
+#[test]
+fn one_component_frames_ignore_their_sampling_factors() {
+    // A one-component scan is non-interleaved, so a grayscale frame
+    // that declares 2x2 sampling codes its blocks in the same order as
+    // one that declares 1x1. Both modes must read them that way.
+    let (w, h) = (20u16, 12u16);
+    let plain = Image::random(w, h, &[(1, 1)], 0x51DE, 40, 3);
+    let mut wide = Image::random(w, h, &[(2, 2)], 1, 0, 1);
+    // Copy each visible block to the same position of the 2x2 grid:
+    // 3x2 blocks of samples, 3 blocks per row in the 1x1 grid, 4 in
+    // the 2x2 grid.
+    for by in 0..2 {
+        for bx in 0..3 {
+            wide.blocks[0][by * 4 + bx] = plain.blocks[0][by * 3 + bx];
+        }
+    }
+    let expected = decode_jpeg(&encode_baseline(&plain)).unwrap();
+    let baseline = decode_jpeg(&encode_baseline(&wide)).unwrap();
+    assert_same_pixels(&baseline, &expected, "baseline");
+    let progressive = decode_jpeg(&encode_progressive(&wide, &spectral_script(1))).unwrap();
+    assert_same_pixels(&progressive, &expected, "progressive");
+}
+
+/// Panics at the first byte where two decodes differ.
+#[track_caller]
+pub(super) fn assert_same_pixels(got: &ColorPixmap, want: &ColorPixmap, what: &str) {
+    assert_eq!((got.width, got.height), (want.width, want.height), "{what}");
+    if let Some(i) = got.data.iter().zip(&want.data).position(|(a, b)| a != b) {
+        panic!(
+            "{what}: byte {i} is {} instead of {}",
+            got.data[i], want.data[i]
+        );
+    }
 }

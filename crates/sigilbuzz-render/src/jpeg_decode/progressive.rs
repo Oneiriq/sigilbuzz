@@ -141,10 +141,11 @@ impl<'a> Decoder<'a> {
         let (mcus_x, mcus_y) = self.mcu_grid();
         let mut prev_dc = vec![0i32; self.components.len()];
 
-        // Single-component scans iterate the component's own block
-        // grid; multi-component scans walk in MCU order.
+        // Single-component scans are non-interleaved: they visit only
+        // the blocks that hold the component's samples. Multi-component
+        // scans walk in MCU order.
         if let &[ci] = scan_indices {
-            let (bw, bh) = self.blocks_per_comp.get(ci).copied().unwrap_or((0, 0));
+            let (bw, bh) = self.scan_blocks(ci);
             for by in 0..bh {
                 for bx in 0..bw {
                     self.decode_dc_first_block(br, ci, bx, by, &mut prev_dc[ci], al)?;
@@ -215,6 +216,34 @@ impl<'a> Decoder<'a> {
         self.coeffs.get_mut(ci)?.get_mut(block_idx.checked_mul(64)?)
     }
 
+    /// Block columns and rows a non-interleaved (single-component)
+    /// scan visits for component `ci`: the blocks that hold the
+    /// component's own samples, `ceil(ceil(X * H / Hmax) / 8)` by
+    /// `ceil(ceil(Y * V / Vmax) / 8)` (T.81 A.2.2). An interleaved
+    /// scan pads every component out to whole MCUs, so this can be
+    /// smaller than the stored grid, never larger.
+    fn scan_blocks(&self, ci: usize) -> (u32, u32) {
+        let (Some(comp), Some(&(bw, bh))) = (self.components.get(ci), self.blocks_per_comp.get(ci))
+        else {
+            return (0, 0);
+        };
+        let max_h = self
+            .components
+            .iter()
+            .map(|c| u32::from(c.h_sampling))
+            .max()
+            .unwrap_or(1);
+        let max_v = self
+            .components
+            .iter()
+            .map(|c| u32::from(c.v_sampling))
+            .max()
+            .unwrap_or(1);
+        let comp_w = (self.width * u32::from(comp.h_sampling)).div_ceil(max_h);
+        let comp_h = (self.height * u32::from(comp.v_sampling)).div_ceil(max_v);
+        (comp_w.div_ceil(8).min(bw), comp_h.div_ceil(8).min(bh))
+    }
+
     /// Refinement DC scan (Ah > 0). Reads one bit per block and ORs
     /// it into bit position `al` of the existing DC coefficient.
     fn scan_dc_refine(
@@ -226,7 +255,7 @@ impl<'a> Decoder<'a> {
         let (mcus_x, mcus_y) = self.mcu_grid();
 
         if let &[ci] = scan_indices {
-            let (bw, bh) = self.blocks_per_comp.get(ci).copied().unwrap_or((0, 0));
+            let (bw, bh) = self.scan_blocks(ci);
             for by in 0..bh {
                 for bx in 0..bw {
                     self.refine_dc_block(br, ci, bx, by, al);
@@ -262,9 +291,12 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// First-pass AC scan (Ah == 0). Walks the component's blocks in
-    /// row-major order and decodes run/value pairs over the band
-    /// `ss..=se`, including EOB-run tracking for large skips.
+    /// First-pass AC scan (Ah == 0). An AC scan holds one component
+    /// and is non-interleaved, so it walks the blocks that hold the
+    /// component's samples in row-major order and decodes run/value
+    /// pairs over the band `ss..=se`, including EOB-run tracking for
+    /// large skips. Each value lands at its zig-zag index, the order
+    /// [`Self::finalize_progressive`] reads the buffer in.
     fn scan_ac_first(
         &mut self,
         br: &mut BitReader<'_>,
@@ -274,16 +306,17 @@ impl<'a> Decoder<'a> {
         al: u8,
     ) -> Result<(), RenderError> {
         let comp = self.components[ci];
-        let (bw, bh) = self.blocks_per_comp.get(ci).copied().unwrap_or((0, 0));
+        let (cols, rows) = self.scan_blocks(ci);
+        let stride = self.blocks_per_comp.get(ci).map_or(0, |&(bw, _)| bw);
         let ac_tbl = table_slot(&self.ac_huff, comp.ac_huff)
             .ok_or(RenderError::BadJpeg("missing AC Huffman table"))?;
         let Some(coeffs) = self.coeffs.get_mut(ci) else {
             return Ok(());
         };
         let mut eob_run: u32 = 0;
-        for by in 0..bh {
-            for bx in 0..bw {
-                let block_idx = (by * bw + bx) as usize;
+        for by in 0..rows {
+            for bx in 0..cols {
+                let block_idx = (by * stride + bx) as usize;
                 let coeff_off = block_idx * 64;
                 if eob_run > 0 {
                     eob_run -= 1;
@@ -313,8 +346,7 @@ impl<'a> Decoder<'a> {
                     }
                     let raw = br.read_bits(size);
                     let val = extend(raw, size);
-                    let nat = ZIGZAG[k as usize];
-                    if let Some(slot) = coeffs.get_mut(coeff_off + nat) {
+                    if let Some(slot) = coeffs.get_mut(coeff_off + usize::from(k)) {
                         *slot = (val << al) as i16;
                     }
                     k = k.saturating_add(1);
