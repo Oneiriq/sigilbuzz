@@ -37,9 +37,10 @@
 //! # Component record
 //!
 //! Each component record is a flag-driven variable-length blob. See
-//! the boring-expansion-spec `VARC.md` for the full table; the comment
-//! at `Varc::resolve_component` enumerates which fields appear under
-//! which flags.
+//! the boring-expansion-spec `VARC.md` for the full table;
+//! `Varc::read_component` reads the fields in record order, as
+//! HarfBuzz's `VarComponent::decompile_record` does, and
+//! `Varc::resolve_component` evaluates them as its `get_path_at` does.
 //!
 //! # Scope
 //!
@@ -52,7 +53,7 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::tables::layout::Coverage;
-use crate::tables::multi_var_store::{read_cff2_index, MultiVarStore};
+use crate::tables::multi_var_store::{decode_tuple_values, read_cff2_index, MultiVarStore};
 use crate::tables::parse::{hb_roundf, Reader};
 
 /// A parsed `VARC` table.
@@ -62,7 +63,7 @@ pub struct Varc<'a> {
     var_store: Option<MultiVarStore<'a>>,
     /// One axis-indices tuple per CFF2 INDEX entry; outer index of the
     /// component's `axisIndicesIndex` selects one of these.
-    axis_indices_lists: Vec<Vec<u16>>,
+    axis_indices_lists: Vec<Vec<u32>>,
     /// One byte slice per glyph record. Indexed by the position of
     /// `gid` inside the coverage table (i.e. the same `index_of`
     /// returns).
@@ -115,6 +116,14 @@ const VC_HAVE_SKEW_X: u32 = 1 << 13;
 const VC_HAVE_SKEW_Y: u32 = 1 << 14;
 const VC_RESERVED_MASK: u32 = !((1u32 << 15) - 1);
 
+/// `VarIdx` meaning "no variation".
+const NO_VARIATION: u32 = 0xFFFF_FFFF;
+
+/// HarfBuzz's `HB_VAR_COMPOSITE_MAX_AXES`: a component coord vector
+/// holds at most this many axes, and an axis index past them is
+/// ignored.
+const MAX_COMPONENT_AXES: usize = 4096;
+
 /// Upper bound on the coordinate values one composite carries across
 /// all its components. Each component copies a coord vector, widened
 /// to the highest axis index it lists, so a few record bytes can ask
@@ -158,17 +167,8 @@ impl<'a> Varc<'a> {
             Some(MultiVarStore::parse(bytes)?)
         };
 
-        // axisIndicesList is a CFF2 INDEX of TupleValues blocks. Each
-        // entry decodes to a list of u16 axis indices, except the
-        // length is the number of axis indices, which equals the
-        // number of values in the TupleValues stream when each value
-        // occupies one slot. The boring-expansion-spec encodes axis
-        // indices as a packed delta-from-previous list (gvar's packed
-        // point-numbers form), but in-the-wild fonts so far emit the
-        // simpler "one i8/i16 per axis index" form, which our
-        // decode_tuple_values handles directly. We reconstruct the
-        // absolute axis indices from a running cumulative sum, which
-        // collapses to the identity when the deltas are absolute.
+        // axisIndicesList is a CFF2 INDEX of TupleValues blocks, one
+        // absolute axis index per value.
         let axis_indices_lists = if axis_indices_off == 0 {
             Vec::new()
         } else {
@@ -176,7 +176,7 @@ impl<'a> Varc<'a> {
             let entries = read_cff2_index(&mut sr)?;
             let mut out = Vec::with_capacity(entries.len());
             for entry in entries {
-                out.push(decode_axis_indices(entry)?);
+                out.push(decode_axis_indices(entry));
             }
             out
         };
@@ -213,9 +213,12 @@ impl<'a> Varc<'a> {
     /// Resolves the component list for `gid` at the given normalized
     /// axis coords. Returns `None` for uncovered gids.
     ///
-    /// A malformed component ends the list early. So does a component
-    /// that would push the total length of all component coord vectors
-    /// past 2^20 values.
+    /// Components are read as HarfBuzz's `decompile_record` reads them
+    /// and evaluated as its `VarComponent::get_path_at` does. A component
+    /// whose glyph id does not fit 16 bits names no glyph and is left
+    /// out. A malformed component ends the list early. So does a
+    /// component that would push the total length of all component
+    /// coord vectors past 2^20 values.
     #[must_use]
     pub fn composite(&self, gid: u16, coords: &[f32]) -> Option<VarcComposite> {
         let idx = self.coverage.index_of(gid)? as usize;
@@ -228,8 +231,11 @@ impl<'a> Varc<'a> {
             // end mid-record means the font is malformed; we skip the
             // rest rather than error so a single bad glyph doesn't
             // tank the rest of the document.
-            let Ok(c) = self.resolve_component(&mut r, coords) else {
+            let Ok(record) = self.read_component(&mut r) else {
                 break;
+            };
+            let Some(c) = self.resolve_component(&record, coords) else {
+                continue;
             };
             total_coords = total_coords.saturating_add(c.coords.len());
             if total_coords > MAX_COMPOSITE_COORDS {
@@ -240,185 +246,232 @@ impl<'a> Varc<'a> {
         Some(composite)
     }
 
-    /// Decodes one component record at the reader's current position
-    /// and resolves it against `coords`.
-    fn resolve_component(&self, r: &mut Reader<'_>, coords: &[f32]) -> Result<VarcComponent> {
+    /// Decodes the component record at the reader's position, in the
+    /// order the spec and HarfBuzz read it: flags, glyph id, condition
+    /// index, axis indices index and axis values, the two variation
+    /// indices, the transform fields, then one discarded uint32var per
+    /// reserved flag bit.
+    fn read_component(&self, r: &mut Reader<'_>) -> Result<ComponentRecord<'_>> {
         let flags = read_uint32var(r)?;
-        if flags & VC_RESERVED_MASK != 0 {
-            return Err(Error::Malformed {
-                offset: r.position(),
-                context: "VARC component has reserved flag bits set",
-            });
-        }
-
         let gid = if flags & VC_GID_IS_24BIT != 0 {
             let bytes = r.read_bytes(3)?;
-            ((u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2])) as u16
+            (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2])
         } else {
-            r.read_u16()?
+            u32::from(r.read_u16()?)
         };
-
-        // ConditionList: read and discard. sigilbuzz does not gate
-        // components on conditions yet.
-        if flags & VC_HAVE_CONDITION != 0 {
-            let _ = read_uint32var(r)?;
-        }
-
-        // The child starts from the parent's coord vector, and
-        // HAVE_AXES values replace the listed axes.
-        let mut effective_coords: Vec<f32> = coords.to_vec();
-
-        if flags & VC_HAVE_AXES != 0 {
-            let axis_indices_index = read_uint32var(r)? as usize;
-            let axis_indices =
-                self.axis_indices_lists
-                    .get(axis_indices_index)
-                    .ok_or(Error::Malformed {
-                        offset: r.position(),
-                        context: "VARC component axisIndicesIndex out of range",
-                    })?;
-            let n = axis_indices.len();
-            // The TupleValues stream packs `n` values in F2DOT14 units.
-            // They stay in those units while their deltas are added.
-            let raw_values = decode_tuple_values_in_reader(r, n).ok_or(Error::Malformed {
-                offset: r.position(),
-                context: "VARC component axisValues TupleValues truncated",
-            })?;
-            let mut axis_values: Vec<f32> = raw_values.into_iter().map(|v| v as f32).collect();
-
-            // Optional per-value variation deltas, also in F2DOT14
-            // units. HarfBuzz adds none at the default instance.
-            if flags & VC_AXIS_VALUES_HAVE_VARIATION != 0 {
-                let var_idx = read_uint32var(r)?;
-                if let Some(store) = self.var_store.as_ref().filter(|_| !coords.is_empty()) {
-                    let outer = (var_idx >> 16) as u16;
-                    let inner = var_idx & 0xFFFF;
-                    if let Some(deltas) = store.resolve_deltas(outer, inner, n, coords) {
-                        for (value, d) in axis_values.iter_mut().zip(&deltas) {
-                            *value += d;
-                        }
-                    }
-                }
-            }
-
-            // HarfBuzz keeps coords as whole F2DOT14 values, so each
-            // value plus its deltas rounds to one, halves up, before it
-            // becomes the child's coord.
-            for value in &mut axis_values {
-                *value = hb_roundf(*value) / 16384.0;
-            }
-
-            // Make sure the effective coord vector is wide enough to
-            // hold the highest-numbered axis we are about to write.
-            if let Some(max_axis) = axis_indices.iter().copied().max() {
-                let needed = max_axis as usize + 1;
-                if effective_coords.len() < needed {
-                    effective_coords.resize(needed, 0.0);
-                }
-            }
-            for (axis_index, value) in axis_indices.iter().zip(axis_values.iter()) {
-                effective_coords[*axis_index as usize] = *value;
-            }
-        }
-
-        // Transform variation index: present when TRANSFORM_HAS_VARIATION
-        // is set, regardless of which transform fields are present.
-        let transform_var_idx = if flags & VC_TRANSFORM_HAS_VARIATION != 0 {
+        let condition_index = if flags & VC_HAVE_CONDITION != 0 {
             Some(read_uint32var(r)?)
         } else {
             None
         };
-
-        // Read the present transform fields in spec order.
-        let mut tx = 0.0_f32;
-        let mut ty = 0.0_f32;
-        let mut rotation = 0.0_f32; // angle * π
-        let mut sx = 1.0_f32;
-        let mut sy = 1.0_f32;
-        let mut skew_x = 0.0_f32;
-        let mut skew_y = 0.0_f32;
-        let mut tcx = 0.0_f32;
-        let mut tcy = 0.0_f32;
-
-        // Track which transform fields were present; the variation
-        // delta tuple has one slot per present field, in spec order.
-        let mut present_fields: Vec<TransformField> = Vec::new();
-
-        if flags & VC_HAVE_TRANSLATE_X != 0 {
-            tx = f32::from(r.read_i16()?);
-            present_fields.push(TransformField::TranslateX);
-        }
-        if flags & VC_HAVE_TRANSLATE_Y != 0 {
-            ty = f32::from(r.read_i16()?);
-            present_fields.push(TransformField::TranslateY);
-        }
-        if flags & VC_HAVE_ROTATION != 0 {
-            rotation = read_f4dot12(r)?;
-            present_fields.push(TransformField::Rotation);
-        }
-        if flags & VC_HAVE_SCALE_X != 0 {
-            sx = read_f6dot10(r)?;
-            present_fields.push(TransformField::ScaleX);
-        }
-        if flags & VC_HAVE_SCALE_Y != 0 {
-            sy = read_f6dot10(r)?;
-            present_fields.push(TransformField::ScaleY);
-        }
-        if flags & VC_HAVE_SKEW_X != 0 {
-            skew_x = read_f4dot12(r)?;
-            present_fields.push(TransformField::SkewX);
-        }
-        if flags & VC_HAVE_SKEW_Y != 0 {
-            skew_y = read_f4dot12(r)?;
-            present_fields.push(TransformField::SkewY);
-        }
-        if flags & VC_HAVE_TCENTER_X != 0 {
-            tcx = f32::from(r.read_i16()?);
-            present_fields.push(TransformField::TCenterX);
-        }
-        if flags & VC_HAVE_TCENTER_Y != 0 {
-            tcy = f32::from(r.read_i16()?);
-            present_fields.push(TransformField::TCenterY);
-        }
-
-        // Apply transform variation deltas, if any.
-        if let Some(var_idx) = transform_var_idx {
-            if let Some(store) = &self.var_store {
-                let outer = (var_idx >> 16) as u16;
-                let inner = var_idx & 0xFFFF;
-                let n = present_fields.len();
-                if let Some(deltas) = store.resolve_deltas(outer, inner, n, coords) {
-                    for (field, delta) in present_fields.iter().zip(deltas.iter()) {
-                        match field {
-                            TransformField::TranslateX => tx += delta,
-                            TransformField::TranslateY => ty += delta,
-                            TransformField::Rotation => rotation += delta / 4096.0,
-                            TransformField::ScaleX => sx += delta / 1024.0,
-                            TransformField::ScaleY => sy += delta / 1024.0,
-                            TransformField::SkewX => skew_x += delta / 4096.0,
-                            TransformField::SkewY => skew_y += delta / 4096.0,
-                            TransformField::TCenterX => tcx += delta,
-                            TransformField::TCenterY => tcy += delta,
-                        }
-                    }
-                }
+        let (axis_indices, axis_values) = if flags & VC_HAVE_AXES != 0 {
+            // An index past the list names an empty tuple, as in
+            // HarfBuzz, so no axis values follow.
+            let index = read_uint32var(r)? as usize;
+            let indices = self
+                .axis_indices_lists
+                .get(index)
+                .map_or(&[][..], Vec::as_slice);
+            let values =
+                decode_tuple_values_in_reader(r, indices.len()).ok_or(Error::Malformed {
+                    offset: r.position(),
+                    context: "VARC component axisValues TupleValues truncated",
+                })?;
+            (indices, values)
+        } else {
+            (&[][..], Vec::new())
+        };
+        let axis_values_var_index = if flags & VC_AXIS_VALUES_HAVE_VARIATION != 0 {
+            Some(read_uint32var(r)?)
+        } else {
+            None
+        };
+        let transform_var_index = if flags & VC_TRANSFORM_HAS_VARIATION != 0 {
+            Some(read_uint32var(r)?)
+        } else {
+            None
+        };
+        let mut fields = Vec::new();
+        for (flag, field) in TRANSFORM_FIELDS {
+            if flags & flag != 0 {
+                fields.push((field, r.read_i16()?));
             }
         }
-
-        // Build the affine. boring-expansion-spec composes:
-        //   T(tx + tcx, ty + tcy) *
-        //   R(rotation * π) * S(sx, sy) *
-        //   Skew(-skewX * π, skewY * π) *
-        //   T(-tcx, -tcy)
-        let transform = compose_affine(tx, ty, rotation, sx, sy, skew_x, skew_y, tcx, tcy);
-
-        Ok(VarcComponent {
+        for _ in 0..(flags & VC_RESERVED_MASK).count_ones() {
+            read_uint32var(r)?;
+        }
+        Ok(ComponentRecord {
+            flags,
             gid,
-            transform,
-            coords: effective_coords,
+            condition_index,
+            axis_indices,
+            axis_values,
+            axis_values_var_index,
+            transform_var_index,
+            fields,
         })
     }
+
+    /// Evaluates `record` at `coords`, the coords of the glyph the
+    /// component belongs to. `None` when the component draws nothing.
+    fn resolve_component(
+        &self,
+        record: &ComponentRecord<'_>,
+        coords: &[f32],
+    ) -> Option<VarcComponent> {
+        let gid = u16::try_from(record.gid).ok()?;
+
+        // Axis values and their deltas, in F2DOT14 units.
+        let mut axis_values: Vec<f32> = record.axis_values.iter().map(|&v| v as f32).collect();
+        if let Some(index) = record.axis_values_var_index {
+            self.add_deltas(index, coords, &mut axis_values);
+        }
+
+        // The child starts from the parent's coord vector, and the
+        // listed axes take the component's values. HarfBuzz keeps
+        // coords as whole F2DOT14 values, so each value plus its deltas
+        // rounds to one, halves up. It holds at most
+        // `MAX_COMPONENT_AXES` coords and ignores an axis index past
+        // them.
+        let mut child_coords = coords.to_vec();
+        for (&axis, &value) in record.axis_indices.iter().zip(&axis_values) {
+            let axis = axis as usize;
+            if axis >= MAX_COMPONENT_AXES {
+                continue;
+            }
+            if child_coords.len() <= axis {
+                child_coords.resize(axis + 1, 0.0);
+            }
+            child_coords[axis] = hb_roundf(value) / 16384.0;
+        }
+
+        // Transform fields in their stored units, plus their deltas,
+        // then divided down: F4.12 for angles, F6.10 for scales.
+        let mut values: Vec<f32> = record.fields.iter().map(|&(_, v)| f32::from(v)).collect();
+        if let Some(index) = record.transform_var_index {
+            self.add_deltas(index, coords, &mut values);
+        }
+        let mut t = Decomposed::default();
+        for (&(field, _), &v) in record.fields.iter().zip(&values) {
+            match field {
+                TransformField::TranslateX => t.tx = v,
+                TransformField::TranslateY => t.ty = v,
+                TransformField::Rotation => t.rotation = v / 4096.0,
+                TransformField::ScaleX => t.sx = v / 1024.0,
+                TransformField::ScaleY => t.sy = v / 1024.0,
+                TransformField::SkewX => t.skew_x = v / 4096.0,
+                TransformField::SkewY => t.skew_y = v / 4096.0,
+                TransformField::TCenterX => t.tcx = v,
+                TransformField::TCenterY => t.tcy = v,
+            }
+        }
+        // ScaleY defaults to ScaleX, not to 1.
+        if record.flags & VC_HAVE_SCALE_Y == 0 {
+            t.sy = t.sx;
+        }
+
+        Some(VarcComponent {
+            gid,
+            transform: t.to_affine(),
+            coords: child_coords,
+        })
+    }
+
+    /// Adds the deltas of the variation index `index` at `coords` to
+    /// `values`. Nothing is added at the default instance (empty
+    /// coords), for `NO_VARIATION`, or without a store, as in HarfBuzz.
+    fn add_deltas(&self, index: u32, coords: &[f32], values: &mut [f32]) {
+        if coords.is_empty() || index == NO_VARIATION {
+            return;
+        }
+        if let Some(store) = &self.var_store {
+            store.add_deltas((index >> 16) as u16, index & 0xFFFF, coords, values);
+        }
+    }
 }
+
+/// One component record as stored, before it is evaluated at any
+/// coords.
+struct ComponentRecord<'t> {
+    flags: u32,
+    /// 16- or 24-bit glyph id.
+    gid: u32,
+    /// Read for HAVE_CONDITION; conditions are not evaluated yet.
+    #[allow(dead_code)]
+    condition_index: Option<u32>,
+    /// The axes the component sets, from the axis indices list.
+    axis_indices: &'t [u32],
+    /// One value per axis index, in F2DOT14 units.
+    axis_values: Vec<i32>,
+    axis_values_var_index: Option<u32>,
+    transform_var_index: Option<u32>,
+    /// The transform fields present, in spec order, as stored.
+    fields: Vec<(TransformField, i16)>,
+}
+
+/// A component transform in its decomposed form, angles in half-turns.
+struct Decomposed {
+    tx: f32,
+    ty: f32,
+    rotation: f32,
+    sx: f32,
+    sy: f32,
+    skew_x: f32,
+    skew_y: f32,
+    tcx: f32,
+    tcy: f32,
+}
+
+impl Default for Decomposed {
+    fn default() -> Self {
+        Self {
+            tx: 0.0,
+            ty: 0.0,
+            rotation: 0.0,
+            sx: 1.0,
+            sy: 1.0,
+            skew_x: 0.0,
+            skew_y: 0.0,
+            tcx: 0.0,
+            tcy: 0.0,
+        }
+    }
+}
+
+impl Decomposed {
+    /// The affine the boring-expansion spec composes:
+    ///
+    /// ```text
+    ///   T(tx + tcx, ty + tcy) * R(rotation * π) * S(sx, sy) *
+    ///   Skew(-skewX * π, skewY * π) * T(-tcx, -tcy)
+    /// ```
+    fn to_affine(&self) -> [f32; 6] {
+        compose_affine(
+            self.tx,
+            self.ty,
+            self.rotation,
+            self.sx,
+            self.sy,
+            self.skew_x,
+            self.skew_y,
+            self.tcx,
+            self.tcy,
+        )
+    }
+}
+
+/// The transform fields in record order, with their flags.
+const TRANSFORM_FIELDS: [(u32, TransformField); 9] = [
+    (VC_HAVE_TRANSLATE_X, TransformField::TranslateX),
+    (VC_HAVE_TRANSLATE_Y, TransformField::TranslateY),
+    (VC_HAVE_ROTATION, TransformField::Rotation),
+    (VC_HAVE_SCALE_X, TransformField::ScaleX),
+    (VC_HAVE_SCALE_Y, TransformField::ScaleY),
+    (VC_HAVE_SKEW_X, TransformField::SkewX),
+    (VC_HAVE_SKEW_Y, TransformField::SkewY),
+    (VC_HAVE_TCENTER_X, TransformField::TCenterX),
+    (VC_HAVE_TCENTER_Y, TransformField::TCenterY),
+];
 
 /// One transform field, in spec order. Used to map variation deltas
 /// back onto the right slot.
@@ -469,141 +522,84 @@ fn read_uint32var(r: &mut Reader<'_>) -> Result<u32> {
     })
 }
 
-/// Decodes a TupleValues stream of exactly `count` deltas from the
-/// reader, advancing the cursor by however many bytes the encoding
-/// uses. Returns `None` on truncation or overrun.
+/// Decodes `count` TupleValues from the reader, advancing it past
+/// them. Returns `None` on truncation or when a run goes past `count`,
+/// where HarfBuzz's `TupleValues::decompile` fails.
 fn decode_tuple_values_in_reader(r: &mut Reader<'_>, count: usize) -> Option<Vec<i32>> {
-    // We need to know how many bytes the stream consumed. Walk the
-    // remaining buffer manually, mirroring the inner loop of
-    // decode_tuple_values, and advance the reader.
-    let start = r.position();
-    let remaining = r.remaining();
-    let buf = r.peek_bytes(remaining).ok()?;
-    // One control byte yields at most 64 values, so reserve no more
-    // than the remaining bytes can encode.
-    let mut out: Vec<i32> = Vec::with_capacity(count.min(buf.len().saturating_mul(64)));
-    let mut i = 0usize;
-    while out.len() < count {
-        if i >= buf.len() {
-            return None;
-        }
-        let ctrl = buf[i];
-        i += 1;
-        let run_len = (ctrl & 0x3F) as usize + 1;
-        let zeros = ctrl & 0x80 != 0;
-        let words = ctrl & 0x40 != 0;
-        for _ in 0..run_len {
-            if out.len() >= count {
-                return None;
+    let buf = r.peek_bytes(r.remaining()).ok()?;
+    let (values, used) = decode_tuple_values(buf, count)?;
+    r.skip(used).ok()?;
+    Some(values)
+}
+
+/// Decodes one axis indices tuple the way HarfBuzz's
+/// `TupleValues::iter_t` walks it, malformed streams included: a run
+/// that does not fit the bytes left yields one zero and the walk goes
+/// on from the next byte. Each value is read as unsigned, as HarfBuzz
+/// stores the indices, so a negative one names no axis.
+fn decode_axis_indices(data: &[u8]) -> Vec<u32> {
+    struct Walk<'d> {
+        data: &'d [u8],
+        p: usize,
+        run: usize,
+        width: usize,
+        value: i32,
+    }
+    impl Walk<'_> {
+        fn ensure_run(&mut self) -> bool {
+            if self.run > 0 {
+                return true;
             }
-            let delta: i32 = match (zeros, words) {
-                (true, false) => 0,
-                (true, true) => {
-                    if i + 4 > buf.len() {
-                        return None;
-                    }
-                    let v = i32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
-                    i += 4;
-                    v
-                }
-                (false, true) => {
-                    if i + 2 > buf.len() {
-                        return None;
-                    }
-                    let v = i32::from(i16::from_be_bytes([buf[i], buf[i + 1]]));
-                    i += 2;
-                    v
-                }
-                (false, false) => {
-                    if i >= buf.len() {
-                        return None;
-                    }
-                    let v = buf[i] as i8;
-                    i += 1;
-                    i32::from(v)
-                }
+            let Some(&control) = self.data.get(self.p) else {
+                self.value = 0;
+                return false;
             };
-            out.push(delta);
+            self.p += 1;
+            self.run = usize::from(control & 0x3F) + 1;
+            self.width = match control & 0xC0 {
+                0x80 => 0,
+                0x00 => 1,
+                0x40 => 2,
+                _ => 4,
+            };
+            if self.data.len() - self.p < self.run * self.width {
+                self.run = 0;
+                self.value = 0;
+                return false;
+            }
+            true
+        }
+        fn read_value(&mut self) {
+            let b = &self.data[self.p..self.p + self.width];
+            self.value = match *b {
+                [] => 0,
+                [x] => i32::from(x as i8),
+                [x, y] => i32::from(i16::from_be_bytes([x, y])),
+                [a, b2, c, d] => i32::from_be_bytes([a, b2, c, d]),
+                _ => 0,
+            };
+            self.p += self.width;
         }
     }
-    if out.len() == count {
-        // Advance reader.
-        r.seek(start + i).ok()?;
-        Some(out)
-    } else {
-        None
+    let mut walk = Walk {
+        data,
+        p: 0,
+        run: 0,
+        width: 0,
+        value: 0,
+    };
+    if walk.ensure_run() {
+        walk.read_value();
     }
-}
-
-/// Decodes a TupleValues stream of axis indices. boring-expansion-spec
-/// allows two encodings; sigilbuzz handles the absolute form (one
-/// value per axis index) which is what fontTools and HarfBuzz emit.
-fn decode_axis_indices(data: &[u8]) -> Result<Vec<u16>> {
-    // Determine how many axis indices are encoded by walking the
-    // entire byte stream as a TupleValues list and treating each
-    // value as a u16 index.
-    let mut out: Vec<u16> = Vec::new();
-    let mut i = 0usize;
-    while i < data.len() {
-        let ctrl = data[i];
-        i += 1;
-        let run_len = (ctrl & 0x3F) as usize + 1;
-        let zeros = ctrl & 0x80 != 0;
-        let words = ctrl & 0x40 != 0;
-        for _ in 0..run_len {
-            let v: i32 = match (zeros, words) {
-                (true, false) => 0,
-                (true, true) => {
-                    if i + 4 > data.len() {
-                        return Err(Error::Malformed {
-                            offset: i,
-                            context: "VARC axisIndices i32 entry truncated",
-                        });
-                    }
-                    let v = i32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-                    i += 4;
-                    v
-                }
-                (false, true) => {
-                    if i + 2 > data.len() {
-                        return Err(Error::Malformed {
-                            offset: i,
-                            context: "VARC axisIndices i16 entry truncated",
-                        });
-                    }
-                    let v = i32::from(i16::from_be_bytes([data[i], data[i + 1]]));
-                    i += 2;
-                    v
-                }
-                (false, false) => {
-                    if i >= data.len() {
-                        return Err(Error::Malformed {
-                            offset: i,
-                            context: "VARC axisIndices i8 entry truncated",
-                        });
-                    }
-                    let v = data[i] as i8;
-                    i += 1;
-                    i32::from(v)
-                }
-            };
-            out.push(v as u16);
+    let mut out = Vec::new();
+    while walk.run > 0 || walk.p < data.len() {
+        out.push(walk.value as u32);
+        walk.run = walk.run.saturating_sub(1);
+        if walk.ensure_run() {
+            walk.read_value();
         }
     }
-    Ok(out)
-}
-
-/// Reads an F4.12 fixed-point as `f32`. boring-expansion-spec uses
-/// this for rotation, skew (each multiplied by π in radians).
-fn read_f4dot12(r: &mut Reader<'_>) -> Result<f32> {
-    let raw = r.read_i16()?;
-    Ok(f32::from(raw) / 4096.0)
-}
-
-/// Reads an F6.10 fixed-point as `f32`. Used for scale fields.
-fn read_f6dot10(r: &mut Reader<'_>) -> Result<f32> {
-    let raw = r.read_i16()?;
-    Ok(f32::from(raw) / 1024.0)
+    out
 }
 
 /// Builds the affine matrix from VARC's transform fields. Matches the

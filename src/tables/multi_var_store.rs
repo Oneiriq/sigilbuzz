@@ -49,12 +49,12 @@
 //!   CFF2Index<TupleValues>  deltaSets
 //! ```
 //!
-//! sigilbuzz's reader returns the raw bytes of one delta-set entry on
-//! demand; full TupleValues decoding is the consumer's job (it depends
-//! on whether the tuple represents a transform field, an axis-coord
-//! delta, or an arbitrary scalar). The store handles region selection
-//! and per-region scalar evaluation; consumers fold scalars back into
-//! their own tuple decoding.
+//! Each delta set is a `TupleValues` stream holding one tuple per region
+//! of its subtable, region after region. The consumer knows the tuple
+//! length (how many transform fields or axis values vary);
+//! [`MultiVarStore::resolve_deltas`] sums the tuples, each scaled by
+//! its region's scalar at the given coords, the way HarfBuzz's
+//! `MultiItemVariationStore::get_delta` does.
 
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -384,23 +384,28 @@ impl<'a> MultiVarStore<'a> {
     }
 
     /// Raw `TupleValues` byte slice for delta set `(outer, inner)`.
-    /// VARC's consumers (axis-value deltas, transform-field deltas)
-    /// each call `decode_tuple_values` over this with the expected
-    /// tuple length and fold per-region scalars back in themselves.
     #[must_use]
     pub fn delta_set_bytes(&self, outer: u16, inner: u32) -> Option<&'a [u8]> {
         let sub = self.subtable(outer)?;
         sub.delta_sets.get(inner as usize).copied()
     }
 
-    /// Decodes the delta-set payload for `(outer, inner)` as a flat
-    /// `TupleValues` stream of `value_count * region_count` deltas
-    /// (region-major: tuple-0-region-0, tuple-0-region-1, ...,
-    /// tuple-1-region-0, ...) and resolves them against `coords`,
+    /// Resolves the delta set `(outer, inner)` against `coords`,
     /// returning `value_count` summed deltas, one per output value.
     ///
-    /// Returns `None` when indices are out of range or the payload
-    /// cannot decode the requested length.
+    /// The delta set is a `TupleValues` stream holding one tuple of
+    /// `value_count` deltas per region of the subtable, region after
+    /// region (region 0's tuple, then region 1's, ...), as the spec,
+    /// fontTools and HarfBuzz lay it out. Values past the last region's
+    /// tuple are ignored, as in HarfBuzz. A stream that ends before it
+    /// fills every tuple is malformed and adds nothing; HarfBuzz adds
+    /// the values it does find, so such a set varies only some of the
+    /// fields it names there.
+    ///
+    /// Returns `None` when `outer` or `inner` is out of range, or when
+    /// the delta set is too short to hold `value_count` values even for
+    /// one region (a control byte codes at most 64), so a huge
+    /// `value_count` cannot size a huge buffer.
     #[must_use]
     pub fn resolve_deltas(
         &self,
@@ -410,21 +415,142 @@ impl<'a> MultiVarStore<'a> {
         coords: &[f32],
     ) -> Option<Vec<f32>> {
         let sub = self.subtable(outer)?;
-        let raw = sub.delta_sets.get(inner as usize).copied()?;
-        let region_count = sub.region_indexes.len();
-        let total = value_count.checked_mul(region_count)?;
-        let deltas = decode_tuple_values(raw, total)?;
-        let scalars = self.scalars_for(&sub.region_indexes, coords);
-        let mut out = vec![0.0_f32; value_count];
-        // With no regions every output delta stays zero.
-        if region_count > 0 {
-            for (slot, row) in out.iter_mut().zip(deltas.chunks_exact(region_count)) {
-                for (&d, scalar) in row.iter().zip(&scalars) {
-                    *slot += d as f32 * scalar;
-                }
-            }
+        let raw = sub.delta_sets.get(inner as usize)?;
+        if value_count > raw.len().saturating_mul(64) {
+            return None;
         }
+        let mut out = vec![0.0_f32; value_count];
+        self.add_deltas(outer, inner, coords, &mut out);
         Some(out)
+    }
+
+    /// Adds the deltas of delta set `(outer, inner)` at `coords` to
+    /// `out`, region by region, the way HarfBuzz's
+    /// `MultiItemVariationStore::get_delta` adds them to the values it
+    /// varies: each region's scalar times its tuple, added in place.
+    /// Regions whose scalar is zero are skipped. Does nothing when the
+    /// indices are out of range or the set is too short for its tuples.
+    pub(crate) fn add_deltas(&self, outer: u16, inner: u32, coords: &[f32], out: &mut [f32]) {
+        let Some(sub) = self.subtable(outer) else {
+            return;
+        };
+        let Some(&raw) = sub.delta_sets.get(inner as usize) else {
+            return;
+        };
+        let needed = out.len().saturating_mul(sub.region_indexes.len());
+        if !TupleFetcher::new(raw).holds(needed) {
+            return;
+        }
+        let mut values = TupleFetcher::new(raw);
+        let mut skip = 0usize;
+        for scalar in self.scalars_for(&sub.region_indexes, coords) {
+            if scalar == 0.0 {
+                skip = skip.saturating_add(out.len());
+                continue;
+            }
+            values.skip(core::mem::take(&mut skip));
+            values.add_to(out, scalar);
+        }
+    }
+}
+
+/// Reads a `TupleValues` stream lazily, as HarfBuzz's
+/// `TupleValues::fetcher_t` does: a run that does not fit the
+/// remaining bytes ends the stream, and reads past the end add nothing.
+struct TupleFetcher<'a> {
+    data: &'a [u8],
+    /// Values left in the current run.
+    run: usize,
+    /// Bytes per value in the current run: 0 for a zero run.
+    width: usize,
+}
+
+impl<'a> TupleFetcher<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            run: 0,
+            width: 0,
+        }
+    }
+
+    /// Starts the next run if the current one is used up. False once
+    /// the stream has ended.
+    fn ensure_run(&mut self) -> bool {
+        if self.run > 0 {
+            return true;
+        }
+        let Some((&control, rest)) = self.data.split_first() else {
+            return false;
+        };
+        let run = usize::from(control & 0x3F) + 1;
+        let width = match control & 0xC0 {
+            0x80 => 0,
+            0x00 => 1,
+            0x40 => 2,
+            _ => 4,
+        };
+        if rest.len() < run * width {
+            self.data = &[];
+            return false;
+        }
+        self.data = rest;
+        self.run = run;
+        self.width = width;
+        true
+    }
+
+    /// The value at the head of the current run. The caller checked
+    /// [`Self::ensure_run`].
+    fn take(&mut self) -> i32 {
+        self.run -= 1;
+        let (value, rest) = match self.width {
+            0 => (0, self.data),
+            1 => (i32::from(self.data[0] as i8), &self.data[1..]),
+            2 => (
+                i32::from(i16::from_be_bytes([self.data[0], self.data[1]])),
+                &self.data[2..],
+            ),
+            _ => (
+                i32::from_be_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]),
+                &self.data[4..],
+            ),
+        };
+        self.data = rest;
+        value
+    }
+
+    /// Whether the stream holds at least `n` values, every run fitting
+    /// its bytes.
+    fn holds(mut self, n: usize) -> bool {
+        let mut seen = 0usize;
+        while seen < n {
+            if !self.ensure_run() {
+                return false;
+            }
+            seen += self.run;
+            self.data = &self.data[self.run * self.width..];
+            self.run = 0;
+        }
+        true
+    }
+
+    fn skip(&mut self, mut n: usize) {
+        while n > 0 && self.ensure_run() {
+            let k = n.min(self.run);
+            self.run -= k;
+            self.data = &self.data[k * self.width..];
+            n -= k;
+        }
+    }
+
+    fn add_to(&mut self, out: &mut [f32], scale: f32) {
+        for slot in out {
+            if !self.ensure_run() {
+                return;
+            }
+            *slot += self.take() as f32 * scale;
+        }
     }
 }
 
@@ -443,28 +569,28 @@ fn sparse_region_scalar(region: &SparseRegion, coords: &[f32]) -> f32 {
 }
 
 /// Triangular region falloff for one axis. Returns `1.0` at `peak`,
-/// tapering linearly to `0.0` at `start` and `end`. Mirrors the
-/// classic `supportScalar` from the OpenType spec.
+/// tapering linearly to `0.0` at `start` and `end`, as HarfBuzz's
+/// `VarRegionAxis::evaluate` does. An axis whose peak is zero does not
+/// constrain the region, and so does an invalid triple: one out of
+/// order, or one that crosses zero.
 fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
-    if peak == 0.0 && start <= 0.0 && end >= 0.0 {
+    if peak == 0.0 || coord == peak {
         return 1.0;
     }
-    if coord == peak {
+    if coord == 0.0 {
+        return 0.0;
+    }
+    if start > peak || peak > end || (start < 0.0 && end > 0.0) {
         return 1.0;
     }
-    if coord < start || coord > end {
+    if coord <= start || end <= coord {
         return 0.0;
     }
     if coord < peak {
-        if peak == start {
-            return 0.0;
-        }
-        return (coord - start) / (peak - start);
+        (coord - start) / (peak - start)
+    } else {
+        (end - coord) / (end - peak)
     }
-    if peak == end {
-        return 0.0;
-    }
-    (end - coord) / (end - peak)
 }
 
 // ----------------------------------------------------------------------
@@ -482,10 +608,11 @@ fn axis_scalar(start: f32, peak: f32, end: f32, coord: f32) -> f32 {
 //   When DELTAS_ARE_ZERO and DELTAS_ARE_WORDS are both set, the run
 //   carries i32 deltas instead. (boring-expansion-spec extension.)
 
-/// Decodes a `TupleValues` byte stream into exactly `count` deltas.
-/// Returns `None` on truncation or if the stream encodes more deltas
-/// than `count`.
-pub(crate) fn decode_tuple_values(data: &[u8], count: usize) -> Option<Vec<i32>> {
+/// Decodes `count` values from the head of a `TupleValues` byte stream,
+/// returning them with the number of bytes they took. Returns `None`
+/// on truncation or when a run goes past `count`, as HarfBuzz's
+/// `TupleValues::decompile` fails.
+pub(crate) fn decode_tuple_values(data: &[u8], count: usize) -> Option<(Vec<i32>, usize)> {
     // One control byte yields at most 64 deltas, so `data` cannot
     // encode more than `64 * data.len()` of them. Reserve no more.
     let mut out: Vec<i32> = Vec::with_capacity(count.min(data.len().saturating_mul(64)));
@@ -534,7 +661,7 @@ pub(crate) fn decode_tuple_values(data: &[u8], count: usize) -> Option<Vec<i32>>
         }
     }
     if out.len() == count {
-        Some(out)
+        Some((out, i))
     } else {
         None
     }
@@ -661,12 +788,13 @@ mod tests {
     #[test]
     fn resolve_deltas_sums_region_contributions() {
         // Two regions: axis 0 peak +1, axis 0 peak -1.
-        // One delta-set with two values: [r0:100, r1:50, r0:-10, r1:5]
+        // One delta-set with two values per region, region after
+        // region: [r0:100, r0:-10, r1:50, r1:5]
         //   value 0 -> 100*scalar(r0) + 50*scalar(r1)
         //   value 1 -> -10*scalar(r0) + 5*scalar(r1)
         // Build TupleValues: 4 i8 deltas, control = 0x03 (no zero, no
         // words, run_len=4).
-        let payload = vec![0x03_u8, 100, 50, (-10_i8) as u8, 5];
+        let payload = vec![0x03_u8, 100, (-10_i8) as u8, 50, 5];
         let bytes = build_store(
             &[vec![(0, 0.0, 1.0, 1.0)], vec![(0, -1.0, -1.0, 0.0)]],
             &[0, 1],
@@ -684,24 +812,40 @@ mod tests {
     }
 
     #[test]
+    fn axis_falloff_matches_harfbuzz_for_odd_triples() {
+        // A zero peak, an out-of-order triple, and one that crosses
+        // zero all leave the region unconstrained on that axis.
+        assert_eq!(axis_scalar(-0.5, 0.0, 0.5, 0.3), 1.0);
+        assert_eq!(axis_scalar(0.5, 0.25, 1.0, 0.3), 1.0);
+        assert_eq!(axis_scalar(-0.5, 0.5, 1.0, 0.3), 1.0);
+        // At the default an axis with a nonzero peak contributes zero.
+        assert_eq!(axis_scalar(0.0, 0.5, 1.0, 0.0), 0.0);
+        // The ends themselves are zero; inside it tapers linearly.
+        assert_eq!(axis_scalar(0.25, 0.5, 1.0, 0.25), 0.0);
+        assert_eq!(axis_scalar(0.25, 0.5, 1.0, 1.0), 0.0);
+        assert_eq!(axis_scalar(0.0, 0.5, 1.0, 0.75), 0.5);
+        assert_eq!(axis_scalar(-1.0, -1.0, 0.0, -0.25), 0.25);
+    }
+
+    #[test]
     fn tuple_values_decodes_zero_run() {
         // 0x80 | 0x03 = run of 4 zeros, no payload.
-        let out = decode_tuple_values(&[0x83], 4).unwrap();
-        assert_eq!(out, vec![0, 0, 0, 0]);
+        let out = decode_tuple_values(&[0x83, 0x55], 4).unwrap();
+        assert_eq!(out, (vec![0, 0, 0, 0], 1));
     }
 
     #[test]
     fn tuple_values_decodes_word_run() {
         // 0x40 | 0x01 = run of 2 i16s. Payload = 0x0064, 0xFFFF (-1).
         let out = decode_tuple_values(&[0x41, 0x00, 0x64, 0xFF, 0xFF], 2).unwrap();
-        assert_eq!(out, vec![100, -1]);
+        assert_eq!(out, (vec![100, -1], 5));
     }
 
     #[test]
     fn tuple_values_zero_words_combo_decodes_i32() {
         // 0xC0 | 0x00 = run of 1 i32. Payload = 0x00010000 = 65536.
         let out = decode_tuple_values(&[0xC0, 0x00, 0x01, 0x00, 0x00], 1).unwrap();
-        assert_eq!(out, vec![65536]);
+        assert_eq!(out, (vec![65536], 5));
     }
 
     #[test]

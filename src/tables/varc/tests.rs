@@ -329,23 +329,25 @@ fn huge_rotation_delta_does_not_hang() {
     record.extend_from_slice(&0i16.to_be_bytes()); // rotation
     let bytes = build_varc(&[1], &[&record], Some(&store), None);
     let varc = Varc::parse(&bytes).unwrap();
-    let comp = varc.composite(1, &[]).unwrap();
+    // Deltas apply only away from the default instance; the store's
+    // one region has no axes, so its scalar is 1 at any coords.
+    let comp = varc.composite(1, &[0.0]).unwrap();
     assert_eq!(comp.components.len(), 1);
 }
 
 #[test]
 fn wide_axis_components_stop_at_coord_budget() {
-    // Each 6-byte component lists axis 65535, so its coord vector
-    // grows to 65536 values. 100 000 of them used to allocate
-    // about 26 GB.
-    let axis_indices: &[u8] = &[0x40, 0xFF, 0xFF]; // one i16: 65535
+    // Each 6-byte component lists axis 4095, the last one HarfBuzz
+    // keeps, so its coord vector grows to 4096 values. 100 000 of them
+    // would allocate about 1.6 GB.
+    let axis_indices: &[u8] = &[0x40, 0x0F, 0xFF]; // one i16: 4095
     let component: [u8; 6] = [VC_HAVE_AXES as u8, 0x00, 0x05, 0x00, 0x00, 0x00];
     let record = component.repeat(100_000);
     let bytes = build_varc(&[1], &[&record], None, Some(&[axis_indices]));
     let varc = Varc::parse(&bytes).unwrap();
     let comp = varc.composite(1, &[]).unwrap();
-    assert_eq!(comp.components.len(), MAX_COMPOSITE_COORDS / 65536);
-    assert!(comp.components.iter().all(|c| c.coords.len() == 65536));
+    assert_eq!(comp.components.len(), MAX_COMPOSITE_COORDS / 4096);
+    assert!(comp.components.iter().all(|c| c.coords.len() == 4096));
 }
 
 /// A MultiItemVariationStore with the given sparse regions, each a list
@@ -420,4 +422,183 @@ fn axis_values_plus_deltas_round_to_f2dot14() {
     let bytes = varied_axis_value_table(8192, 100);
     let varc = Varc::parse(&bytes).unwrap();
     assert_eq!(varc.composite(1, &[]).unwrap().components[0].coords, [0.5]);
+}
+
+/// The first component of glyph 1 in a table with `record` and the
+/// given store and axis indices lists.
+fn first(
+    record: &[u8],
+    store: Option<&[u8]>,
+    lists: Option<&[&[u8]]>,
+    coords: &[f32],
+) -> VarcComposite {
+    let bytes = build_varc(&[1], &[record], store, lists);
+    Varc::parse(&bytes).unwrap().composite(1, coords).unwrap()
+}
+
+#[test]
+fn scale_y_defaults_to_scale_x() {
+    // The spec's default for ScaleY is ScaleX, not 1.
+    let mut record = vec![0x81, 0x00, 0x00, 0x05]; // uint32var HAVE_SCALE_X, gid 5
+    record.extend_from_slice(&1536i16.to_be_bytes()); // 1.5
+    let c = first(&record, None, None, &[]);
+    let t = c.components[0].transform;
+    assert!(
+        (t[0] - 1.5).abs() < 1e-6 && (t[3] - 1.5).abs() < 1e-6,
+        "{t:?}"
+    );
+}
+
+#[test]
+fn reserved_flag_bits_each_skip_one_uint32var() {
+    // Bits 15 and 20 are reserved. Each costs one uint32var after the
+    // transform fields, which readers skip, and the next component
+    // reads as usual.
+    let flags = (1u32 << 15) | (1 << 20) | VC_HAVE_TRANSLATE_X;
+    let mut record = vec![0xC0 | (flags >> 16) as u8, (flags >> 8) as u8, flags as u8];
+    record.extend_from_slice(&[0x00, 0x05]); // gid 5
+    record.extend_from_slice(&7i16.to_be_bytes()); // translate x
+    record.extend_from_slice(&[0x05, 0x81, 0x2C]); // two reserved uint32vars
+    record.extend_from_slice(&[VC_HAVE_TRANSLATE_X as u8, 0x00, 0x06]);
+    record.extend_from_slice(&9i16.to_be_bytes());
+    let c = first(&record, None, None, &[]);
+    let got: Vec<(u16, f32)> = c
+        .components
+        .iter()
+        .map(|c| (c.gid, c.transform[4]))
+        .collect();
+    assert_eq!(got, [(5, 7.0), (6, 9.0)]);
+}
+
+#[test]
+fn axis_values_var_index_is_read_without_axes() {
+    // AXIS_VALUES_HAVE_VARIATION brings its index whether or not the
+    // component has axes, so the translation after it reads right.
+    let flags = VC_AXIS_VALUES_HAVE_VARIATION | VC_HAVE_TRANSLATE_X;
+    let mut record = vec![flags as u8, 0x00, 0x05, 0x00];
+    record.extend_from_slice(&200i16.to_be_bytes());
+    let c = first(&record, None, None, &[0.5]);
+    assert_eq!(c.components[0].transform[4], 200.0);
+}
+
+#[test]
+fn delta_sets_hold_one_tuple_per_region() {
+    // Two regions (axis 0 and axis 1, each peaking at +1) and two
+    // translations. The delta set is region 0's tuple, then region 1's:
+    // [10, 20] then [-3, 5].
+    let store = build_store(
+        &[&[(0, 0.0, 1.0, 1.0)], &[(1, 0.0, 1.0, 1.0)]],
+        &[&[0x03, 10, 20, (-3i8) as u8, 5]],
+    );
+    let flags = VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X | VC_HAVE_TRANSLATE_Y;
+    let mut record = vec![flags as u8, 0x00, 0x05, 0x00];
+    record.extend_from_slice(&0i16.to_be_bytes());
+    record.extend_from_slice(&0i16.to_be_bytes());
+    let t = |coords: &[f32]| {
+        let c = first(&record, Some(&store), None, coords);
+        (c.components[0].transform[4], c.components[0].transform[5])
+    };
+    assert_eq!(t(&[1.0, 0.0]), (10.0, 20.0));
+    assert_eq!(t(&[0.0, 1.0]), (-3.0, 5.0));
+    assert_eq!(t(&[0.5, 1.0]), (2.0, 15.0));
+    // A delta set that ends before it fills both tuples adds nothing.
+    let short = build_store(
+        &[&[(0, 0.0, 1.0, 1.0)], &[(1, 0.0, 1.0, 1.0)]],
+        &[&[0x02, 10, 20, 7]],
+    );
+    let c = first(&record, Some(&short), None, &[1.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (0.0, 0.0)
+    );
+    // Extra values past the last tuple are ignored.
+    let long = build_store(
+        &[&[(0, 0.0, 1.0, 1.0)], &[(1, 0.0, 1.0, 1.0)]],
+        &[&[0x05, 10, 20, (-3i8) as u8, 5, 99, 99]],
+    );
+    let c = first(&record, Some(&long), None, &[1.0, 1.0]);
+    assert_eq!(
+        (c.components[0].transform[4], c.components[0].transform[5]),
+        (7.0, 25.0)
+    );
+}
+
+#[test]
+fn deltas_skip_the_default_instance_and_no_variation() {
+    // A region without axes has scalar 1 everywhere, but HarfBuzz adds
+    // no deltas when the font has no coords, nor for index 0xFFFFFFFF.
+    let store = build_store(&[&[]], &[&[0x00, 50]]);
+    let mut record = vec![
+        (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X) as u8,
+        0x00,
+        0x05,
+    ];
+    record.push(0x00); // index 0
+    record.extend_from_slice(&1i16.to_be_bytes());
+    assert_eq!(
+        first(&record, Some(&store), None, &[]).components[0].transform[4],
+        1.0
+    );
+    assert_eq!(
+        first(&record, Some(&store), None, &[0.0]).components[0].transform[4],
+        51.0
+    );
+    let mut none = vec![
+        (VC_TRANSFORM_HAS_VARIATION | VC_HAVE_TRANSLATE_X) as u8,
+        0x00,
+        0x05,
+    ];
+    none.extend_from_slice(&[0xF0, 0xFF, 0xFF, 0xFF, 0xFF]);
+    none.extend_from_slice(&1i16.to_be_bytes());
+    assert_eq!(
+        first(&none, Some(&store), None, &[0.0]).components[0].transform[4],
+        1.0
+    );
+}
+
+#[test]
+fn axis_indices_past_harfbuzz_limit_are_ignored() {
+    // HarfBuzz keeps at most 4096 component axes and drops a write to
+    // a later one. Axis 65535 used to grow the vector to 65536 coords.
+    let lists: &[&[u8]] = &[&[0x41, 0xFF, 0xFF, 0x00, 0x01]]; // 65535, then 1
+    let mut record = vec![VC_HAVE_AXES as u8, 0x00, 0x05, 0x00];
+    record.extend_from_slice(&[0x41, 0x20, 0x00, 0x10, 0x00]); // 0.5, 0.25
+    let c = first(&record, None, Some(lists), &[0.1]);
+    assert_eq!(c.components[0].coords, [0.1, 0.25]);
+}
+
+#[test]
+fn axis_indices_index_past_the_list_names_no_axes() {
+    // As in HarfBuzz, an out-of-range index is an empty tuple: no axis
+    // values follow, and the next bytes are the next fields.
+    let lists: &[&[u8]] = &[&[0x00, 0x00]];
+    let flags = VC_HAVE_AXES | VC_HAVE_TRANSLATE_X;
+    let mut record = vec![flags as u8, 0x00, 0x05, 0x07];
+    record.extend_from_slice(&33i16.to_be_bytes());
+    let c = first(&record, None, Some(lists), &[0.1]);
+    assert_eq!(c.components[0].coords, [0.1]);
+    assert_eq!(c.components[0].transform[4], 33.0);
+}
+
+#[test]
+fn glyph_ids_past_16_bits_draw_nothing() {
+    // A 24-bit glyph id past 65535 names no glyph of a 16-bit face. It
+    // used to wrap to a low id (0x010005 drew glyph 5).
+    let flags = VC_GID_IS_24BIT;
+    let mut record = vec![0x80 | (flags >> 8) as u8, flags as u8, 0x01, 0x00, 0x05];
+    record.extend_from_slice(&[0x00, 0x00, 0x06]); // then glyph 6
+    let c = first(&record, None, None, &[]);
+    let gids: Vec<u16> = c.components.iter().map(|c| c.gid).collect();
+    assert_eq!(gids, [6]);
+}
+
+#[test]
+fn axis_indices_walk_malformed_streams_like_harfbuzz() {
+    assert_eq!(decode_axis_indices(&[0x00, 3, 0x81]), [3, 0, 0]);
+    // A run of two words with one byte left yields a zero, then the
+    // walk reads that byte as the next control.
+    assert_eq!(decode_axis_indices(&[0x41, 0x00]), [0]);
+    // Negative values name no axis.
+    assert_eq!(decode_axis_indices(&[0x00, 0xFF]), [u32::MAX]);
+    assert!(decode_axis_indices(&[]).is_empty());
 }
