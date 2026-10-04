@@ -10,6 +10,8 @@ use sigilbuzz::tables::tag;
 use sigilbuzz::Face;
 
 use super::glyf::{clamp_i16, GlyphMetrics};
+use super::ivs::{project_ivs_with, Projection};
+use super::AxisPin;
 use crate::hmtx::emit_long_metrics;
 use crate::hvar::{read_index_map, STORE_SLOT, VVAR_VORG_SLOT};
 use crate::util::{round_half_up, StoreDeltas};
@@ -443,6 +445,66 @@ pub(super) fn bake_mvar_metrics(face: &Face<'_>, coords: &[f32]) -> Result<MvarB
 pub(super) fn apply_mvar_records(
     mvar: &sigilbuzz::tables::Mvar<'_>,
     coords: &[f32],
+    os2: Option<Vec<u8>>,
+    hhea: Option<Vec<u8>>,
+    vhea: Option<Vec<u8>>,
+    post: Option<Vec<u8>>,
+) -> Result<MvarBake, SubsetError> {
+    let Some(store) = mvar.variation_store() else {
+        return Ok(MvarBake {
+            os2,
+            hhea,
+            vhea,
+            post,
+        });
+    };
+    let delta = |outer: u16, inner: u16| store.delta(outer, inner, coords);
+    apply_mvar_deltas(mvar, &delta, os2, hhea, vhea, post)
+}
+
+/// The `OS/2`, `hhea`, `vhea` and `post` of a partial instance, with the
+/// fields `MVAR` varies moved to the new default: each takes its row's
+/// deltas from the regions on the pinned axes only, which the projected
+/// `MVAR` drops (see [`super::ivs::RegionRemap::folded`]). Without an
+/// `MVAR` the projection can read, nothing moves (the `MVAR` bake
+/// reports and drops a malformed one).
+pub(super) fn mvar_defaults(
+    face: &Face<'_>,
+    coords: &[f32],
+    pins: &[AxisPin],
+) -> Result<MvarBake, SubsetError> {
+    let Some(mvar) = face.mvar().map_err(SubsetError::from)? else {
+        return Ok(MvarBake::default());
+    };
+    let Ok(bytes) = face.table_bytes(tag::MVAR) else {
+        return Ok(MvarBake::default());
+    };
+    let store_off = bytes
+        .get(10..)
+        .and_then(<[u8]>::first_chunk::<2>)
+        .map_or(0, |b| usize::from(u16::from_be_bytes(*b)));
+    if store_off == 0 {
+        return Ok(MvarBake::default());
+    }
+    let Some(Ok((_, remap))) = bytes
+        .get(store_off..)
+        .map(|store| project_ivs_with(store, coords, pins, Projection::MERGED))
+    else {
+        return Ok(MvarBake::default());
+    };
+    let os2 = face.table_bytes(*b"OS/2").ok().map(<[u8]>::to_vec);
+    let hhea = face.table_bytes(tag::HHEA).ok().map(<[u8]>::to_vec);
+    let vhea = face.table_bytes(tag::VHEA).ok().map(<[u8]>::to_vec);
+    let post = face.table_bytes(tag::POST).ok().map(<[u8]>::to_vec);
+    let delta = |outer: u16, inner: u16| remap.folded(outer, inner);
+    apply_mvar_deltas(&mvar, &delta, os2, hhea, vhea, post)
+}
+
+/// [`apply_mvar_records`] with each record's delta from `delta`, by its
+/// `(outer, inner)` row.
+fn apply_mvar_deltas(
+    mvar: &sigilbuzz::tables::Mvar<'_>,
+    delta: &dyn Fn(u16, u16) -> f32,
     mut os2: Option<Vec<u8>>,
     hhea: Option<Vec<u8>>,
     mut vhea: Option<Vec<u8>>,
@@ -492,14 +554,6 @@ pub(super) fn apply_mvar_records(
     // tag carries the `(outer, inner)` pair `Mvar::metric_delta` would
     // look up, so the delta is read from it directly. Both keep the
     // walk linear in the record count.
-    let Some(store) = mvar.variation_store() else {
-        return Ok(MvarBake {
-            os2,
-            hhea,
-            vhea,
-            post,
-        });
-    };
     let mut seen: BTreeSet<[u8; 4]> = BTreeSet::new();
     for (rec_tag, (outer, inner)) in mvar.entries() {
         let (buf, off, signed) = match rec_tag {
@@ -530,7 +584,7 @@ pub(super) fn apply_mvar_records(
         if !seen.insert(rec_tag) {
             continue;
         }
-        let delta = round_half_up(store.delta(outer, inner, coords));
+        let delta = round_half_up(delta(outer, inner));
         if delta == 0 {
             continue;
         }

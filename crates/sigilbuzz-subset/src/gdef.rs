@@ -60,7 +60,7 @@ use crate::warnings::{Diag, Warnings};
 use crate::SubsetError;
 use read::{u16_at, u32_at};
 
-pub(crate) use caret_fold::fold_caret_variations;
+pub(crate) use caret_fold::{fold_caret_defaults, fold_caret_variations};
 
 /// Rewrites the face's `GDEF` table. Returns `Ok(None)` when the face
 /// has no GDEF or when every subtable drops to nothing.

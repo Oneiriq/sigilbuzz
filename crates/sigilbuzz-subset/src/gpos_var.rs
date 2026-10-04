@@ -198,17 +198,22 @@ pub(crate) fn fold_one_field(
         return;
     };
     let scaled = round_delta(store.get(outer, inner));
-    let Some(field) = slot.field else {
-        return;
-    };
+    if let Some(field) = slot.field {
+        add_to_field(buf, field, scaled);
+    }
+}
+
+/// Adds `delta` to the i16 field at `field`, saturating at the field's
+/// range. A field past the end is left alone.
+pub(crate) fn add_to_field(buf: &mut [u8], field: usize, delta: i32) {
     let Some(cur) = read_u16(buf, field) else {
         return;
     };
-    if scaled == 0 {
+    if delta == 0 {
         return;
     }
     let new = i32::from(cur as i16)
-        .saturating_add(scaled)
+        .saturating_add(delta)
         .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
     #[allow(clippy::cast_possible_truncation)]
     let new_i16 = new as i16;

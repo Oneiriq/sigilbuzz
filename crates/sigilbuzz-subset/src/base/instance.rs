@@ -26,7 +26,7 @@ use sigilbuzz::tables::variation_store::ItemVariationStore;
 use sigilbuzz::{Error, Face};
 
 use super::{layout, CTX};
-use crate::instance::{project_ivs_with, AxisPin, PinnedOnly, Projection, RegionRemap};
+use crate::instance::{project_ivs_with, AxisPin, Projection, RegionRemap};
 use crate::read;
 use crate::util::{round_half_up, StoreDeltas};
 use crate::warnings::Warnings;
@@ -119,14 +119,8 @@ fn apply_variations(
     let projected: Option<(Vec<u8>, RegionRemap)> = if full {
         None
     } else {
-        let how = Projection {
-            pinned_only: PinnedOnly::Drop,
-            merge: true,
-            keep_outer_zero: false,
-            keep_itemless: false,
-        };
         Some(
-            project_ivs_with(store_bytes, coords, pins, how)
+            project_ivs_with(store_bytes, coords, pins, Projection::MERGED)
                 .map_err(|e| shift_err(e, store_off))?,
         )
     };

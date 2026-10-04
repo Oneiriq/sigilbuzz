@@ -156,13 +156,18 @@
 //!
 //! When [`InstanceInput::axis_pins`] keeps some axes variable, the
 //! bake emits a reduced-axis variable font instead. As in HarfBuzz's
-//! instancer, the default of a `glyf` font moves to the pinned location
-//! (the kept axes at their defaults): `glyf`, `hmtx`, `vmtx` and `VORG`
-//! are baked there, and the gvar tuples and `HVAR` / `VVAR` regions
-//! left on the pinned axes only go. `gvar` goes through
-//! [`crate::gvar_partial::bake_gvar_partial_with`], which merges tuples
-//! that land on the same region, and the CFF2 VarStore through
-//! [`crate::cff2::bake_cff2_partial`].
+//! and fontTools' instancers, every default value moves to the new
+//! default (the pinned axes at their pins, the kept axes at their
+//! defaults), where renderers apply no variations: a `glyf` font's
+//! outlines, a CFF2 font's charstring and Private DICT blend defaults,
+//! `hmtx`, `vmtx`, `VORG`, the `OS/2`, `hhea`, `vhea` and `post` fields
+//! `MVAR` varies, GPOS values and anchors, GDEF carets, `BASE`
+//! coordinates and `cvt `. The gvar tuples, `cvar` tuples and store
+//! regions left on the pinned axes only (no peak on any kept axis) are
+//! in those defaults then, so every variation table drops them. `gvar`
+//! goes through [`crate::gvar_partial::bake_gvar_partial_with`], which
+//! merges tuples that land on the same region, and the CFF2 VarStore
+//! through [`crate::cff2::bake_cff2_partial`].
 //!
 //! # Determinism
 //!
@@ -201,7 +206,7 @@ use metrics::{
 };
 use partial::{layout_variations, partial_instance, pinned_axes};
 
-pub(crate) use ivs::{bake_ivs_partial, project_ivs_with, PinnedOnly, Projection, RegionRemap};
+pub(crate) use ivs::{bake_ivs_partial, project_ivs_with, Projection, RegionRemap};
 pub(crate) use region::project_region_onto_kept_axes;
 
 /// A normalized axis coordinate in `[-1.0, 1.0]`, where `0` is the axis
@@ -303,8 +308,29 @@ pub struct InstancedOutput {
     /// New font binary (a complete SFNT).
     pub bytes: Vec<u8>,
     /// Pieces of the source font left out of the instance because they
-    /// could not be read, sorted by table and offset. Empty for a well
+    /// could not be read, and work left undone because the font would
+    /// make it too costly, sorted by table and offset. Empty for a well
     /// formed font. At most 65,536 are kept. See [`SubsetWarning`].
+    ///
+    /// The costly parts of instancing each work within a budget scaled
+    /// to the input (see the crate docs, "Work budgets"). Past a budget
+    /// the instance still succeeds, less exact where the budget ran
+    /// out, and one warning names what was left:
+    ///
+    /// - `glyf`: the glyphs past the budget keep their source outlines
+    ///   and boxes, and their metrics the source's defaults.
+    /// - Partial `gvar`: the tuples of a glyph past the inference budget
+    ///   keep the points they list; a glyph past the decoding budget
+    ///   keeps no variations.
+    /// - Variation store rows (`HVAR`, `VVAR`, `VORG`, GPOS values and
+    ///   anchors, GDEF carets, `BASE`): the rows past the budget add
+    ///   nothing, so their values stay at the source's defaults.
+    /// - FeatureVariations: the FeatureVariations go.
+    ///
+    /// A CFF2 font past its charstring budget fails the instance with
+    /// [`SubsetError::Unsupported`] instead. Real fonts use at most about
+    /// 12.5% of any budget (the largest checked, Noto Sans and Serif CJK
+    /// JP VF at 30 to 60 MB, included).
     pub warnings: Vec<SubsetWarning>,
 }
 
@@ -644,6 +670,37 @@ fn push_glyf_tables(
         vmtx,
         num_glyphs,
     })
+}
+
+/// Appends `hmtx` and `hhea` (MVAR-baked when `MVAR` varies it, its
+/// long metrics count patched), with the advances and side bearings
+/// `HVAR` gives at `coords`, and the vertical metrics `VVAR` gives (see
+/// [`push_vertical_metrics`]). For a partial instance of a font whose
+/// outlines give no metrics to bake: a CFF2 font, or a `glyf` font
+/// without `gvar`. Returns the vertical bake, whose `left_out` tables
+/// the caller leaves out.
+fn push_metric_tables(
+    face: &Face<'_>,
+    coords: &[f32],
+    mvar_bake: &MvarBake,
+    warnings: &Warnings,
+    tables: &mut Vec<([u8; 4], Vec<u8>)>,
+) -> Result<VmtxBake, SubsetError> {
+    let num_glyphs = face.maxp()?.num_glyphs;
+    let hmtx_out = bake_hmtx(face, coords, num_glyphs, warnings)?;
+    let mut hhea_out = match mvar_bake.hhea.clone() {
+        Some(bytes) => bytes,
+        None => face
+            .table_bytes(tag::HHEA)
+            .map_err(SubsetError::from)?
+            .to_vec(),
+    };
+    util::write_hhea_metrics_count(&mut hhea_out, hmtx_out.number_of_h_metrics)?;
+    tables.push((tag::HHEA, hhea_out));
+    tables.push((tag::HMTX, hmtx_out.bytes));
+    let vmtx = bake_vmtx(face, coords, num_glyphs, None, warnings);
+    push_vertical_metrics(face, &vmtx, mvar_bake, None, tables)?;
+    Ok(vmtx)
 }
 
 /// Appends the rebuilt `vmtx` with `vhea` (MVAR-baked when `MVAR`

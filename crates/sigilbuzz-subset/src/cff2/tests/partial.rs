@@ -572,3 +572,70 @@ fn bakes_write_a_shared_private_dict_once() {
         );
     }
 }
+
+#[test]
+fn bake_cff2_partial_moves_pinned_only_deltas_into_the_masters() {
+    // Region 0 lies on axis 0 alone, region 1 on axis 1 alone. Pinning
+    // axis 0 at 1 leaves region 0 with no peak on the kept axis, so it
+    // applies alike at every kept coordinate, the new default included,
+    // where renderers apply no variations: its delta moves into the
+    // master and leaves the blend.
+    let ivs = build_ivs2_for_cff2(
+        &[
+            [(0.0, 1.0, 1.0), (0.0, 0.0, 0.0)],
+            [(0.0, 0.0, 0.0), (0.0, 1.0, 1.0)],
+        ],
+        &[(alloc::vec![0, 1], alloc::vec![])],
+    );
+    let cs: &[u8] = &[
+        239, 159, 149, 140, 16, // 100 20 10 1 blend
+        139, 21, // 0 rmoveto
+    ];
+    let cff = build_synthetic_cff2(&[cs], &[0], Some(&ivs));
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let out = bake_cff2_partial(&cff, &[1.0, 0.0], &pins).expect("partial bake");
+    let parsed = parse_cff2(&out).expect("parse");
+    let store = ItemVariationStore::parse(&parsed.vstore_blob.expect("vstore")[2..]).unwrap();
+    assert_eq!(store.region_count(), 1, "the pinned-only region is gone");
+    // 120 (100 + 20), then the kept delta 10, 1 blend, 0 rmoveto.
+    assert_eq!(parsed.char_strings[0], &[247, 12, 149, 140, 16, 139, 21]);
+
+    // A subtable on the pinned axis alone keeps no blend: the master
+    // holds the pinned value.
+    let ivs = build_ivs2_for_cff2(
+        &[[(0.0, 1.0, 1.0), (0.0, 0.0, 0.0)]],
+        &[(alloc::vec![0], alloc::vec![])],
+    );
+    let cs: &[u8] = &[239, 159, 140, 16, 139, 21]; // 100 20 1 blend 0 rmoveto
+    let cff = build_synthetic_cff2(&[cs], &[0], Some(&ivs));
+    let out = bake_cff2_partial(&cff, &[0.5, 0.0], &pins).expect("partial bake");
+    let parsed = parse_cff2(&out).expect("parse");
+    assert_eq!(parsed.char_strings[0], &[247, 2, 139, 21], "110, 0 rmoveto");
+}
+
+#[test]
+fn a_null_subtable_offset_numbers_cff2_blends_as_the_store_does() {
+    // Subtable 0's offset is null: the projection reads it as empty and
+    // elides it, so subtable 1 becomes the store's subtable 0, and a
+    // blend after `1 vsindex` names subtable 0 (no vsindex at all).
+    let mut ivs = build_ivs2_for_cff2(
+        &[[(0.0, 0.0, 0.0), (0.0, 1.0, 1.0)]],
+        &[
+            (alloc::vec![0], alloc::vec![]),
+            (alloc::vec![0], alloc::vec![]),
+        ],
+    );
+    ivs[8..12].copy_from_slice(&0u32.to_be_bytes());
+    let cs: &[u8] = &[
+        140, 15, // 1 vsindex
+        239, 149, 140, 16, // 100 10 1 blend
+        139, 21, // 0 rmoveto
+    ];
+    let cff = build_synthetic_cff2(&[cs], &[0], Some(&ivs));
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let out = bake_cff2_partial(&cff, &[1.0, 0.0], &pins).expect("partial bake");
+    let parsed = parse_cff2(&out).expect("parse");
+    let store = ItemVariationStore::parse(&parsed.vstore_blob.expect("vstore")[2..]).unwrap();
+    assert_eq!(store.subtable_count(), 1);
+    assert_eq!(parsed.char_strings[0], &[239, 149, 140, 16, 139, 21]);
+}

@@ -76,10 +76,11 @@ fn a_partial_instance_keeps_the_surviving_regions_of_private_blends() {
     let ivs = store();
     let parsed = ItemVariationStore::parse(&ivs).unwrap();
     // Region 0 survives, scaled by a half; region 1 does not.
-    let survivors = [Some(CffSubtableSurvivors {
-        new_outer: 0,
+    let survivors = [CffSubtableSurvivors {
+        new_outer: Some(0),
         surviving: vec![(0, 0.5)],
-    })];
+        folded: vec![],
+    }];
     let out = project_private(walk_dict(&dict).unwrap(), &parsed, &survivors).unwrap();
     assert_eq!(out.iter().map(|e| e.op).collect::<Vec<_>>(), [23, 10]);
     let blend = &out[0].operands;
@@ -87,9 +88,39 @@ fn a_partial_instance_keeps_the_surviving_regions_of_private_blends() {
     assert_eq!(decode_real(&blend[1].raw), Some(0.5));
     assert_eq!(blend[2].int_value, Some(1));
     // With the subtable gone, the default goes to StdHW as it is.
-    let out = project_private(walk_dict(&dict).unwrap(), &parsed, &[None]).unwrap();
+    let gone = [CffSubtableSurvivors::default()];
+    let out = project_private(walk_dict(&dict).unwrap(), &parsed, &gone).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(ints(&out[0]), [Some(10)]);
+}
+
+#[test]
+fn a_partial_instance_moves_pinned_only_private_deltas_into_the_defaults() {
+    // StdHW 10, deltas 1 and 2. Region 1 lies on the pinned axes only:
+    // its delta, scaled, moves into the default, where a renderer at
+    // the new default reads it, and leaves the blend.
+    let dict = [n(10), n(1), n(2), n(1), 23, 10];
+    let ivs = store();
+    let parsed = ItemVariationStore::parse(&ivs).unwrap();
+    let survivors = [CffSubtableSurvivors {
+        new_outer: Some(0),
+        surviving: vec![(0, 0.5)],
+        folded: vec![(1, 0.5)],
+    }];
+    let out = project_private(walk_dict(&dict).unwrap(), &parsed, &survivors).unwrap();
+    let blend = &out[0].operands;
+    assert_eq!(blend[0].int_value, Some(11), "10 + 2 x 0.5");
+    assert_eq!(decode_real(&blend[1].raw), Some(0.5));
+    // Every region folded: no blend is left, and StdHW reads the moved
+    // default.
+    let folded = [CffSubtableSurvivors {
+        new_outer: None,
+        surviving: vec![],
+        folded: vec![(0, 1.0), (1, 1.0)],
+    }];
+    let out = project_private(walk_dict(&dict).unwrap(), &parsed, &folded).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(ints(&out[0]), [Some(13)]);
 }
 
 #[test]

@@ -10,12 +10,12 @@ use sigilbuzz::Face;
 use super::axes::{bake_avar_partial, bake_fvar_partial};
 use super::cvar;
 use super::gdef_store::GdefBake;
-use super::ivs::PinnedOnly;
-use super::metrics::{bake_vorg, MvarBake, VorgBake};
+use super::metrics::{bake_vorg, mvar_defaults, VorgBake};
 use super::metrics_var::{bake_hvar_partial_with, bake_mvar_partial, bake_vvar_partial_with};
 use super::store_remap::{bake_gdef_store_partial, remap_gpos_variation_indices};
 use super::{
-    plan_coords, post_avar, push_base, push_glyf_tables, AxisPin, InstanceInput, InstancedOutput,
+    plan_coords, post_avar, push_base, push_glyf_tables, push_metric_tables, AxisPin,
+    InstanceInput, InstancedOutput,
 };
 use crate::base::BaseBake;
 use crate::sfnt;
@@ -38,12 +38,16 @@ use crate::SubsetError;
 /// - rebuilds `GDEF` around its projected store and renumbers every
 ///   VariationIndex in it and in `GPOS` to match (see
 ///   [`store_remap`](super::store_remap)),
-/// - for a `glyf` font with `gvar`, bakes `glyf`, `hmtx`, `vmtx`, `VORG`
-///   and the `head` / `hhea` / `vhea` fields that follow from them at
-///   the new default (the pinned axes at their pins, the kept axes at
-///   their defaults), as HarfBuzz's instancer does; the gvar tuples and
-///   the `HVAR` / `VVAR` regions left on the pinned axes only are in
-///   those tables now, so the variation tables drop them,
+/// - moves every default value to the new default (the pinned axes at
+///   their pins, the kept axes at their defaults), where renderers apply
+///   no variations, as HarfBuzz's instancer does: for a `glyf` font with
+///   `gvar`, `glyf` and the `head` / `hhea` / `vhea` fields that follow
+///   from it; for a CFF2 font, the charstrings' and Private DICTs'
+///   blend defaults; `hmtx`, `vmtx` and `VORG`; the `OS/2`, `hhea`,
+///   `vhea` and `post` fields `MVAR` varies; the GPOS values and
+///   anchors and the GDEF carets. The regions left on the pinned axes
+///   only are in those defaults now, so every variation table drops
+///   them,
 /// - moves the `BASE` coordinates varied through its store to the new
 ///   default and projects the store,
 /// - adds the `cvar` tuples left on the pinned axes only to `cvt ` and
@@ -113,46 +117,60 @@ pub(super) fn partial_instance(
         }
     }
 
-    // A glyf font with gvar gets its default outlines and glyph metrics
-    // at the pinned location (the kept axes at their defaults), as
-    // HarfBuzz's instancer does: the gvar tuples and the HVAR and VVAR
-    // regions left on the pinned axes only are baked into glyf, hmtx,
-    // vmtx and VORG, and leave the variation tables.
+    // The new default (the pinned axes at their pins, the kept axes at
+    // their defaults) is where a renderer applies no variations, so
+    // every default value moves there, as HarfBuzz's instancer moves
+    // them: a glyf font's outlines and glyph metrics through `gvar`, a
+    // CFF2 font's charstrings and Private DICTs through their blends,
+    // the advances and origins through `HVAR`, `VVAR` and `VORG`, the
+    // `OS/2`, `hhea`, `vhea` and `post` fields through `MVAR`, the GPOS
+    // values, anchors and carets through `GDEF`'s store, `BASE`, and
+    // `cvt`. Each variation table drops the regions on the pinned axes
+    // only, whose deltas are now in those defaults.
     let fold_glyphs = face.record(tag::GLYF).is_some() && matches!(face.gvar(), Ok(Some(_)));
-    let pinned_only = if fold_glyphs {
-        PinnedOnly::Drop
-    } else {
-        PinnedOnly::Keep
-    };
     let default_coords: Vec<f32> = outline
         .iter()
         .zip(pins)
         .map(|(&c, pin)| if *pin == AxisPin::Keep { 0.0 } else { c })
         .collect();
+    let mvar_bake = mvar_defaults(face, &plan, pins)?;
     let glyf_bake = if fold_glyphs {
         Some(push_glyf_tables(
             face,
             &default_coords,
-            &MvarBake::default(),
+            &mvar_bake,
             &warnings,
             &mut tables,
         )?)
     } else {
         None
     };
-    let vorg_bake = if fold_glyphs {
-        bake_vorg(face, &default_coords, face.maxp()?.num_glyphs, &warnings)
+    let metrics_bake = if fold_glyphs {
+        None
     } else {
-        VorgBake::Unchanged
+        Some(push_metric_tables(
+            face,
+            &default_coords,
+            &mvar_bake,
+            &warnings,
+            &mut tables,
+        )?)
     };
+    let vorg_bake = bake_vorg(face, &default_coords, face.maxp()?.num_glyphs, &warnings);
     if let VorgBake::Rebuilt(b) = &vorg_bake {
         tables.push((tag::VORG, b.clone()));
+    }
+    if let Some(os2_bytes) = mvar_bake.os2.clone() {
+        tables.push((*b"OS/2", os2_bytes));
+    }
+    if let Some(post_bytes) = mvar_bake.post.clone() {
+        tables.push((tag::POST, post_bytes));
     }
 
     // HVAR / VVAR / MVAR rewrites (optional). A malformed table is
     // dropped (its metrics stop varying) and reported.
-    let hvar = |b: &[u8]| bake_hvar_partial_with(b, &plan, pins, pinned_only);
-    let vvar = |b: &[u8]| bake_vvar_partial_with(b, &plan, pins, pinned_only);
+    let hvar = |b: &[u8]| bake_hvar_partial_with(b, &plan, pins);
+    let vvar = |b: &[u8]| bake_vvar_partial_with(b, &plan, pins);
     let mvar = |b: &[u8]| bake_mvar_partial(b, &plan, pins);
     type MetricsBake<'b> = &'b dyn Fn(&[u8]) -> Result<Vec<u8>, SubsetError>;
     let metrics_bakes: [([u8; 4], MetricsBake<'_>); 3] =
@@ -274,7 +292,9 @@ pub(super) fn partial_instance(
         // it could not fold the pinned axes into, are left out.
         let left_out = glyf_bake
             .as_ref()
-            .is_some_and(|b| b.vmtx.left_out.contains(&rec.tag));
+            .map(|b| &b.vmtx)
+            .or(metrics_bake.as_ref())
+            .is_some_and(|v| v.left_out.contains(&rec.tag));
         if left_out || (rec.tag == tag::VORG && vorg_bake == VorgBake::Dropped) {
             continue;
         }

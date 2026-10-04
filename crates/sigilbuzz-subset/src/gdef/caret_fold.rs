@@ -9,7 +9,9 @@
 //! coordinate, and clears the offset, the same fold the GPOS bake
 //! applies to anchors (see [`crate::gpos_var`]).
 
-use crate::gpos_var::{fold_one_field, DeviceSlot};
+use alloc::collections::BTreeSet;
+
+use crate::gpos_var::{add_to_field, fold_one_field, DeviceSlot, VARIATION_INDEX_DELTA_FORMAT};
 use crate::util::{StoreDeltas, WorkBudget, WORK_LIMIT};
 
 fn read_u16(buf: &[u8], pos: usize) -> Option<usize> {
@@ -26,6 +28,36 @@ fn read_u16(buf: &[u8], pos: usize) -> Option<usize> {
 /// ligatures can share one LigGlyph, so the walk charges a
 /// [`WorkBudget`] for every caret it visits and stops once it runs out.
 pub(crate) fn fold_caret_variations(gdef: &mut [u8], deltas: Option<&StoreDeltas<'_, '_>>) {
+    for_each_format3_caret(gdef, &mut |gdef, slot| fold_one_field(gdef, slot, deltas));
+}
+
+/// Adds to every format 3 caret that names a VariationIndex the delta
+/// `fold` gives its `(outer, inner)` row, keeping the VariationIndex: a
+/// partial instance moves the deltas of the regions on the pinned axes
+/// only into the default carets, as HarfBuzz's instancer does. A caret
+/// several ligatures share moves once.
+pub(crate) fn fold_caret_defaults(gdef: &mut [u8], fold: &dyn Fn(u16, u16) -> i32) {
+    let mut moved: BTreeSet<usize> = BTreeSet::new();
+    for_each_format3_caret(gdef, &mut |gdef, slot| {
+        let Some(target) = slot.target(gdef) else {
+            return;
+        };
+        if slot.delta_format(gdef) != Some(VARIATION_INDEX_DELTA_FORMAT) {
+            return;
+        }
+        let (Some(outer), Some(inner)) = (read_u16(gdef, target), read_u16(gdef, target + 2))
+        else {
+            return;
+        };
+        if let Some(field) = slot.field.filter(|&f| moved.insert(f)) {
+            add_to_field(gdef, field, fold(outer as u16, inner as u16));
+        }
+    });
+}
+
+/// Hands every format 3 caret of the GDEF table in `gdef` to `visit`,
+/// as the slot of its Device offset with the coordinate it adjusts.
+fn for_each_format3_caret(gdef: &mut [u8], visit: &mut dyn FnMut(&mut [u8], DeviceSlot)) {
     let Some(list) = read_u16(gdef, 8).filter(|&off| off != 0) else {
         return;
     };
@@ -55,7 +87,7 @@ pub(crate) fn fold_caret_variations(gdef: &mut [u8], deltas: Option<&StoreDeltas
                     field: Some(caret + 2),
                     slot: caret + 4,
                 };
-                fold_one_field(gdef, slot, deltas);
+                visit(gdef, slot);
             }
         }
     }

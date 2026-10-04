@@ -16,11 +16,16 @@ use crate::SubsetError;
 // ---------------------------------------------------------------------------
 
 /// Maps `(old_outer, old_inner)` source IVS rows to their new
-/// `(new_outer, new_inner)` indexes after a partial-instance rewrite.
-/// `None` means the source row exists but its surrounding subtable
-/// collapsed to nothing (every region dropped). Callers must treat
-/// the row as "no variation" and leave the consumer field at its
-/// static value.
+/// `(new_outer, new_inner)` indexes after a partial-instance rewrite,
+/// and reports what each row loses with the regions on the pinned axes
+/// only.
+///
+/// A region the pinned axes leave with no peak on any kept axis applies
+/// alike at every kept coordinate, the new default included, where
+/// renderers apply no variations. The projection drops it, and the
+/// caller adds its scaled deltas ([`RegionRemap::folded`]) to the
+/// default values the store varies, as HarfBuzz's and fontTools'
+/// instancers do.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RegionRemap {
     /// Per-source-outer entries. Each entry is either:
@@ -29,10 +34,27 @@ pub(crate) struct RegionRemap {
     ///   `region_indexes.len()` may differ (regions are dropped /
     ///   trimmed), but `inner` indices are preserved verbatim because
     ///   the partial-instance pass never reorders or drops rows.
-    /// - `None`: every region the subtable referenced was dropped, so
-    ///   the subtable was elided. Consumers reading via `(outer, inner)`
-    ///   resolve to a delta of zero.
+    /// - `None`: no region the subtable referenced has a peak left on a
+    ///   kept axis (or it has no rows), so the subtable was elided.
+    ///   Consumers reading via `(outer, inner)` resolve to a delta of
+    ///   zero, after adding the row's folded delta to their default.
     new_outer_for_old: Vec<Option<u16>>,
+    /// Per-source-outer layout; `None` for a null subtable offset.
+    layouts: Vec<Option<SubtableLayout>>,
+}
+
+/// What became of one source subtable's slots.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SubtableLayout {
+    /// Each kept column's source slots with their pin scalars, in column
+    /// order. Without merging, one slot per column.
+    pub(crate) columns: Vec<Vec<(u16, f32)>>,
+    /// The source slots whose regions lie on the pinned axes only, with
+    /// their pin scalars: their scaled deltas fold into the defaults.
+    pub(crate) folded: Vec<(u16, f32)>,
+    /// Each row's folded delta: the sum of its folded slots' deltas,
+    /// scaled. Empty when no slot folds.
+    rows: Vec<f32>,
 }
 
 impl RegionRemap {
@@ -41,6 +63,37 @@ impl RegionRemap {
     pub(crate) fn lookup(&self, old_outer: u16, old_inner: u16) -> Option<(u16, u16)> {
         let new_outer = (*self.new_outer_for_old.get(old_outer as usize)?)?;
         Some((new_outer, old_inner))
+    }
+
+    /// The number of source subtables.
+    pub(crate) fn subtable_count(&self) -> u16 {
+        self.layouts.len() as u16
+    }
+
+    /// The new index of source subtable `old_outer`, or `None` when it
+    /// collapsed.
+    pub(crate) fn new_outer(&self, old_outer: u16) -> Option<u16> {
+        self.new_outer_for_old
+            .get(usize::from(old_outer))
+            .copied()
+            .flatten()
+    }
+
+    /// What became of source subtable `old_outer`'s slots; `None` for
+    /// a null subtable offset or an index past the store.
+    pub(crate) fn layout(&self, old_outer: u16) -> Option<&SubtableLayout> {
+        self.layouts.get(usize::from(old_outer))?.as_ref()
+    }
+
+    /// The delta row `(old_outer, old_inner)` adds at the new default
+    /// through its regions on the pinned axes only, which the projected
+    /// store no longer holds: the caller adds it to the default value.
+    /// Zero for a row the store does not hold.
+    pub(crate) fn folded(&self, old_outer: u16, old_inner: u16) -> f32 {
+        self.layout(old_outer)
+            .and_then(|l| l.rows.get(usize::from(old_inner)))
+            .copied()
+            .unwrap_or(0.0)
     }
 }
 
@@ -97,26 +150,11 @@ pub(super) fn shifted(err: SubsetError, by: usize) -> SubsetError {
     }
 }
 
-/// What a partial instance does with a region that, projected onto the
-/// kept axes, has no peak left: it lies on the pinned axes only, so its
-/// deltas apply alike at every kept coordinate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PinnedOnly {
-    /// Keep the region, with a zero peak on every kept axis, so the
-    /// store keeps adding its deltas. For a store whose default values
-    /// the instance leaves at the source's default.
-    Keep,
-    /// Drop the region. For a store whose default values the instance
-    /// moved to the pinned location, as HarfBuzz's instancer does: the
-    /// deltas are in them already.
-    Drop,
-}
-
-/// How [`project_ivs_with`] projects a store.
+/// How [`project_ivs_with`] projects a store. Regions on the pinned axes
+/// only are always dropped and their deltas folded (see
+/// [`RegionRemap::folded`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Projection {
-    /// What becomes of a region on the pinned axes only.
-    pub(crate) pinned_only: PinnedOnly,
     /// Merge regions that project to the same kept-axis region, as
     /// HarfBuzz's instancer does: one region in the new list, and in
     /// each subtable one column whose deltas are the sum of the merged
@@ -138,8 +176,7 @@ pub(crate) struct Projection {
 
 impl Projection {
     /// Every region that survives keeps its own column.
-    pub(crate) const KEEP_ALL: Self = Self {
-        pinned_only: PinnedOnly::Keep,
+    pub(crate) const SEPARATE: Self = Self {
         merge: false,
         keep_outer_zero: false,
         keep_itemless: false,
@@ -149,15 +186,12 @@ impl Projection {
     /// own column, in order, and subtables stay without rows.
     pub(crate) const CFF2: Self = Self {
         keep_itemless: true,
-        ..Self::KEEP_ALL
+        ..Self::SEPARATE
     };
 
-    /// The projection of a store whose default values stay at the
-    /// source's default (MVAR's fields, GDEF's carets and GPOS's
-    /// values): the regions on the pinned axes only stay, and regions
-    /// that project alike merge, as in HarfBuzz's instancer.
-    pub(crate) const KEEP_MERGED: Self = Self {
-        pinned_only: PinnedOnly::Keep,
+    /// Regions that project alike merge, as in HarfBuzz's instancer
+    /// (MVAR's fields, GDEF's carets and GPOS's values).
+    pub(crate) const MERGED: Self = Self {
         merge: true,
         keep_outer_zero: false,
         keep_itemless: false,
@@ -202,7 +236,7 @@ pub(crate) fn project_ivs(
     coords: &[f32],
     pins: &[AxisPin],
 ) -> Result<(Vec<u8>, RegionRemap), SubsetError> {
-    project_ivs_with(ivs_bytes, coords, pins, Projection::KEEP_ALL)
+    project_ivs_with(ivs_bytes, coords, pins, Projection::SEPARATE)
 }
 
 /// [`project_ivs`], projecting as `how` says.
@@ -260,8 +294,17 @@ pub(crate) fn project_ivs_with(
         CTX,
     )?;
 
-    // Project each region. None -> dropped; Some((new_index, scalar)).
-    let mut region_remap: Vec<Option<(u16, f32)>> = Vec::with_capacity(region_count);
+    // Project each region. A region keeps a peak on some kept axis
+    // (written, possibly merged), lies on the pinned axes only (dropped,
+    // its scaled deltas folded into the defaults), or is zero at the pin
+    // coordinates (dropped).
+    #[derive(Clone, Copy)]
+    enum Fate {
+        Dropped,
+        Folded(f32),
+        Kept(u16, f32),
+    }
+    let mut region_fate: Vec<Fate> = Vec::with_capacity(region_count);
     let mut new_regions: Vec<Vec<(f32, f32, f32)>> = Vec::new();
     // The new index of each region written, by its bits, for merging.
     let mut region_of: BTreeMap<Vec<[i16; 3]>, u16> = BTreeMap::new();
@@ -277,11 +320,11 @@ pub(crate) fn project_ivs_with(
                 )
             })
             .collect();
-        let projected = project_region_onto_kept_axes(&region, pins, coords).filter(|p| {
-            how.pinned_only == PinnedOnly::Keep
-                || p.kept_axes.iter().any(|&(_, peak, _)| peak != 0.0)
-        });
-        match projected {
+        let fate = match project_region_onto_kept_axes(&region, pins, coords) {
+            None => Fate::Dropped,
+            Some(p) if !p.kept_axes.iter().any(|&(_, peak, _)| peak != 0.0) => {
+                Fate::Folded(p.pin_scalar)
+            }
             Some(p) => {
                 // A merging projection reuses a region it already wrote
                 // when the two read the same once written.
@@ -299,17 +342,18 @@ pub(crate) fn project_ivs_with(
                         (new_regions.len() - 1) as u16
                     }
                 };
-                region_remap.push(Some((new_idx, p.pin_scalar)));
+                Fate::Kept(new_idx, p.pin_scalar)
             }
-            None => region_remap.push(None),
-        }
+        };
+        region_fate.push(fate);
     }
 
     // Walk every subtable, project its regionIndexes through
-    // region_remap, scale every delta by pin_scalar, and re-emit. We
+    // region_fate, scale every delta by pin_scalar, and re-emit. We
     // emit each surviving subtable with a simple all-i16 or all-i32
     // delta encoding: pick the smallest that fits every value.
     let mut new_outer_for_old: Vec<Option<u16>> = Vec::with_capacity(subtable_count);
+    let mut layouts: Vec<Option<SubtableLayout>> = Vec::with_capacity(subtable_count);
     // Pre-encoded subtable bodies (everything past the subtable's own
     // header bytes are written below; we serialize them in order so
     // offsets land deterministically).
@@ -321,6 +365,7 @@ pub(crate) fn project_ivs_with(
     for sub_off in &subtable_offsets {
         let Some(sub_off) = *sub_off else {
             new_outer_for_old.push(None);
+            layouts.push(None);
             continue;
         };
         // Subtable header: itemCount, wordDeltaCount, regionIndexCount,
@@ -351,31 +396,47 @@ pub(crate) fn project_ivs_with(
 
         // The new columns: each a new region index and the source slots
         // (with their scalars) that sum into it. Without merging, one
-        // column per surviving slot.
+        // column per surviving slot. The slots on the pinned axes only
+        // fold.
         let mut columns: Vec<(u16, Vec<(usize, f32)>)> = Vec::new();
+        let mut folded: Vec<(usize, f32)> = Vec::new();
         // The column of each new region index, for merging.
         let mut column_of: BTreeMap<u16, usize> = BTreeMap::new();
         for (slot, &old_ri) in region_indexes.iter().enumerate() {
-            if let Some(Some((new_ri, scalar))) = region_remap.get(old_ri as usize) {
-                let merged = if how.merge {
-                    column_of.get(new_ri).and_then(|&c| columns.get_mut(c))
-                } else {
-                    None
-                };
-                match merged {
-                    Some((_, slots)) => slots.push((slot, *scalar)),
-                    None => {
-                        column_of.insert(*new_ri, columns.len());
-                        columns.push((*new_ri, alloc::vec![(slot, *scalar)]));
+            match region_fate.get(old_ri as usize) {
+                Some(&Fate::Kept(new_ri, scalar)) => {
+                    let merged = if how.merge {
+                        column_of.get(&new_ri).and_then(|&c| columns.get_mut(c))
+                    } else {
+                        None
+                    };
+                    match merged {
+                        Some((_, slots)) => slots.push((slot, scalar)),
+                        None => {
+                            column_of.insert(new_ri, columns.len());
+                            columns.push((new_ri, alloc::vec![(slot, scalar)]));
+                        }
                     }
                 }
+                Some(&Fate::Folded(scalar)) => folded.push((slot, scalar)),
+                Some(Fate::Dropped) | None => {}
             }
         }
 
         // Subtable collapses entirely if either no items or no
         // surviving regions; a CFF2 store's subtables have no items.
-        if (item_count == 0 && !how.keep_itemless) || columns.is_empty() {
+        let keep = !((item_count == 0 && !how.keep_itemless) || columns.is_empty());
+        let mut layout = SubtableLayout {
+            columns: columns
+                .iter()
+                .map(|(_, slots)| slots.iter().map(|&(s, k)| (s as u16, k)).collect())
+                .collect(),
+            folded: folded.iter().map(|&(s, k)| (s as u16, k)).collect(),
+            rows: Vec::new(),
+        };
+        if !keep && (folded.is_empty() || item_count == 0) {
             new_outer_for_old.push(None);
+            layouts.push(Some(layout));
             continue;
         }
         // Every kept column is written wide, so wordDeltaCount equals
@@ -402,9 +463,13 @@ pub(crate) fn project_ivs_with(
         read_budget = read_budget.checked_sub(rows.len()).ok_or(ALIASED)?;
 
         // For each item, build its surviving row of i32 deltas
-        // (post-pin-scalar). `row_size` is at least 1 here because a
-        // surviving slot implies at least one region index.
-        let mut item_rows: Vec<Vec<i32>> = Vec::with_capacity(item_count);
+        // (post-pin-scalar) and its folded delta. `row_size` is at
+        // least 1 here because a surviving or folded slot implies at
+        // least one region index.
+        let mut item_rows: Vec<Vec<i32>> = Vec::with_capacity(if keep { item_count } else { 0 });
+        if !folded.is_empty() {
+            layout.rows.reserve(item_count);
+        }
         for it in 0..item_count {
             let row = &rows[it * row_size..(it + 1) * row_size];
             // Walk source slots, decoding each.
@@ -437,6 +502,18 @@ pub(crate) fn project_ivs_with(
                 };
                 src_deltas.push(value);
             }
+            if !folded.is_empty() {
+                let sum: f32 = folded
+                    .iter()
+                    .map(|&(slot, scalar)| {
+                        src_deltas.get(slot).copied().unwrap_or(0) as f32 * scalar
+                    })
+                    .sum();
+                layout.rows.push(sum);
+            }
+            if !keep {
+                continue;
+            }
             // Apply scalar to each surviving slot and sum each column,
             // building the new row in column order.
             let new_row: Vec<i32> = columns
@@ -456,6 +533,11 @@ pub(crate) fn project_ivs_with(
                 })
                 .collect();
             item_rows.push(new_row);
+        }
+        layouts.push(Some(layout));
+        if !keep {
+            new_outer_for_old.push(None);
+            continue;
         }
 
         // Decide encoding: pick all-i16 if every value fits, else
@@ -555,5 +637,11 @@ pub(crate) fn project_ivs_with(
         out.extend_from_slice(sub);
     }
 
-    Ok((out, RegionRemap { new_outer_for_old }))
+    Ok((
+        out,
+        RegionRemap {
+            new_outer_for_old,
+            layouts,
+        },
+    ))
 }
