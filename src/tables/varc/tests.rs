@@ -347,3 +347,77 @@ fn wide_axis_components_stop_at_coord_budget() {
     assert_eq!(comp.components.len(), MAX_COMPOSITE_COORDS / 65536);
     assert!(comp.components.iter().all(|c| c.coords.len() == 65536));
 }
+
+/// A MultiItemVariationStore with the given sparse regions, each a list
+/// of `(axis, start, peak, end)`, and one subtable over all of them
+/// whose delta sets are the given TupleValues streams.
+fn build_store(regions: &[&[(u16, f32, f32, f32)]], delta_sets: &[&[u8]]) -> Vec<u8> {
+    let f2 = |v: f32| ((v * 16384.0) as i16).to_be_bytes();
+    let mut list = Vec::new();
+    list.extend_from_slice(&(regions.len() as u16).to_be_bytes());
+    let mut bodies = Vec::new();
+    for region in regions {
+        let off = 2 + 4 * regions.len() + bodies.len();
+        list.extend_from_slice(&(off as u32).to_be_bytes());
+        bodies.extend_from_slice(&(region.len() as u16).to_be_bytes());
+        for &(axis, start, peak, end) in *region {
+            bodies.extend_from_slice(&axis.to_be_bytes());
+            bodies.extend_from_slice(&f2(start));
+            bodies.extend_from_slice(&f2(peak));
+            bodies.extend_from_slice(&f2(end));
+        }
+    }
+    list.extend_from_slice(&bodies);
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes()); // format
+    out.extend_from_slice(&12u32.to_be_bytes()); // region list
+    out.extend_from_slice(&1u16.to_be_bytes()); // one subtable
+    let sub_off = 12 + list.len();
+    out.extend_from_slice(&(sub_off as u32).to_be_bytes());
+    out.extend_from_slice(&list);
+    out.push(1);
+    out.extend_from_slice(&(regions.len() as u16).to_be_bytes());
+    for i in 0..regions.len() {
+        out.extend_from_slice(&(i as u16).to_be_bytes());
+    }
+    out.extend_from_slice(&build_cff2_index(delta_sets));
+    out
+}
+
+/// One component of glyph 5 that sets axis 0 to `value` (F2DOT14
+/// units) with a delta of `delta` units at axis 0 = +1.
+fn varied_axis_value_table(value: i16, delta: i8) -> Vec<u8> {
+    let store = build_store(&[&[(0, 0.0, 1.0, 1.0)]], &[&[0x00, delta as u8]]);
+    let flags = VC_HAVE_AXES | VC_AXIS_VALUES_HAVE_VARIATION;
+    let mut record = vec![flags as u8, 0x00, 0x05]; // flags, gid 5
+    record.push(0); // axisIndicesIndex
+    record.push(0x40); // one i16 axis value
+    record.extend_from_slice(&value.to_be_bytes());
+    record.push(0); // axisValuesVarIndex: outer 0, inner 0
+    build_varc(&[1], &[&record], Some(&store), Some(&[&[0x00, 0x00]]))
+}
+
+#[test]
+fn axis_values_plus_deltas_round_to_f2dot14() {
+    // HarfBuzz adds the deltas to the axis values in F2DOT14 units and
+    // rounds the sum to a whole F2DOT14 value, halves up.
+    let child_coord = |value: i16, delta: i8, coord: f32| {
+        let bytes = varied_axis_value_table(value, delta);
+        let varc = Varc::parse(&bytes).unwrap();
+        varc.composite(1, &[coord]).unwrap().components[0].coords[0]
+    };
+    // 8192 + 0.5 rounds up to 8193.
+    assert_eq!(child_coord(8192, 1, 0.5), 8193.0 / 16384.0);
+    // 8192 + 0.25 rounds down to 8192.
+    assert_eq!(child_coord(8192, 1, 0.25), 0.5);
+    // -8192 + 0.5 is a half: up, toward positive infinity.
+    assert_eq!(child_coord(-8192, 1, 0.5), -8191.0 / 16384.0);
+    // -8192 - 0.5 rounds up too.
+    assert_eq!(child_coord(-8192, -1, 0.5), -8192.0 / 16384.0);
+    // 8192 + 0.75 rounds to 8193.
+    assert_eq!(child_coord(8192, 3, 0.25), 8193.0 / 16384.0);
+    // At the default instance no delta applies.
+    let bytes = varied_axis_value_table(8192, 100);
+    let varc = Varc::parse(&bytes).unwrap();
+    assert_eq!(varc.composite(1, &[]).unwrap().components[0].coords, [0.5]);
+}

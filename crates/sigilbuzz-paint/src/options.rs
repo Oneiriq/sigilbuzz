@@ -87,7 +87,10 @@ impl<'a> EvalOptions<'a> {
     /// Evaluates `PaintVar*` deltas at `coords`, the normalized axis
     /// vector (the same shape
     /// [`Face::glyph_outline_at_coords`](sigilbuzz::Face::glyph_outline_at_coords)
-    /// accepts). An empty slice is the static path.
+    /// accepts). An empty slice is the static path. The deltas are read
+    /// at the coords rounded to F2DOT14 (multiples of 1/16384, halves
+    /// up), as HarfBuzz stores them and as the outlines are drawn;
+    /// [`EvalOptions::coords`] returns them as given.
     ///
     /// ```
     /// use sigilbuzz_paint::EvalOptions;

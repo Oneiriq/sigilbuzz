@@ -309,3 +309,24 @@ fn var_skew_angle_delta_is_f2dot14() {
     assert!(close(t.xy, -1.0), "at +1: {t:?}");
     assert!(close(t.yx, 0.0), "at +1: {t:?}");
 }
+
+#[test]
+fn deltas_read_coords_rounded_to_f2dot14() {
+    // HarfBuzz stores a font's coords as F2DOT14 and resolves every
+    // PaintVar* delta there, so a coord between two F2DOT14 steps
+    // lands on the nearer one (halves up), as shaping and outlines do.
+    let bytes = font_bytes();
+    let face = Face::parse_bytes(&bytes, 0).expect("face parses");
+    let sx = |coord: f32| one_fill(&face, 2, &[coord]).0.xx;
+    // 0.25 + 1/65536, a 16.16 coord from `Fvar::normalize_coords`,
+    // rounds to 0.25: the scale is 1 + 0.5 * 0.25 exactly.
+    assert_eq!(sx(0.25 + 1.0 / 65536.0), 1.125);
+    assert_eq!(sx(0.25 - 1.0 / 65536.0), 1.125);
+    // Half a step rounds up.
+    assert_eq!(sx(1.0 / 32768.0), 1.0 + 0.5 / 16384.0);
+    assert_eq!(sx(3.0 / 32768.0), 1.0 + 0.5 * 2.0 / 16384.0);
+    // Less than half a step is the default instance.
+    assert_eq!(sx(1.0 / 65536.0), 1.0);
+    // NaN reads as zero.
+    assert_eq!(sx(f32::NAN), 1.0);
+}

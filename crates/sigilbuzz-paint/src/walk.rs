@@ -329,7 +329,7 @@ fn paint(
 fn root_clip(
     face: &Face<'_>,
     colr: &Colr<'_>,
-    deltas: &Deltas<'_, '_>,
+    deltas: &Deltas<'_>,
     glyph: GlyphId,
     coords: &[f32],
 ) -> RootClip {
@@ -349,7 +349,7 @@ fn root_clip(
 
 struct Walker<'a, 'b, 's> {
     colr: &'b Colr<'a>,
-    deltas: Deltas<'a, 'b>,
+    deltas: Deltas<'a>,
     /// COLR glyphs whose trees are on the walk stack.
     glyphs: Vec<GlyphId>,
     /// LayerList indices on the walk stack.

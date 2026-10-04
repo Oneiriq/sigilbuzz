@@ -53,7 +53,7 @@ use alloc::vec::Vec;
 use crate::error::{Error, Result};
 use crate::tables::layout::Coverage;
 use crate::tables::multi_var_store::{read_cff2_index, MultiVarStore};
-use crate::tables::parse::Reader;
+use crate::tables::parse::{hb_roundf, Reader};
 
 /// A parsed `VARC` table.
 #[derive(Debug, Clone)]
@@ -82,7 +82,10 @@ pub struct VarcComponent {
     /// Effective normalized axis coords for the child outline, in
     /// `fvar` axis order: the parent's coord vector with any HAVE_AXES
     /// values written over the listed axes. The vector grows to cover
-    /// the highest listed axis when the parent's is shorter.
+    /// the highest listed axis when the parent's is shorter. Each
+    /// written value is the component's axis value plus its deltas,
+    /// rounded to F2DOT14 (a multiple of 1/16384, halves up) as
+    /// HarfBuzz stores coords.
     pub coords: Vec<f32>,
 }
 
@@ -275,28 +278,34 @@ impl<'a> Varc<'a> {
                         context: "VARC component axisIndicesIndex out of range",
                     })?;
             let n = axis_indices.len();
-            // The TupleValues stream packs `n` F2DOT14 values, but
-            // sigilbuzz's decode_tuple_values yields i32; we treat
-            // each as F2DOT14 by dividing by 16384.
+            // The TupleValues stream packs `n` values in F2DOT14 units.
+            // They stay in those units while their deltas are added.
             let raw_values = decode_tuple_values_in_reader(r, n).ok_or(Error::Malformed {
                 offset: r.position(),
                 context: "VARC component axisValues TupleValues truncated",
             })?;
-            let mut axis_values: Vec<f32> =
-                raw_values.into_iter().map(|v| v as f32 / 16384.0).collect();
+            let mut axis_values: Vec<f32> = raw_values.into_iter().map(|v| v as f32).collect();
 
-            // Optional per-value variation deltas.
+            // Optional per-value variation deltas, also in F2DOT14
+            // units. HarfBuzz adds none at the default instance.
             if flags & VC_AXIS_VALUES_HAVE_VARIATION != 0 {
                 let var_idx = read_uint32var(r)?;
-                if let Some(store) = &self.var_store {
+                if let Some(store) = self.var_store.as_ref().filter(|_| !coords.is_empty()) {
                     let outer = (var_idx >> 16) as u16;
                     let inner = var_idx & 0xFFFF;
                     if let Some(deltas) = store.resolve_deltas(outer, inner, n, coords) {
                         for (value, d) in axis_values.iter_mut().zip(&deltas) {
-                            *value += d / 16384.0;
+                            *value += d;
                         }
                     }
                 }
+            }
+
+            // HarfBuzz keeps coords as whole F2DOT14 values, so each
+            // value plus its deltas rounds to one, halves up, before it
+            // becomes the child's coord.
+            for value in &mut axis_values {
+                *value = hb_roundf(*value) / 16384.0;
             }
 
             // Make sure the effective coord vector is wide enough to
