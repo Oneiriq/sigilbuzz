@@ -236,6 +236,7 @@ impl<'a> Gsub<'a> {
             features: self.features(),
             language_tags: self.language_tags,
             maps: self.cache.map(|c| &c.maps),
+            plans: self.cache.map(|c| &c.plans),
         }
     }
 

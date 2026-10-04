@@ -26,6 +26,7 @@ use super::gsub_parsed::{
 use super::joiners::FeatureFlags;
 use super::{resolve_extension, LookupBudget, MAX_NESTED_DEPTH};
 use crate::buffer::{unicode_prop, Glyph};
+use crate::ot::layout_select::PlannedLookup;
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{lookup_type as gsub_lt, ChainContextAny, Context as GsubContext};
 use crate::tables::layout::accel::Accel;
@@ -130,6 +131,32 @@ pub(super) struct StageLookup {
     pub(super) flags: FeatureFlags,
     pub(super) alternate: u16,
     pub(super) masked: bool,
+}
+
+impl StageLookup {
+    /// The lookup as a stage plan keeps it.
+    pub(super) fn planned(self) -> PlannedLookup {
+        PlannedLookup {
+            alternate: self.alternate,
+            joiners: self.flags.joiners,
+            per_syllable: self.flags.per_syllable,
+            masked: self.masked,
+            ..PlannedLookup::new(self.index)
+        }
+    }
+
+    /// The lookup a stage plan kept.
+    pub(super) fn from_planned(p: &PlannedLookup) -> Self {
+        Self {
+            index: p.index,
+            flags: FeatureFlags {
+                joiners: p.joiners,
+                per_syllable: p.per_syllable,
+            },
+            alternate: p.alternate,
+            masked: p.masked,
+        }
+    }
 }
 
 /// Applies the lookups of one GSUB stage in order, HarfBuzz's

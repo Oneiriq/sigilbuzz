@@ -38,8 +38,9 @@ use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use crate::shape::Feature;
 use crate::sync::OnceBox;
-use crate::tables::layout::{ActiveFeatures, LangSys, ScriptList};
+use crate::tables::layout::{ActiveFeatures, Joiners, LangSys, ScriptList};
 
 /// Script tags HarfBuzz falls back to, in order, when none of the
 /// run's own tags is in the table.
@@ -225,9 +226,38 @@ pub(crate) struct LayoutView<'a> {
     pub(crate) features: ActiveFeatures<'a>,
     pub(crate) language_tags: &'a [[u8; 4]],
     pub(crate) maps: Option<&'a FeatureMaps>,
+    pub(crate) plans: Option<&'a StagePlans>,
 }
 
-impl LayoutView<'_> {
+impl<'a> LayoutView<'a> {
+    /// The lookups of one shaping stage, which `build` merges from the
+    /// features of the stage: the caller's `features`, and the
+    /// stage-specific `spec` (its own features, flags and settings,
+    /// encoded by the caller), for a run whose candidate script tags
+    /// are `script_priority`. The font's cache keeps the result, so a
+    /// stage is merged once per combination of those and of the view's
+    /// language and FeatureVariations record. Without a cache, or for a
+    /// stage too large to keep, `build` runs each time.
+    pub(crate) fn stage_plan(
+        &self,
+        script_priority: &[[u8; 4]],
+        features: &[Feature],
+        spec: &[u64],
+        build: impl Fn() -> Vec<PlannedLookup>,
+    ) -> Cow<'a, [PlannedLookup]> {
+        let Some(plans) = self.plans else {
+            return Cow::Owned(build());
+        };
+        let key = StageKey {
+            script_priority,
+            language_tags: self.language_tags,
+            record: self.features.record(),
+            features,
+            spec,
+        };
+        plans.get(&key, build)
+    }
+
     /// [`feature_lookup_indices`] for this view.
     pub(crate) fn feature_lookups(
         &self,
@@ -557,6 +587,182 @@ impl FeatureMaps {
 impl Default for FeatureMaps {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// One lookup of a shaping stage, in a form every stage kind (the GSUB
+/// stages, the syllabic shapers' stages, the GPOS stage) converts to
+/// and from, so one cache keeps them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlannedLookup {
+    /// Index into the LookupList.
+    pub(crate) index: u16,
+    /// The alternate an AlternateSubst lookup picks.
+    pub(crate) alternate: u16,
+    /// The glyph mask bits the lookup applies at (syllabic stages).
+    pub(crate) mask: u32,
+    /// The joiner handling of the features that share the lookup.
+    pub(crate) joiners: Joiners,
+    /// The lookup matches within the cursor's syllable only.
+    pub(crate) per_syllable: bool,
+    /// The lookup applies only where the stage's mask says.
+    pub(crate) masked: bool,
+}
+
+impl PlannedLookup {
+    /// A lookup with every setting at its default: automatic joiners,
+    /// no alternate, global.
+    pub(crate) const fn new(index: u16) -> Self {
+        Self {
+            index,
+            alternate: 0,
+            mask: u32::MAX,
+            joiners: Joiners::AUTO,
+            per_syllable: false,
+            masked: false,
+        }
+    }
+}
+
+/// The kinds of stage a plan's spec starts with, so that two kinds of
+/// stage over the same table never share a plan.
+pub(crate) mod stage_kind {
+    /// The GPOS stage.
+    pub(crate) const GPOS: u64 = 1;
+    /// A GSUB stage of the default, Arabic and merged passes.
+    pub(crate) const GSUB: u64 = 2;
+    /// A GSUB stage of a syllabic shaper.
+    pub(crate) const SYLLABIC: u64 = 3;
+}
+
+/// The spec word of joiner handling and two flags.
+pub(crate) fn flag_bits(joiners: Joiners, first: bool, second: bool) -> u64 {
+    u64::from(joiners.auto_zwnj)
+        | u64::from(joiners.auto_zwj) << 1
+        | u64::from(first) << 2
+        | u64::from(second) << 3
+}
+
+/// Stage plans one table keeps at most.
+const STAGE_SLOTS: usize = 64;
+/// Caller features a kept plan's key may hold.
+const MAX_STAGE_FEATURES: usize = 64;
+/// Spec words a kept plan's key may hold.
+const MAX_STAGE_SPEC: usize = 256;
+/// Lookups a kept plan may hold.
+const MAX_STAGE_LOOKUPS: usize = 4096;
+
+/// What a stage plan depends on.
+struct StageKey<'k> {
+    script_priority: &'k [[u8; 4]],
+    language_tags: &'k [[u8; 4]],
+    record: Option<u32>,
+    features: &'k [Feature],
+    spec: &'k [u64],
+}
+
+/// A kept stage plan with its key.
+struct KeyedStage {
+    script_priority: Vec<[u8; 4]>,
+    language_tags: Vec<[u8; 4]>,
+    record: Option<u32>,
+    features: Vec<Feature>,
+    spec: Vec<u64>,
+    lookups: Vec<PlannedLookup>,
+}
+
+impl KeyedStage {
+    fn matches(&self, key: &StageKey<'_>) -> bool {
+        self.spec == key.spec
+            && self.script_priority == key.script_priority
+            && self.record == key.record
+            && self.features == key.features
+            && self.language_tags == key.language_tags
+    }
+}
+
+/// The stage plans one table has merged, kept by a [`crate::Font`]
+/// across shaping calls: at most [`STAGE_SLOTS`] of them, each with a
+/// key of at most [`MAX_STAGE_FEATURES`] caller features and
+/// [`MAX_STAGE_SPEC`] spec words and at most [`MAX_STAGE_LOOKUPS`]
+/// lookups. A stage past those limits is merged each time, as it is
+/// without a cache.
+pub(crate) struct StagePlans {
+    slots: [OnceBox<KeyedStage>; STAGE_SLOTS],
+}
+
+impl StagePlans {
+    /// No stage merged yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| OnceBox::new()),
+        }
+    }
+
+    /// The plan for `key`, merged with `build` the first time.
+    fn get<'s>(
+        &'s self,
+        key: &StageKey<'_>,
+        build: impl Fn() -> Vec<PlannedLookup>,
+    ) -> Cow<'s, [PlannedLookup]> {
+        if key.features.len() > MAX_STAGE_FEATURES || key.spec.len() > MAX_STAGE_SPEC {
+            return Cow::Owned(build());
+        }
+        let mut built: Option<Vec<PlannedLookup>> = None;
+        for slot in &self.slots {
+            if let Some(kept) = slot.get() {
+                if kept.matches(key) {
+                    return Cow::Borrowed(&kept.lookups);
+                }
+                continue;
+            }
+            let lookups = built.take().unwrap_or_else(&build);
+            if lookups.len() > MAX_STAGE_LOOKUPS {
+                return Cow::Owned(lookups);
+            }
+            let kept = slot.get_or_init(|| KeyedStage {
+                script_priority: key.script_priority.to_vec(),
+                language_tags: key.language_tags.to_vec(),
+                record: key.record,
+                features: key.features.to_vec(),
+                spec: key.spec.to_vec(),
+                lookups: lookups.clone(),
+            });
+            if kept.matches(key) {
+                return Cow::Borrowed(&kept.lookups);
+            }
+            // Another thread kept a different stage here first.
+            built = Some(lookups);
+        }
+        Cow::Owned(built.unwrap_or_else(build))
+    }
+
+    /// Heap bytes the kept plans hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .filter_map(OnceBox::get)
+            .map(|k| {
+                core::mem::size_of::<KeyedStage>()
+                    + (k.script_priority.capacity() + k.language_tags.capacity()) * 4
+                    + k.features.capacity() * core::mem::size_of::<Feature>()
+                    + k.spec.capacity() * 8
+                    + k.lookups.capacity() * core::mem::size_of::<PlannedLookup>()
+            })
+            .sum()
+    }
+}
+
+impl Default for StagePlans {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Debug for StagePlans {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kept = self.slots.iter().filter(|s| s.get().is_some()).count();
+        f.debug_struct("StagePlans").field("kept", &kept).finish()
     }
 }
 
@@ -937,5 +1143,161 @@ mod tests {
             features: feature_list(&[]),
         };
         assert_eq!(f.lookups(&[], b"liga", &[*b"DFLT"]), None);
+    }
+
+    /// Every query through a kept [`FeatureMap`] answers as the walk
+    /// does, for the tags each real font lists and some it does not,
+    /// over several scripts, languages and FeatureVariations records.
+    #[test]
+    fn kept_language_systems_answer_as_the_walk_does() {
+        use crate::tables::layout::accel::LayoutCache;
+        use crate::tables::layout::LayoutTable;
+        use crate::Face;
+        let fonts: [&[u8]; 5] = [
+            include_bytes!("../../tests/fixtures/opensans_regular.ttf"),
+            include_bytes!("../../tests/fixtures/amiri_regular.ttf"),
+            include_bytes!("../../tests/fonts/NotoSansDevanagari-Regular.ttf"),
+            include_bytes!("../../tests/fonts/NotoSansKR-Palt-Subset.ttf"),
+            include_bytes!("../../tests/fixtures/rubik_vf.ttf"),
+        ];
+        let priorities: [&[[u8; 4]]; 6] = [
+            &[*b"latn"],
+            &[*b"arab"],
+            &[*b"dev2", *b"deva"],
+            &[*b"hang"],
+            &[*b"cyrl"],
+            &[],
+        ];
+        let languages: [&[[u8; 4]]; 4] = [&[], &[*b"TRK "], &[*b"URD ", *b"ARA "], &[*b"KOR "]];
+        let unknown = [*b"zzzz", *b"vert", *b"kern", *b"liga", *b"rvrn", *b"mark"];
+        for data in fonts {
+            let face = Face::parse_bytes(data, 0).unwrap();
+            for gsub in [true, false] {
+                let (script_list, list, variations, count) = if gsub {
+                    let Some(t) = face.gsub().unwrap() else {
+                        continue;
+                    };
+                    let v = t.feature_variations().ok().flatten();
+                    (
+                        *t.script_list(),
+                        *t.feature_list(),
+                        v,
+                        t.lookup_list().len(),
+                    )
+                } else {
+                    let Some(t) = face.gpos().unwrap() else {
+                        continue;
+                    };
+                    let v = t.feature_variations().ok().flatten();
+                    (
+                        *t.script_list(),
+                        *t.feature_list(),
+                        v,
+                        t.lookup_list().len(),
+                    )
+                };
+                let table = if gsub {
+                    LayoutTable::Gsub
+                } else {
+                    LayoutTable::Gpos
+                };
+                let records: Vec<Option<(FeatureVariations<'_>, u32)>> = core::iter::once(None)
+                    .chain(
+                        variations
+                            .into_iter()
+                            .flat_map(|v| (0..v.len()).map(move |r| Some((v, r)))),
+                    )
+                    .collect();
+                let mut tags: Vec<[u8; 4]> = list.iter().map(|(tag, _)| tag).collect();
+                tags.extend(unknown);
+                for record in records {
+                    let features = ActiveFeatures::new(list, record);
+                    let cache = LayoutCache::new(table, count);
+                    for languages in languages {
+                        let walk = LayoutView {
+                            script_list,
+                            features,
+                            language_tags: languages,
+                            maps: None,
+                            plans: None,
+                        };
+                        let kept = LayoutView {
+                            maps: Some(&cache.maps),
+                            ..walk
+                        };
+                        for priority in priorities {
+                            assert_eq!(kept.required(priority), walk.required(priority));
+                            for &tag in &tags {
+                                let what = (tag, priority, languages, record.map(|r| r.1));
+                                assert_eq!(
+                                    kept.feature_lookups(tag, priority),
+                                    walk.feature_lookups(tag, priority),
+                                    "{what:?}"
+                                );
+                                assert_eq!(kept.lists(tag, priority), walk.lists(tag, priority));
+                                assert_eq!(
+                                    kept.listed_lookups(tag, priority),
+                                    walk.listed_lookups(tag, priority),
+                                    "{what:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const LATN: &[[u8; 4]] = &[*b"latn"];
+
+    #[test]
+    fn stage_plans_are_kept_per_key() {
+        let plans = StagePlans::new();
+        let built = core::cell::Cell::new(0);
+        let build = |n: u16| {
+            built.set(built.get() + 1);
+            (0..n).map(PlannedLookup::new).collect::<Vec<_>>()
+        };
+        let liga = [Feature {
+            tag: *b"liga",
+            value: 0,
+        }];
+        let key = |spec: &'static [u64], features: &'static [Feature]| StageKey {
+            script_priority: LATN,
+            language_tags: &[],
+            record: None,
+            features,
+            spec,
+        };
+        let first = plans.get(&key(&[1, 0], &[]), || build(3));
+        assert!(matches!(first, Cow::Borrowed(_)));
+        assert_eq!(first.len(), 3);
+        // The same key reads the kept plan.
+        let again = plans.get(&key(&[1, 0], &[]), || build(9));
+        assert_eq!(again.len(), 3);
+        assert_eq!(built.get(), 1);
+        // Another spec or feature list is another plan.
+        assert_eq!(plans.get(&key(&[1, 1], &[]), || build(2)).len(), 2);
+        let with_liga: &'static [Feature] = Box::leak(Box::new(liga));
+        assert_eq!(plans.get(&key(&[1, 0], with_liga), || build(4)).len(), 4);
+        assert_eq!(built.get(), 3);
+        // Keys and plans past the limits are merged each time.
+        let long: &'static [u64] = Box::leak(alloc::vec![7; MAX_STAGE_SPEC + 1].into_boxed_slice());
+        assert!(matches!(
+            plans.get(&key(long, &[]), || build(1)),
+            Cow::Owned(_)
+        ));
+        let huge = plans.get(&key(&[5], &[]), || build(MAX_STAGE_LOOKUPS as u16 + 1));
+        assert!(matches!(huge, Cow::Owned(_)));
+        // Once every slot holds another key, plans are not kept.
+        for i in 0..STAGE_SLOTS as u64 {
+            let spec: &'static [u64] = Box::leak(Box::new([100 + i]));
+            plans.get(&key(spec, &[]), || build(1));
+        }
+        assert!(matches!(
+            plans.get(&key(&[999], &[]), || build(1)),
+            Cow::Owned(_)
+        ));
+        assert!(plans.heap_bytes() > 0);
     }
 }

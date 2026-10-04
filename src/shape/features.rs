@@ -13,6 +13,7 @@ use super::gsub::{
 use super::joiners::FeatureFlags;
 use super::{feature_disabled, feature_enabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
+use crate::ot::layout_select::{flag_bits, stage_kind};
 use crate::tables::gdef::Gdef;
 use crate::tables::Gsub;
 
@@ -170,29 +171,42 @@ fn apply_feature_stage(
     mask: Option<&[bool]>,
     budget: &mut LookupBudget,
 ) {
-    let mut lookups: BTreeMap<u16, StageLookup> = BTreeMap::new();
-    for f in stage {
-        if feature_disabled(features, f.tag) {
-            continue;
+    // The stage's lookups, merged once per script, language, feature
+    // list and stage and kept by the font.
+    let spec: Vec<u64> = core::iter::once(stage_kind::GSUB)
+        .chain(stage.iter().map(|f| {
+            u64::from(u32::from_be_bytes(f.tag)) << 32
+                | u64::from(f.alternate) << 16
+                | flag_bits(f.flags.joiners, f.flags.per_syllable, f.masked)
+        }))
+        .collect();
+    let view = gsub.layout_view();
+    let planned = view.stage_plan(script_priority, features, &spec, || {
+        let mut lookups: BTreeMap<u16, StageLookup> = BTreeMap::new();
+        for f in stage {
+            if feature_disabled(features, f.tag) {
+                continue;
+            }
+            for index in lookup_indices_for_feature_in_scripts(gsub, f.tag, script_priority)
+                .unwrap_or_default()
+            {
+                lookups
+                    .entry(index)
+                    .and_modify(|l| {
+                        l.flags = l.flags.and(f.flags);
+                        l.masked &= f.masked;
+                    })
+                    .or_insert(StageLookup {
+                        index,
+                        flags: f.flags,
+                        alternate: f.alternate,
+                        masked: f.masked,
+                    });
+            }
         }
-        for index in
-            lookup_indices_for_feature_in_scripts(gsub, f.tag, script_priority).unwrap_or_default()
-        {
-            lookups
-                .entry(index)
-                .and_modify(|l| {
-                    l.flags = l.flags.and(f.flags);
-                    l.masked &= f.masked;
-                })
-                .or_insert(StageLookup {
-                    index,
-                    flags: f.flags,
-                    alternate: f.alternate,
-                    masked: f.masked,
-                });
-        }
-    }
-    let lookups: Vec<StageLookup> = lookups.into_values().collect();
+        lookups.into_values().map(StageLookup::planned).collect()
+    });
+    let lookups: Vec<StageLookup> = planned.iter().map(StageLookup::from_planned).collect();
     apply_gsub_stage(gsub, &lookups, glyphs, gdef, mask, budget);
 }
 

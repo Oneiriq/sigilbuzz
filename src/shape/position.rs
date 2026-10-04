@@ -40,6 +40,7 @@ use crate::buffer::{Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
 use crate::font::{GlyphValue, InstanceCache, Known};
+use crate::ot::layout_select::stage_kind;
 use crate::tables::gdef::Gdef;
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::layout::{GlyphClasses, MatchGlyph};
@@ -197,10 +198,25 @@ pub(super) fn position(
                 if seg.range.is_empty() {
                     continue;
                 }
-                let required = required_lookups(gpos, seg.script_priority);
-                let lookups = gpos::stage_lookups(input.features, horizontal, &required, |tag| {
-                    lookups_for(gpos, tag, seg.script_priority)
-                });
+                // The stage's lookups, merged once per script, language,
+                // direction and feature list and kept by the font.
+                let spec = [stage_kind::GPOS, u64::from(horizontal)];
+                let prio = seg.script_priority;
+                let planned = gpos
+                    .layout_view()
+                    .stage_plan(prio, input.features, &spec, || {
+                        let required = required_lookups(gpos, prio);
+                        gpos::stage_lookups(input.features, horizontal, &required, |tag| {
+                            lookups_for(gpos, tag, prio)
+                        })
+                        .into_iter()
+                        .map(gpos::StageLookup::planned)
+                        .collect()
+                    });
+                let lookups: Vec<gpos::StageLookup> = planned
+                    .iter()
+                    .map(gpos::StageLookup::from_planned)
+                    .collect();
                 let (Some(seg_glyphs), Some(seg_slots)) = (
                     glyphs.get_mut(seg.range.clone()),
                     slots.get_mut(seg.range.clone()),

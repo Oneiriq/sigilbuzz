@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use super::coverage::Coverage;
 use super::lookup_list::Lookup;
 use super::skip_iter::LayoutTable;
-use crate::ot::layout_select::FeatureMaps;
+use crate::ot::layout_select::{FeatureMaps, StagePlans};
 use crate::sync::OnceBox;
 
 /// Glyph-id bits each of the digest's three masks hashes on.
@@ -358,11 +358,13 @@ impl core::fmt::Debug for LookupAccels {
 }
 
 /// What a [`crate::Font`] keeps for one GSUB or GPOS table: the lookup
-/// accelerators and the resolved language systems.
+/// accelerators, the resolved language systems, and the merged stage
+/// plans.
 #[derive(Debug)]
 pub(crate) struct LayoutCache {
     pub(crate) accels: LookupAccels,
     pub(crate) maps: FeatureMaps,
+    pub(crate) plans: StagePlans,
 }
 
 impl LayoutCache {
@@ -371,12 +373,13 @@ impl LayoutCache {
         Self {
             accels: LookupAccels::new(table, lookup_count),
             maps: FeatureMaps::new(),
+            plans: StagePlans::new(),
         }
     }
 
     /// Heap bytes the cache holds.
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.accels.heap_bytes() + self.maps.heap_bytes()
+        self.accels.heap_bytes() + self.maps.heap_bytes() + self.plans.heap_bytes()
     }
 }
 

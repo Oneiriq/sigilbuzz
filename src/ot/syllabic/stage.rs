@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use super::GlyphInfo;
 use crate::buffer::Glyph;
+use crate::ot::layout_select::{stage_kind, PlannedLookup};
 use crate::shape::{Feature, SyllabicGsub};
 use crate::tables::layout::skip_iter::match_prop;
 use crate::tables::layout::Joiners;
@@ -315,10 +316,37 @@ pub(crate) fn apply_stage(
     if glyphs.len() != info.len() || glyphs.is_empty() || glyphs.len() > MAX_SLOTS {
         return;
     }
-    let lookups = stage_lookups(runner, script_priority, features, user);
-    if lookups.is_empty() {
+    // The stage's lookups, merged once per script, language, feature
+    // list and stage and kept by the font.
+    let spec: Vec<u64> = core::iter::once(stage_kind::SYLLABIC)
+        .chain(features.iter().flat_map(|f| {
+            [
+                u64::from(u32::from_be_bytes(f.tag)) << 8 | u64::from(f.flags.0),
+                u64::from(f.mask),
+            ]
+        }))
+        .collect();
+    let view = runner.gsub().layout_view();
+    let planned = view.stage_plan(script_priority, user, &spec, || {
+        stage_lookups(runner, script_priority, features, user)
+            .into_iter()
+            .map(|l| PlannedLookup {
+                mask: l.mask,
+                joiners: l.joiners,
+                per_syllable: l.per_syllable,
+                ..PlannedLookup::new(l.index)
+            })
+            .collect()
+    });
+    if planned.is_empty() {
         return;
     }
+    let lookups = planned.iter().map(|p| StageLookup {
+        index: p.index,
+        mask: p.mask,
+        joiners: p.joiners,
+        per_syllable: p.per_syllable,
+    });
 
     let mut slots: Vec<Slot> = glyphs
         .iter_mut()

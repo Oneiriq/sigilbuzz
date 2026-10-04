@@ -38,6 +38,7 @@ use super::{
     MAX_NESTED_DEPTH,
 };
 use crate::buffer::Glyph;
+use crate::ot::layout_select::PlannedLookup;
 use crate::tables::gdef::Gdef;
 use crate::tables::gpos::{
     lookup_type as gpos_lt, ChainContextPos, ContextPos, PairPos, SinglePos, ValueRecord,
@@ -112,6 +113,24 @@ pub(super) fn stage_lookups(
     }
     out.sort_by_key(|l| l.index);
     out
+}
+
+impl StageLookup {
+    /// The lookup as a stage plan keeps it.
+    pub(super) fn planned(self) -> PlannedLookup {
+        PlannedLookup {
+            joiners: self.joiners,
+            ..PlannedLookup::new(self.index)
+        }
+    }
+
+    /// The lookup a stage plan kept.
+    pub(super) fn from_planned(p: &PlannedLookup) -> Self {
+        Self {
+            index: p.index,
+            joiners: p.joiners,
+        }
+    }
 }
 
 /// Shared inputs of every lookup in the stage.
