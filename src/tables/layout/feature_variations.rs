@@ -963,6 +963,11 @@ impl<'a> ActiveFeatures<'a> {
         self.list.get(index)
     }
 
+    /// The FeatureVariations record selected, if any.
+    pub(crate) fn record(&self) -> Option<u32> {
+        self.variation.map(|(_, record)| record)
+    }
+
     /// Index of the first feature record tagged `tag`, as HarfBuzz's
     /// `find_feature_index` scans the FeatureList.
     pub(crate) fn find(&self, tag: [u8; 4]) -> Option<u16> {

@@ -68,6 +68,7 @@ mod font;
 mod language;
 mod owned;
 mod shape;
+mod sync;
 mod ttc;
 
 // Public-but-experimental: the OpenType Layout module exposes the

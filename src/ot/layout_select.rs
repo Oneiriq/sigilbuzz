@@ -34,8 +34,11 @@
 //!
 //! [`Script::select_lang_sys`]: crate::tables::layout::Script::select_lang_sys
 
+use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use crate::sync::OnceBox;
 use crate::tables::layout::{ActiveFeatures, LangSys, ScriptList};
 
 /// Script tags HarfBuzz falls back to, in order, when none of the
@@ -211,6 +214,357 @@ fn sorted(mut indices: Vec<u16>) -> Vec<u16> {
     indices.sort_unstable();
     indices.dedup();
     indices
+}
+
+/// What feature resolution reads of a GSUB or GPOS view: its lists,
+/// its language preference, and the font's cache of resolved language
+/// systems, if the view has one.
+#[derive(Clone, Copy)]
+pub(crate) struct LayoutView<'a> {
+    pub(crate) script_list: ScriptList<'a>,
+    pub(crate) features: ActiveFeatures<'a>,
+    pub(crate) language_tags: &'a [[u8; 4]],
+    pub(crate) maps: Option<&'a FeatureMaps>,
+}
+
+impl LayoutView<'_> {
+    /// [`feature_lookup_indices`] for this view.
+    pub(crate) fn feature_lookups(
+        &self,
+        tag: [u8; 4],
+        script_priority: &[[u8; 4]],
+    ) -> Option<Vec<u16>> {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.feature_lookups(tag),
+            None => feature_lookup_indices(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                tag,
+                script_priority,
+            ),
+        }
+    }
+
+    /// [`lists_feature`] for this view.
+    pub(crate) fn lists(&self, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.lists(tag),
+            None => lists_feature(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                tag,
+                script_priority,
+            ),
+        }
+    }
+
+    /// [`listed_feature_lookups`] for this view.
+    pub(crate) fn listed_lookups(&self, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Vec<u16> {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.listed_lookups(tag),
+            None => listed_feature_lookups(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                tag,
+                script_priority,
+            ),
+        }
+    }
+
+    /// [`required_feature`] for this view.
+    pub(crate) fn required(&self, script_priority: &[[u8; 4]]) -> Option<([u8; 4], Vec<u16>)> {
+        match self.map(script_priority).as_deref() {
+            Some(map) => map.required.clone(),
+            None => required_feature(
+                &self.script_list,
+                &self.features,
+                self.language_tags,
+                script_priority,
+            ),
+        }
+    }
+
+    /// The resolved language system of a run whose candidate script
+    /// tags are `script_priority`, from the font's cache: `None`
+    /// without one, or when the language system is too large to keep.
+    fn map(&self, script_priority: &[[u8; 4]]) -> Option<Cow<'_, FeatureMap>> {
+        let maps = self.maps?;
+        let key = MapKey {
+            script_priority,
+            language_tags: self.language_tags,
+            record: self.features.record(),
+        };
+        maps.get(&key, || FeatureMap::build(self, script_priority))
+    }
+}
+
+/// Feature indices a language system may list for its resolution to be
+/// kept. Real fonts list a few dozen.
+const MAX_MAP_FEATURES: usize = 1024;
+/// Lookup indices one resolution may keep, over all its features.
+const MAX_MAP_LOOKUPS: usize = 1 << 14;
+/// Resolutions one table keeps: one per combination of script tags,
+/// language and FeatureVariations record a font is shaped with.
+const MAP_SLOTS: usize = 16;
+
+/// One language system resolved once, so each feature query of a
+/// shaping call is a binary search instead of a walk of the script
+/// list, the language system and its features. Answers every query
+/// exactly as the walk does (see [`feature_lookup_indices`],
+/// [`lists_feature`], [`listed_feature_lookups`] and
+/// [`required_feature`]).
+#[derive(Debug, Clone)]
+pub(crate) struct FeatureMap {
+    /// The table has a usable script and language system.
+    lang_sys: bool,
+    /// The tags of the language system's features and of its required
+    /// feature, sorted.
+    entries: Vec<MapEntry>,
+    /// [`required_feature`].
+    required: Option<([u8; 4], Vec<u16>)>,
+    /// The lookups of the first `vert` feature in the FeatureList, which
+    /// the global search finds.
+    global_vert: Option<Vec<u16>>,
+}
+
+#[derive(Debug, Clone)]
+struct MapEntry {
+    tag: [u8; 4],
+    /// The language system lists the tag (its required feature does
+    /// not count).
+    listed: bool,
+    /// [`lang_sys_lookups`] for the tag.
+    lookups: Option<Vec<u16>>,
+    /// The lookups of the first listed feature with the tag, as
+    /// [`listed_feature_lookups`] reads them.
+    listed_lookups: Vec<u16>,
+}
+
+impl FeatureMap {
+    /// Resolves the language system `view` picks for `script_priority`,
+    /// or `None` when it lists too many features or lookups to keep.
+    fn build(view: &LayoutView<'_>, script_priority: &[[u8; 4]]) -> Option<Self> {
+        let features = &view.features;
+        let lookups_of = |index: u16| -> Option<Vec<u16>> {
+            features
+                .get(index)
+                .map(|(_, f)| sorted(f.lookup_indices().collect()))
+        };
+        let global_vert = features
+            .find(*b"vert")
+            .map(|index| lookups_of(index).unwrap_or_default());
+        let lang_sys = select_lang_sys(&view.script_list, view.language_tags, script_priority);
+        let Some(lang_sys) = lang_sys else {
+            return Some(Self {
+                lang_sys: false,
+                entries: Vec::new(),
+                required: None,
+                global_vert,
+            });
+        };
+        // The first listed feature of each tag, and the first one whose
+        // table reads.
+        let mut firsts: BTreeMap<[u8; 4], (Option<u16>, Option<u16>)> = BTreeMap::new();
+        for (n, index) in lang_sys.feature_indices().enumerate() {
+            if n >= MAX_MAP_FEATURES {
+                return None;
+            }
+            let Some(tag) = features.tag(index) else {
+                continue;
+            };
+            let first = firsts.entry(tag).or_insert((Some(index), None));
+            if first.1.is_none() && features.get(index).is_some() {
+                first.1 = Some(index);
+            }
+        }
+        let required_index = lang_sys.required_feature_index();
+        let required_tag = required_index.and_then(|index| features.tag(index));
+        if let Some(tag) = required_tag {
+            firsts.entry(tag).or_insert((None, None));
+        }
+        let required = required_index.and_then(|index| {
+            let (tag, f) = features.get(index)?;
+            Some((tag, sorted(f.lookup_indices().collect())))
+        });
+        let mut total = 0usize;
+        let mut entries = Vec::with_capacity(firsts.len());
+        for (tag, (first_listed, first_read)) in firsts {
+            // `lang_sys_lookups`: the required feature when it has the
+            // tag and reads, and the first listed one that reads.
+            let from_required = required_index
+                .filter(|_| required_tag == Some(tag))
+                .and_then(|index| features.get(index));
+            let from_listed = first_read.and_then(|index| features.get(index));
+            let lookups = (from_required.is_some() || from_listed.is_some()).then(|| {
+                sorted(
+                    from_required
+                        .into_iter()
+                        .chain(from_listed)
+                        .flat_map(|(_, f)| f.lookup_indices())
+                        .collect(),
+                )
+            });
+            let listed_lookups = first_listed.and_then(lookups_of).unwrap_or_default();
+            total = total
+                .saturating_add(lookups.as_ref().map_or(0, Vec::len))
+                .saturating_add(listed_lookups.len());
+            if total > MAX_MAP_LOOKUPS {
+                return None;
+            }
+            entries.push(MapEntry {
+                tag,
+                listed: first_listed.is_some(),
+                lookups,
+                listed_lookups,
+            });
+        }
+        Some(Self {
+            lang_sys: true,
+            entries,
+            required,
+            global_vert,
+        })
+    }
+
+    fn entry(&self, tag: [u8; 4]) -> Option<&MapEntry> {
+        self.entries
+            .binary_search_by_key(&tag, |e| e.tag)
+            .ok()
+            .and_then(|i| self.entries.get(i))
+    }
+
+    fn feature_lookups(&self, tag: [u8; 4]) -> Option<Vec<u16>> {
+        if let Some(lookups) = self.entry(tag).and_then(|e| e.lookups.as_ref()) {
+            return Some(lookups.clone());
+        }
+        if GLOBAL_SEARCH_FEATURES.contains(&tag) {
+            if let Some(lookups) = &self.global_vert {
+                return Some(lookups.clone());
+            }
+        }
+        self.lang_sys.then(Vec::new)
+    }
+
+    fn lists(&self, tag: [u8; 4]) -> bool {
+        self.entry(tag).is_some_and(|e| e.listed)
+    }
+
+    fn listed_lookups(&self, tag: [u8; 4]) -> Vec<u16> {
+        match self.entry(tag).filter(|e| e.listed) {
+            Some(e) => e.listed_lookups.clone(),
+            None if GLOBAL_SEARCH_FEATURES.contains(&tag) => {
+                self.global_vert.clone().unwrap_or_default()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Heap bytes the map holds.
+    fn heap_bytes(&self) -> usize {
+        let lookups = |v: &Vec<u16>| v.capacity() * 2;
+        self.entries.capacity() * core::mem::size_of::<MapEntry>()
+            + self
+                .entries
+                .iter()
+                .map(|e| e.lookups.as_ref().map_or(0, lookups) + lookups(&e.listed_lookups))
+                .sum::<usize>()
+            + self.required.as_ref().map_or(0, |(_, v)| lookups(v))
+            + self.global_vert.as_ref().map_or(0, lookups)
+    }
+}
+
+/// What a [`FeatureMap`] depends on besides the table.
+struct MapKey<'k> {
+    script_priority: &'k [[u8; 4]],
+    language_tags: &'k [[u8; 4]],
+    record: Option<u32>,
+}
+
+/// A kept [`FeatureMap`] with its key; `None` for a language system too
+/// large to keep, which is then walked each time.
+struct KeyedMap {
+    script_priority: Vec<[u8; 4]>,
+    language_tags: Vec<[u8; 4]>,
+    record: Option<u32>,
+    map: Option<FeatureMap>,
+}
+
+impl KeyedMap {
+    fn matches(&self, key: &MapKey<'_>) -> bool {
+        self.script_priority == key.script_priority
+            && self.language_tags == key.language_tags
+            && self.record == key.record
+    }
+}
+
+/// The language systems one table has resolved, kept by a
+/// [`crate::Font`] across shaping calls: at most [`MAP_SLOTS`] of them.
+/// Past that, a run's language system is walked each time, as it is
+/// without a cache.
+pub(crate) struct FeatureMaps {
+    slots: [OnceBox<KeyedMap>; MAP_SLOTS],
+}
+
+impl FeatureMaps {
+    /// No language system resolved yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| OnceBox::new()),
+        }
+    }
+
+    /// The map for `key`, built with `build` the first time, or `None`
+    /// when it is too large to keep.
+    fn get(
+        &self,
+        key: &MapKey<'_>,
+        build: impl Fn() -> Option<FeatureMap>,
+    ) -> Option<Cow<'_, FeatureMap>> {
+        for slot in &self.slots {
+            let keyed = match slot.get() {
+                Some(keyed) => keyed,
+                None => slot.get_or_init(|| KeyedMap {
+                    script_priority: key.script_priority.to_vec(),
+                    language_tags: key.language_tags.to_vec(),
+                    record: key.record,
+                    map: build(),
+                }),
+            };
+            if keyed.matches(key) {
+                return keyed.map.as_ref().map(Cow::Borrowed);
+            }
+        }
+        build().map(Cow::Owned)
+    }
+
+    /// Heap bytes the kept maps hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .filter_map(OnceBox::get)
+            .map(|k| {
+                core::mem::size_of::<KeyedMap>()
+                    + (k.script_priority.capacity() + k.language_tags.capacity()) * 4
+                    + k.map.as_ref().map_or(0, FeatureMap::heap_bytes)
+            })
+            .sum()
+    }
+}
+
+impl Default for FeatureMaps {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Debug for FeatureMaps {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kept = self.slots.iter().filter(|s| s.get().is_some()).count();
+        f.debug_struct("FeatureMaps").field("kept", &kept).finish()
+    }
 }
 
 #[cfg(test)]

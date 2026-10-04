@@ -127,6 +127,24 @@ impl<'a> Coverage<'a> {
         self.index_of(glyph_id).is_some()
     }
 
+    /// Calls `f(first, last)` for every glyph array entry (as a range
+    /// of one) or range record, in table order. Every glyph
+    /// [`Self::index_of`] can find lies in one of them, sorted or not.
+    pub(crate) fn for_each_range(&self, mut f: impl FnMut(u16, u16)) {
+        for i in 0..self.count {
+            match self.format {
+                Format::Format1 => {
+                    let g = self.glyph_at(i);
+                    f(g, g);
+                }
+                Format::Format2 => {
+                    let (start, end, _) = self.range_at(i);
+                    f(start, end);
+                }
+            }
+        }
+    }
+
     fn glyph_at(&self, i: u16) -> u16 {
         let off = self.body_off + i as usize * 2;
         u16::from_be_bytes([self.data[off], self.data[off + 1]])

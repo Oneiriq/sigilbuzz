@@ -208,27 +208,17 @@ pub(super) fn apply_stage_zero(
     if glyphs.is_empty() {
         return;
     }
-    let features = gsub.features();
+    let view = gsub.layout_view();
     // A required `rvrn` runs here too, in the stage of its tag.
-    let required = crate::ot::layout_select::required_feature(
-        gsub.script_list(),
-        &features,
-        gsub.language_tags(),
-        script_priority,
-    )
-    .filter(|&(tag, _)| tag == RVRN || !plan.applies(tag))
-    .map(|(_, lookups)| lookups)
-    .unwrap_or_default();
+    let required = view
+        .required(script_priority)
+        .filter(|&(tag, _)| tag == RVRN || !plan.applies(tag))
+        .map(|(_, lookups)| lookups)
+        .unwrap_or_default();
     let rvrn = if feature_disabled(plan.features, RVRN) {
         Vec::new()
     } else {
-        crate::ot::layout_select::listed_feature_lookups(
-            gsub.script_list(),
-            &features,
-            gsub.language_tags(),
-            RVRN,
-            script_priority,
-        )
+        view.listed_lookups(RVRN, script_priority)
     };
     if required.is_empty() && rvrn.is_empty() {
         return;

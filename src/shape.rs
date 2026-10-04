@@ -131,6 +131,7 @@ mod hangul;
 mod ignorables;
 mod joiners;
 mod kern;
+mod lazy;
 mod lig;
 mod native_direction;
 mod normalize;

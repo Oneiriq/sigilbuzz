@@ -34,7 +34,11 @@
 //! identically to the static default instance, and so does one whose
 //! coords all round to zero.
 
+mod cache;
+
 use alloc::vec::Vec;
+
+pub(crate) use cache::FontCaches;
 
 use crate::error::Result;
 use crate::face::Face;
@@ -72,6 +76,8 @@ pub struct Font<'a> {
     face: Face<'a>,
     size: f32,
     coords: &'a [f32],
+    /// Lookup accelerators and metrics kept between shaping calls.
+    caches: FontCaches,
 }
 
 impl<'a> Font<'a> {
@@ -88,6 +94,7 @@ impl<'a> Font<'a> {
             face,
             size,
             coords: &[],
+            caches: FontCaches::new(),
         }
     }
 
@@ -119,6 +126,7 @@ impl<'a> Font<'a> {
             face: self.face.clone(),
             size,
             coords: self.coords,
+            caches: self.caches.clone(),
         }
     }
 
@@ -138,6 +146,7 @@ impl<'a> Font<'a> {
     #[must_use]
     pub fn with_coords(self, coords: &'a [f32]) -> Self {
         Self {
+            caches: self.caches.for_other_coords(),
             face: self.face,
             size: self.size,
             coords,
@@ -149,6 +158,12 @@ impl<'a> Font<'a> {
     /// pixels: `pixels = advance * font.size() / font.units_per_em()?`.
     pub fn units_per_em(&self) -> Result<u16> {
         Ok(self.face.head()?.units_per_em)
+    }
+
+    /// The lookup accelerators and metrics the font keeps between
+    /// shaping calls (see the `cache` module).
+    pub(crate) fn caches(&self) -> &FontCaches {
+        &self.caches
     }
 }
 

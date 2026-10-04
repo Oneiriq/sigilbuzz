@@ -6,7 +6,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::arabic_joining::Action;
-use super::gsub::{apply_gsub_lookup, apply_gsub_lookups_masked, apply_gsub_stage, StageLookup};
+use super::gsub::{
+    apply_gsub_lookup, apply_gsub_lookups_masked, apply_gsub_stage, gsub_lookup_may_apply,
+    StageLookup,
+};
 use super::joiners::FeatureFlags;
 use super::{feature_disabled, feature_enabled, Feature, JoinerTable, LookupBudget};
 use crate::buffer::Glyph;
@@ -431,7 +434,12 @@ pub(super) fn apply_arabic_positional_features(
         else {
             continue;
         };
-        if lookup_indices.is_empty() {
+        // Lookups that cannot start at any glyph leave the run as it
+        // is, so the mask is not worth building.
+        if !lookup_indices
+            .iter()
+            .any(|&index| gsub_lookup_may_apply(gsub, index, glyphs))
+        {
             continue;
         }
         let mask: Vec<bool> = glyphs.iter().map(|g| action.is_on(g)).collect();
@@ -451,13 +459,7 @@ fn lookup_indices_for_feature_in_scripts(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Option<Vec<u16>> {
-    crate::ot::layout_select::feature_lookup_indices(
-        gsub.script_list(),
-        &gsub.features(),
-        gsub.language_tags(),
-        tag,
-        script_priority,
-    )
+    gsub.layout_view().feature_lookups(tag, script_priority)
 }
 
 /// Asks "would feature `tag`'s lookups substitute starting at the

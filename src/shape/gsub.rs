@@ -21,16 +21,14 @@ use alloc::vec::Vec;
 
 use super::gsub_buffer::GsubBuffer;
 use super::gsub_parsed::{
-    apply_parsed_lookup_at, cursor_in_digest, filter_for_lookup, lookup_might_apply,
-    parse_lookup_subtables, parsed_has_full_digest, ParsedGsubSubtable,
+    apply_parsed_lookup_at, filter_for_lookup, lazy_subtables, GsubSubtables, ParsedGsubSubtable,
 };
 use super::joiners::FeatureFlags;
 use super::{resolve_extension, LookupBudget, MAX_NESTED_DEPTH};
 use crate::buffer::{unicode_prop, Glyph};
 use crate::tables::gdef::Gdef;
-use crate::tables::gsub::{
-    lookup_type as gsub_lt, ChainContextAny, Context as GsubContext, ReverseChain,
-};
+use crate::tables::gsub::{lookup_type as gsub_lt, ChainContextAny, Context as GsubContext};
+use crate::tables::layout::accel::Accel;
 use crate::tables::layout::skip_iter::apply_nested;
 use crate::tables::layout::{
     InputMatch, LayoutTable, Lookup, MatchContext, MatchGlyph, SequenceLookupRecord,
@@ -97,6 +95,14 @@ pub(super) fn apply_gsub_lookups_masked(
     flags: FeatureFlags,
     budget: &mut LookupBudget,
 ) -> Vec<bool> {
+    // Lookups that cannot start at any glyph change nothing, so when
+    // none can, the run is left as it is without building a buffer.
+    if !lookups
+        .iter()
+        .any(|&index| gsub_lookup_may_apply(gsub, index, glyphs))
+    {
+        return alloc::vec![false; glyphs.len()];
+    }
     let cx = GsubCx { gsub, gdef, flags };
     let mut buf = GsubBuffer::new(
         core::mem::take(glyphs),
@@ -106,7 +112,7 @@ pub(super) fn apply_gsub_lookups_masked(
     );
     for &index in lookups {
         if let Some(lookup) = gsub.lookup_list().get(index) {
-            apply_lookup_to_buffer(&cx, &lookup, &mut buf, 0, budget);
+            apply_lookup_to_buffer(&cx, index, lookup, &mut buf, 0, budget);
         }
     }
     let (out, substituted) = buf.into_glyphs_and_substituted();
@@ -152,7 +158,7 @@ pub(super) fn apply_gsub_stage(
                 flags: l.flags,
             };
             buf.set_mask_active(l.masked);
-            apply_lookup_to_buffer(&cx, &lookup, &mut buf, l.alternate, budget);
+            apply_lookup_to_buffer(&cx, l.index, lookup, &mut buf, l.alternate, budget);
         }
     }
     *glyphs = buf.into_glyphs();
@@ -187,6 +193,9 @@ pub(super) fn apply_gsub_lookup(
     let Some(lookup) = gsub.lookup_list().get(lookup_idx) else {
         return;
     };
+    if !lookup_may_apply(&gsub.lookup_accel(lookup_idx, &lookup), glyphs) {
+        return;
+    }
     let cx = GsubCx { gsub, gdef, flags };
     let mut buf = GsubBuffer::new(
         core::mem::take(glyphs),
@@ -194,58 +203,78 @@ pub(super) fn apply_gsub_lookup(
         gsub.cluster_level(),
         gsub.unsafe_to_concat(),
     );
-    apply_lookup_to_buffer(&cx, &lookup, &mut buf, alternate_index, budget);
+    apply_lookup_to_buffer(&cx, lookup_idx, lookup, &mut buf, alternate_index, budget);
     *glyphs = buf.into_glyphs();
 }
 
-/// One pass of `lookup` over `buf`, HarfBuzz's
-/// `apply_string`: `apply_forward`, whose cursor stops at each glyph
-/// the feature is on at and the lookup flags keep, and moves on by one
-/// wherever no subtable applies, or `apply_backward` for a reverse
-/// chaining lookup.
+/// True when some glyph of `glyphs` may start a subtable of the lookup
+/// `accel` belongs to. When none can, the lookup changes nothing, so
+/// HarfBuzz skips it (`hb_ot_map_t::apply` tests the buffer's digest)
+/// and so does every pass here.
+pub(super) fn lookup_may_apply(accel: &Accel<'_, '_>, glyphs: &[Glyph]) -> bool {
+    accel.may_apply(glyphs.iter().map(|g| g.glyph_id as u16))
+}
+
+/// True when GSUB lookup `index` may change `glyphs` (see
+/// [`lookup_may_apply`]); false for a lookup the table does not have.
+pub(crate) fn gsub_lookup_may_apply(gsub: &Gsub<'_>, index: u16, glyphs: &[Glyph]) -> bool {
+    gsub.lookup_list()
+        .get(index)
+        .is_some_and(|lookup| lookup_may_apply(&gsub.lookup_accel(index, &lookup), glyphs))
+}
+
+/// One pass of `lookup`, lookup `index` of the table, over `buf`,
+/// HarfBuzz's `apply_string`: `apply_forward`, whose cursor stops at
+/// each glyph the feature is on at, the lookup flags keep, and the
+/// lookup's accelerator admits, and moves on by one wherever no
+/// subtable applies, or `apply_backward` for a reverse chaining lookup.
 fn apply_lookup_to_buffer(
     cx: &GsubCx<'_>,
-    lookup: &Lookup<'_>,
+    index: u16,
+    lookup: Lookup<'_>,
     buf: &mut GsubBuffer,
     alternate_index: u16,
     budget: &mut LookupBudget,
 ) {
-    // Pre-parse subtables once so the cursor walk below doesn't
-    // re-parse them at every position. ChainContextAny / Context /
-    // Ligature parsers each allocate three or four `Vec`s for their
-    // coverage / substitution arrays; doing that per cursor on a 80-
-    // glyph Devanagari run is what made the bench look like a
-    // quadratic explosion.
-    let parsed = parse_lookup_subtables(lookup, lookup.lookup_type());
     // Run-level "would_apply" precheck. If no glyph in the run can
-    // possibly trigger any subtable's primary coverage, the cursor
-    // walk has nothing to do.
-    if parsed.is_empty() || !lookup_might_apply(&parsed, buf.glyphs()) {
+    // possibly start any subtable, the cursor walk has nothing to do,
+    // and no subtable is parsed.
+    let accel = cx.gsub.lookup_accel(index, &lookup);
+    if !lookup_may_apply(&accel, buf.glyphs()) {
         return;
     }
-    let mcx = cx.match_cx(lookup);
-    if effective_type(lookup) == gsub_lt::REVERSE_CHAINED {
-        apply_reverse_chain(&parsed, buf, &mcx);
+    // Each subtable is parsed the first time a glyph its coverage may
+    // hold reaches it, and kept for the rest of the walk. Parsing a
+    // context subtable allocates its rule arrays, so parsing them all
+    // at every cursor made Devanagari look quadratic, and parsing them
+    // all up front cost a short run more than shaping it.
+    let mut subtables = lazy_subtables(lookup);
+    let mcx = cx.match_cx(&lookup);
+    if effective_type(&lookup) == gsub_lt::REVERSE_CHAINED {
+        apply_reverse_chain(&mut subtables, &accel, buf, &mcx);
         return;
     }
-    // With the "digest" path the cursor only stops at glyphs in the
-    // union of the subtables' primary coverages. It falls back to
-    // visiting every position when a subtable's primary coverage
-    // isn't a single `Coverage` table (chain-context format 1/2).
-    let use_digest = parsed_has_full_digest(&parsed);
+    // The cursor only stops at glyphs the lookup's digest admits: the
+    // others start no subtable.
     buf.clear_output();
     while let Some(&g) = buf.cur() {
         let m = MatchGlyph::from(&g);
-        if (use_digest && !cursor_in_digest(&parsed, m.id))
-            || !buf.cur_in_mask()
-            || mcx.filter().is_skipped(m)
-        {
+        if !accel.may_have(m.id) || !buf.cur_in_mask() || mcx.filter().is_skipped(m) {
             buf.next_glyph();
             continue;
         }
         let (cursor, len) = (buf.cursor(), buf.len());
-        let applied =
-            apply_parsed_lookup_at(cx, &parsed, &mcx, buf, 0, alternate_index, false, budget);
+        let applied = apply_parsed_lookup_at(
+            cx,
+            &mut subtables,
+            &accel,
+            &mcx,
+            buf,
+            0,
+            alternate_index,
+            false,
+            budget,
+        );
         // A subtable that matches but produces zero substitutions
         // (common in Amiri rlig: a context with `SubstCount=0` is a
         // "no-op match" that blocks later subtables at this cursor)
@@ -279,12 +308,29 @@ fn apply_gsub_lookup_at(
         return None;
     }
     let lookup = cx.gsub.lookup_list().get(lookup_idx)?;
-    let parsed = parse_lookup_subtables(&lookup, lookup.lookup_type());
+    let accel = cx.gsub.lookup_accel(lookup_idx, &lookup);
+    // A glyph no subtable can start at: nothing applies, and nothing
+    // needs parsing.
+    if !accel.may_have(buf.cur()?.glyph_id as u16) {
+        return None;
+    }
+    let mut subtables = lazy_subtables(lookup);
     let mcx = cx.match_cx(&lookup);
     // Nested alternate lookups always pick index 0: feature
     // value-based selection is a top-level concept and does not
     // propagate into a recursed lookup.
-    apply_parsed_lookup_at(cx, &parsed, &mcx, buf, depth, 0, true, budget).then_some(())
+    apply_parsed_lookup_at(
+        cx,
+        &mut subtables,
+        &accel,
+        &mcx,
+        buf,
+        depth,
+        0,
+        true,
+        budget,
+    )
+    .then_some(())
 }
 
 /// A GSUB contextual subtable at the cursor: matches the rule and runs
@@ -401,34 +447,39 @@ pub(super) fn substitute_glyph(glyph: &mut Glyph, gid: u16) {
 /// `apply_backward`: the cursor walks the run right to left, and at
 /// every glyph the lookup flags keep, the first subtable whose context
 /// matches substitutes it. Glyphs after the cursor are already
-/// substituted, which is what the lookahead sees.
+/// substituted, which is what the lookahead sees. Subtables that are
+/// not reverse chaining ones (an Extension can wrap another type) never
+/// apply here, and a subtable whose coverage `accel` shows cannot hold
+/// the glyph is passed over unparsed.
 fn apply_reverse_chain(
-    parsed: &[ParsedGsubSubtable<'_>],
+    subtables: &mut GsubSubtables<'_>,
+    accel: &Accel<'_, '_>,
     buf: &mut GsubBuffer,
     mcx: &MatchContext<'_>,
 ) {
-    let subtables: Vec<&ReverseChain<'_>> = parsed
-        .iter()
-        .filter_map(|s| match s {
-            ParsedGsubSubtable::ReverseChained(rc) => Some(rc),
-            _ => None,
-        })
-        .collect();
-    if subtables.is_empty() {
-        return;
-    }
     buf.sync();
     for i in (0..buf.len()).rev() {
         let Some(g) = buf.get(i) else {
             continue;
         };
+        let id = g.glyph_id as u16;
         if !buf.in_mask_at(i) || mcx.filter().is_skipped(MatchGlyph::from(g)) {
             continue;
         }
         let mut ops = buf.take_flag_ops();
-        let substitute = subtables
-            .iter()
-            .find_map(|rc| rc.apply_at_in(&*buf, i, mcx, &mut ops));
+        let mut substitute = None;
+        for index in 0..subtables.len() {
+            if !accel.subtable_may_start(subtables.is_parsed(index), usize::from(index), id) {
+                continue;
+            }
+            let Some(ParsedGsubSubtable::ReverseChained(rc)) = subtables.get(index) else {
+                continue;
+            };
+            substitute = rc.apply_at_in(&*buf, i, mcx, &mut ops);
+            if substitute.is_some() {
+                break;
+            }
+        }
         buf.apply_flag_ops(ops);
         if let Some(out) = substitute {
             buf.replace_glyph_at(i, out);

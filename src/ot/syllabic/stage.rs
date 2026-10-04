@@ -130,15 +130,11 @@ pub(crate) fn feature_lookups(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> Vec<u16> {
-    let gsub = runner.gsub();
-    crate::ot::layout_select::feature_lookup_indices(
-        gsub.script_list(),
-        &gsub.features(),
-        gsub.language_tags(),
-        tag,
-        script_priority,
-    )
-    .unwrap_or_default()
+    runner
+        .gsub()
+        .layout_view()
+        .feature_lookups(tag, script_priority)
+        .unwrap_or_default()
 }
 
 /// True when the language system the run selects lists `tag` and the
@@ -155,15 +151,7 @@ pub(crate) fn has_feature(
     tag: [u8; 4],
     script_priority: &[[u8; 4]],
 ) -> bool {
-    let gsub = runner.gsub();
-    !user_disabled(features, tag)
-        && crate::ot::layout_select::lists_feature(
-            gsub.script_list(),
-            &gsub.features(),
-            gsub.language_tags(),
-            tag,
-            script_priority,
-        )
+    !user_disabled(features, tag) && runner.gsub().layout_view().lists(tag, script_priority)
 }
 
 /// Adds the caller's features to a shaper's last stage, where HarfBuzz
@@ -242,18 +230,13 @@ fn stage_lookups(
     features: &[StageFeature],
     user: &[Feature],
 ) -> Vec<StageLookup> {
-    let gsub = runner.gsub();
-    let active = gsub.features();
+    let view = runner.gsub().layout_view();
     let enabled = || features.iter().filter(|f| !user_disabled(user, f.tag));
-    let required = crate::ot::layout_select::required_feature(
-        gsub.script_list(),
-        &active,
-        gsub.language_tags(),
-        script_priority,
-    )
-    .filter(|(tag, _)| enabled().any(|f| f.tag == *tag))
-    .map(|(_, indices)| indices)
-    .unwrap_or_default();
+    let required = view
+        .required(script_priority)
+        .filter(|(tag, _)| enabled().any(|f| f.tag == *tag))
+        .map(|(_, indices)| indices)
+        .unwrap_or_default();
     let mut lookups: Vec<StageLookup> = Vec::new();
     let mut add = |index: u16, mask: u32, joiners: Joiners, per_syllable: bool| match lookups
         .iter_mut()
@@ -274,13 +257,7 @@ fn stage_lookups(
         add(index, GLOBAL_MASK, Joiners::AUTO, false);
     }
     for f in enabled() {
-        let listed = crate::ot::layout_select::listed_feature_lookups(
-            gsub.script_list(),
-            &active,
-            gsub.language_tags(),
-            f.tag,
-            script_priority,
-        );
+        let listed = view.listed_lookups(f.tag, script_priority);
         let per_syllable = f.flags.contains(FeatureFlags::PER_SYLLABLE);
         for index in listed {
             add(index, f.mask, f.flags.joiners(), per_syllable);
@@ -362,6 +339,11 @@ pub(crate) fn apply_stage(
         })
         .collect();
     for lookup in lookups {
+        // A lookup none of whose subtables can start at a glyph of the
+        // run leaves the glyphs, and so their slots, as they are.
+        if !runner.may_apply(lookup.index, glyphs) {
+            continue;
+        }
         let joiners = lookup.joiners;
         let substituted: Vec<bool>;
         {

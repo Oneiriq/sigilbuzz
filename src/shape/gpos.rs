@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 
 use super::attach::{self, Attach, AttachSubtable, LookupCx};
 use super::glyph_flags::FlagCx;
+use super::lazy::LazySubtables;
 use super::{
     feature_disabled, filter_for_lookup, resolve_extension, Feature, LookupBudget, VarCtx,
     MAX_NESTED_DEPTH,
@@ -41,7 +42,8 @@ use crate::tables::gdef::Gdef;
 use crate::tables::gpos::{
     lookup_type as gpos_lt, ChainContextPos, ContextPos, PairPos, SinglePos, ValueRecord,
 };
-use crate::tables::layout::skip_iter::{apply_nested as apply_records, MaySkip, SUBTABLE_CACHES};
+use crate::tables::layout::accel::Accel;
+use crate::tables::layout::skip_iter::{apply_nested as apply_records, MaySkip};
 use crate::tables::layout::{
     InputMatch, Joiners, LayoutTable, Lookup, MatchContext, MatchGlyph, SequenceLookupRecord,
     SkipRules,
@@ -182,37 +184,40 @@ enum PosSubtable<'a> {
     Chain(ChainContextPos<'a>),
 }
 
-/// Parses a lookup's subtables, unwrapping Extension subtables and
-/// dropping the ones that fail to parse.
-fn parse_subtables<'a>(lookup: &Lookup<'a>) -> Vec<PosSubtable<'a>> {
-    let raw_lt = lookup.lookup_type();
-    let mut out = Vec::with_capacity(usize::from(lookup.subtable_count()));
-    for sub_idx in 0..lookup.subtable_count() {
-        let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
-            continue;
-        };
-        let (lt, inner) = if raw_lt == gpos_lt::EXTENSION {
-            match resolve_extension(bytes) {
-                Some(pair) => pair,
-                None => continue,
-            }
-        } else {
-            (raw_lt, bytes)
-        };
-        let parsed = match lt {
-            gpos_lt::SINGLE_ADJUSTMENT => SinglePos::parse(inner)
-                .ok()
-                .map(|s| PosSubtable::Single(s, inner)),
-            gpos_lt::PAIR_ADJUSTMENT => PairPos::parse(inner).ok().map(PosSubtable::Pair),
-            gpos_lt::CONTEXT => ContextPos::parse(inner).ok().map(PosSubtable::Context),
-            gpos_lt::CHAINED_CONTEXT => ChainContextPos::parse(inner).ok().map(PosSubtable::Chain),
-            lt => AttachSubtable::parse(lt, inner).map(PosSubtable::Attach),
-        };
-        if let Some(p) = parsed {
-            out.push(p);
-        }
+impl PosSubtable<'_> {
+    /// True for a class-based context subtable, the one kind whose
+    /// matching reads [`MatchContext::rule_set_digests`].
+    fn reads_rule_set_digests(&self) -> bool {
+        matches!(
+            self,
+            Self::Context(ContextPos::Format2(_)) | Self::Chain(ChainContextPos::Format2(_))
+        )
     }
-    out
+}
+
+/// A GPOS lookup's subtables, each parsed the first time a glyph
+/// reaches it (see the `lazy` module).
+type PosSubtables<'a> = LazySubtables<'a, PosSubtable<'a>>;
+
+/// Parses subtable `sub_idx` of `lookup`, unwrapping an Extension.
+/// `None` for a subtable that fails to parse, which the shaper drops.
+fn parse_subtable<'a>(lookup: &Lookup<'a>, sub_idx: u16) -> Option<PosSubtable<'a>> {
+    let bytes = lookup.subtable_bytes(sub_idx)?;
+    let raw_lt = lookup.lookup_type();
+    let (lt, inner) = if raw_lt == gpos_lt::EXTENSION {
+        resolve_extension(bytes)?
+    } else {
+        (raw_lt, bytes)
+    };
+    match lt {
+        gpos_lt::SINGLE_ADJUSTMENT => SinglePos::parse(inner)
+            .ok()
+            .map(|s| PosSubtable::Single(s, inner)),
+        gpos_lt::PAIR_ADJUSTMENT => PairPos::parse(inner).ok().map(PosSubtable::Pair),
+        gpos_lt::CONTEXT => ContextPos::parse(inner).ok().map(PosSubtable::Context),
+        gpos_lt::CHAINED_CONTEXT => ChainContextPos::parse(inner).ok().map(PosSubtable::Chain),
+        lt => AttachSubtable::parse(lt, inner).map(PosSubtable::Attach),
+    }
 }
 
 /// Per-lookup state shared by every subtable of one lookup: its flags,
@@ -243,25 +248,44 @@ fn apply_lookup(
     let Some(lookup) = cx.gpos.lookup_list().get(stage.index) else {
         return;
     };
-    let subtables = parse_subtables(&lookup);
-    if subtables.is_empty() {
+    // A lookup none of whose subtables can start at a glyph of the run
+    // changes nothing, and HarfBuzz skips it; positioning never changes
+    // glyph ids, so the run's ids decide for the whole walk.
+    let accel = cx.gpos.lookup_accel(stage.index, &lookup);
+    if !accel.may_apply(run.iter().map(|g| g.id)) {
         return;
     }
+    let mut subtables = LazySubtables::new(lookup, parse_subtable);
     let state = LookupState::new(&lookup, cx.gdef, stage.joiners, stage.index);
     // Each lookup starts with no remembered mark base, as in HarfBuzz.
     att.reset_base_cache();
     let mut i = 0;
     while i < glyphs.len() {
+        // A glyph the lookup flags skip, or one no subtable can start
+        // at (every subtable first looks it up in its coverage), is
+        // passed over.
         if run
             .get(i)
-            .is_some_and(|&g| state.mcx.filter().is_skipped(g))
+            .is_some_and(|&g| !accel.may_have_cheaply(g.id) || state.mcx.filter().is_skipped(g))
         {
             i += 1;
             continue;
         }
-        i = match apply_subtables_at(cx, &subtables, &state, glyphs, att, run, i, 0, budget) {
-            Some(next) => next.max(i + 1),
-            None => i + 1,
+        let at = i;
+        i = match apply_subtables_at(
+            cx,
+            &mut subtables,
+            &accel,
+            &state,
+            glyphs,
+            att,
+            run,
+            at,
+            0,
+            budget,
+        ) {
+            Some(next) => next.max(at + 1),
+            None => at + 1,
         };
     }
 }
@@ -290,17 +314,38 @@ fn apply_lookup_at(
     let Some(lookup) = cx.gpos.lookup_list().get(lookup_index) else {
         return;
     };
-    let subtables = parse_subtables(&lookup);
+    let accel = cx.gpos.lookup_accel(lookup_index, &lookup);
+    // No subtable can start at the glyph: nothing to parse or apply.
+    if !accel.may_have_cheaply(glyphs[at].glyph_id as u16) {
+        return;
+    }
+    let mut subtables = LazySubtables::new(lookup, parse_subtable);
     let state = LookupState::new(&lookup, cx.gdef, joiners, lookup_index);
-    apply_subtables_at(cx, &subtables, &state, glyphs, att, run, at, depth, budget);
+    let (state, accel) = (&state, &accel);
+    apply_subtables_at(
+        cx,
+        &mut subtables,
+        accel,
+        state,
+        glyphs,
+        att,
+        run,
+        at,
+        depth,
+        budget,
+    );
 }
 
 /// Tries each subtable at `at` in order. Returns where the cursor goes
-/// next when one applies, `None` when none does.
+/// next when one applies, `None` when none does. A subtable `accel`
+/// shows cannot cover the glyph at `at` is passed over unparsed: it
+/// starts by looking the glyph up in that coverage, so it would not
+/// have applied.
 #[allow(clippy::too_many_arguments)]
 fn apply_subtables_at(
     cx: &GposCx<'_>,
-    subtables: &[PosSubtable<'_>],
+    subtables: &mut PosSubtables<'_>,
+    accel: &Accel<'_, '_>,
     state: &LookupState<'_>,
     glyphs: &mut [Glyph],
     att: &mut Attach<'_>,
@@ -310,8 +355,17 @@ fn apply_subtables_at(
     budget: &mut LookupBudget,
 ) -> Option<usize> {
     let horizontal = att.direction.is_horizontal();
-    for (k, sub) in subtables.iter().enumerate() {
-        let mcx = &state.mcx.with_rule_set_digests(k < SUBTABLE_CACHES);
+    let id = glyphs.get(at)?.glyph_id as u16;
+    for index in 0..subtables.len() {
+        if !accel.subtable_may_start(subtables.is_parsed(index), usize::from(index), id) {
+            continue;
+        }
+        let Some((sub, digests)) =
+            subtables.get_with_digests(index, PosSubtable::reads_rule_set_digests)
+        else {
+            continue;
+        };
+        let mcx = &state.mcx.with_rule_set_digests(digests);
         let next = match sub {
             PosSubtable::Single(sp, base) => {
                 let glyph = glyphs.get_mut(at)?;

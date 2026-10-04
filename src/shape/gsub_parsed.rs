@@ -1,29 +1,28 @@
-//! Pre-parsed GSUB subtables: the parse-once cache a lookup's cursor
-//! walk reuses, the coverage digests that let it skip positions,
-//! and the per-cursor dispatch over the cache.
-
-use alloc::vec::Vec;
+//! Parsed GSUB subtables: parsing one subtable, and the per-cursor
+//! dispatch over a lookup's subtables, which parses each the first
+//! time a glyph its accelerator admits reaches it (see the `lazy`
+//! module).
 
 use super::gsub::{apply_gsub_chain_context_at, apply_gsub_context_at, GsubCx};
 use super::gsub_buffer::GsubBuffer;
+use super::lazy::LazySubtables;
 use super::{lig, resolve_extension, LookupBudget};
-use crate::buffer::Glyph;
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{
     lookup_type as gsub_lt, Alternate, ChainContextAny, Context as GsubContext, Ligature, Multiple,
     ReverseChain, Single,
 };
-use crate::tables::layout::skip_iter::SUBTABLE_CACHES;
+use crate::tables::layout::accel::Accel;
 use crate::tables::layout::{Lookup, MatchContext, MatchFilter};
 
-/// One pre-parsed GSUB subtable, ready to drive a cursor walk.
+/// One parsed GSUB subtable, ready to drive a cursor walk.
 ///
-/// `apply_gsub_lookup` parses the lookup's subtables once into this
-/// enum and reuses the parsed views across every cursor step. Without
-/// the cache, ChainContext / Context format-3 parsing allocates three
-/// or four `Vec<Coverage>` and a `Vec<SubstLookupRecord>` on every
-/// cursor: `O(N * subtables)` allocations for a single feature, the
-/// lion's share of the Devanagari regression.
+/// A lookup's subtables are parsed at most once per application and
+/// reused across every cursor step. Without that, ChainContext /
+/// Context format-3 parsing allocates three or four `Vec<Coverage>`
+/// and a `Vec<SubstLookupRecord>` on every cursor: `O(N * subtables)`
+/// allocations for a single feature, the lion's share of the
+/// Devanagari regression.
 pub(super) enum ParsedGsubSubtable<'a> {
     Single(Single<'a>),
     Multiple(Multiple<'a>),
@@ -34,114 +33,61 @@ pub(super) enum ParsedGsubSubtable<'a> {
     ReverseChained(ReverseChain<'a>),
 }
 
-/// Parses the subtables of a single `Lookup`, handling the Extension
-/// type-7 unwrap so the caller never sees raw lookup type 7. Returns
-/// the parsed list in spec order; subtables that fail to parse are
-/// dropped.
-pub(super) fn parse_lookup_subtables<'a>(
-    lookup: &Lookup<'a>,
-    raw_lt: u16,
-) -> Vec<ParsedGsubSubtable<'a>> {
-    let count = lookup.subtable_count() as usize;
-    let mut out: Vec<ParsedGsubSubtable<'a>> = Vec::with_capacity(count);
-    for sub_idx in 0..lookup.subtable_count() {
-        let Some(bytes) = lookup.subtable_bytes(sub_idx) else {
-            continue;
-        };
-        let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
-            match resolve_extension(bytes) {
-                Some(pair) => pair,
-                None => continue,
-            }
-        } else {
-            (raw_lt, bytes)
-        };
-        let parsed = match effective_lt {
-            gsub_lt::SINGLE => Single::parse(inner_bytes)
-                .ok()
-                .map(ParsedGsubSubtable::Single),
-            gsub_lt::MULTIPLE => Multiple::parse(inner_bytes)
-                .ok()
-                .map(ParsedGsubSubtable::Multiple),
-            gsub_lt::ALTERNATE => Alternate::parse(inner_bytes)
-                .ok()
-                .map(ParsedGsubSubtable::Alternate),
-            gsub_lt::LIGATURE => Ligature::parse(inner_bytes)
-                .ok()
-                .map(ParsedGsubSubtable::Ligature),
-            gsub_lt::CONTEXT => GsubContext::parse(inner_bytes)
-                .ok()
-                .map(ParsedGsubSubtable::Context),
-            gsub_lt::CHAINED_CONTEXT => ChainContextAny::parse(inner_bytes)
-                .ok()
-                .map(ParsedGsubSubtable::ChainContext),
-            gsub_lt::REVERSE_CHAINED => ReverseChain::parse(inner_bytes)
-                .ok()
-                .map(ParsedGsubSubtable::ReverseChained),
-            _ => None,
-        };
-        if let Some(p) = parsed {
-            out.push(p);
-        }
+impl ParsedGsubSubtable<'_> {
+    /// True for a class-based context subtable, the one kind whose
+    /// matching reads [`MatchContext::rule_set_digests`].
+    fn reads_rule_set_digests(&self) -> bool {
+        matches!(
+            self,
+            Self::Context(GsubContext::Format2(_))
+                | Self::ChainContext(ChainContextAny::Format2(_))
+        )
     }
-    out
 }
 
-/// Returns the "primary" coverage table for a parsed subtable: the
-/// coverage on the cursor glyph. Used by the run-level `would_apply`
-/// precheck and by the cursor digest in `apply_gsub_lookup`. `None`
-/// means the subtable's coverage isn't a single `Coverage` table
-/// (chain-context format 1/2, reverse-chain, ...) and the cursor
-/// walker has to fall back to per-position dispatch.
-fn primary_coverage_of<'a, 'b>(
-    sub: &'b ParsedGsubSubtable<'a>,
-) -> Option<&'b crate::tables::layout::Coverage<'a>> {
-    match sub {
-        ParsedGsubSubtable::Single(
-            Single::Delta { coverage, .. } | Single::Explicit { coverage, .. },
-        ) => Some(coverage),
-        ParsedGsubSubtable::Multiple(m) => Some(m.coverage()),
-        ParsedGsubSubtable::Alternate(a) => Some(a.coverage()),
-        ParsedGsubSubtable::Ligature(l) => Some(l.coverage()),
-        ParsedGsubSubtable::ChainContext(ChainContextAny::Format3(c3)) => c3.input_first_coverage(),
-        ParsedGsubSubtable::Context(GsubContext::Format3(c3)) => c3.input().first(),
+/// A GSUB lookup's subtables, parsed on demand.
+pub(super) type GsubSubtables<'a> = LazySubtables<'a, ParsedGsubSubtable<'a>>;
+
+/// The subtables of `lookup`, none parsed yet.
+pub(super) fn lazy_subtables(lookup: Lookup<'_>) -> GsubSubtables<'_> {
+    LazySubtables::new(lookup, parse_subtable)
+}
+
+/// Parses subtable `sub_idx` of `lookup`, looking through an Extension
+/// (type 7) wrapper, so the caller never sees raw lookup type 7.
+/// `None` for a subtable that fails to parse, which the shaper drops.
+fn parse_subtable<'a>(lookup: &Lookup<'a>, sub_idx: u16) -> Option<ParsedGsubSubtable<'a>> {
+    let bytes = lookup.subtable_bytes(sub_idx)?;
+    let raw_lt = lookup.lookup_type();
+    let (effective_lt, inner_bytes) = if raw_lt == gsub_lt::EXTENSION {
+        resolve_extension(bytes)?
+    } else {
+        (raw_lt, bytes)
+    };
+    match effective_lt {
+        gsub_lt::SINGLE => Single::parse(inner_bytes)
+            .ok()
+            .map(ParsedGsubSubtable::Single),
+        gsub_lt::MULTIPLE => Multiple::parse(inner_bytes)
+            .ok()
+            .map(ParsedGsubSubtable::Multiple),
+        gsub_lt::ALTERNATE => Alternate::parse(inner_bytes)
+            .ok()
+            .map(ParsedGsubSubtable::Alternate),
+        gsub_lt::LIGATURE => Ligature::parse(inner_bytes)
+            .ok()
+            .map(ParsedGsubSubtable::Ligature),
+        gsub_lt::CONTEXT => GsubContext::parse(inner_bytes)
+            .ok()
+            .map(ParsedGsubSubtable::Context),
+        gsub_lt::CHAINED_CONTEXT => ChainContextAny::parse(inner_bytes)
+            .ok()
+            .map(ParsedGsubSubtable::ChainContext),
+        gsub_lt::REVERSE_CHAINED => ReverseChain::parse(inner_bytes)
+            .ok()
+            .map(ParsedGsubSubtable::ReverseChained),
         _ => None,
     }
-}
-
-/// Reports whether at least one glyph in `run` could trigger any
-/// subtable in `parsed`, a fast pre-filter so the cursor walk in
-/// `apply_gsub_lookup` skips lookups whose coverage doesn't intersect
-/// the run at all. Mirrors HarfBuzz's `would_apply` skip; returns
-/// `true` conservatively when a subtable doesn't expose its primary
-/// coverage cheaply.
-pub(super) fn lookup_might_apply(parsed: &[ParsedGsubSubtable<'_>], run: &[Glyph]) -> bool {
-    if run.is_empty() {
-        return false;
-    }
-    parsed.iter().any(|sub| match primary_coverage_of(sub) {
-        None => true,
-        Some(cov) => run.iter().any(|g| cov.contains(g.glyph_id as u16)),
-    })
-}
-
-/// True when every subtable in `parsed` exposes a single primary
-/// coverage we can intersect with the run. When that holds, the
-/// cursor walker can use the "digest" path: skip any cursor whose
-/// glyph isn't in the union of those coverages, instead of trying
-/// every subtable at every cursor.
-pub(super) fn parsed_has_full_digest(parsed: &[ParsedGsubSubtable<'_>]) -> bool {
-    parsed.iter().all(|s| primary_coverage_of(s).is_some())
-}
-
-/// True when glyph `id` is in any of `parsed`'s primary coverages.
-/// Caller has already established that every subtable exposes one
-/// (`parsed_has_full_digest`).
-pub(super) fn cursor_in_digest(parsed: &[ParsedGsubSubtable<'_>], id: u16) -> bool {
-    parsed
-        .iter()
-        .filter_map(primary_coverage_of)
-        .any(|cov| cov.contains(id))
 }
 
 /// Tries the subtables of one lookup at the cursor in order. The first
@@ -149,6 +95,10 @@ pub(super) fn cursor_in_digest(parsed: &[ParsedGsubSubtable<'_>], id: u16) -> bo
 /// past a single substitution, past a multiple substitution's outputs,
 /// past the glyphs a ligature kept inside its match, and at the end
 /// of a contextual match. Returns whether one applied.
+///
+/// A subtable `accel` shows cannot cover the cursor glyph is passed
+/// over unparsed: it starts by looking the glyph up in that coverage,
+/// so it would not have applied.
 ///
 /// `nested` is set when a contextual lookup dispatched this one:
 /// reverse chaining substitutions do not apply then, as in HarfBuzz.
@@ -158,7 +108,8 @@ pub(super) fn cursor_in_digest(parsed: &[ParsedGsubSubtable<'_>], id: u16) -> bo
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_parsed_lookup_at(
     cx: &GsubCx<'_>,
-    parsed: &[ParsedGsubSubtable<'_>],
+    subtables: &mut GsubSubtables<'_>,
+    accel: &Accel<'_, '_>,
     mcx: &MatchContext<'_>,
     buf: &mut GsubBuffer,
     depth: u8,
@@ -171,8 +122,16 @@ pub(super) fn apply_parsed_lookup_at(
     };
     let id = cur.glyph_id as u16;
     let at = buf.cursor();
-    for (k, sub) in parsed.iter().enumerate() {
-        let mcx = &mcx.with_rule_set_digests(k < SUBTABLE_CACHES);
+    for index in 0..subtables.len() {
+        if !accel.subtable_may_start(subtables.is_parsed(index), usize::from(index), id) {
+            continue;
+        }
+        let Some((sub, digests)) =
+            subtables.get_with_digests(index, ParsedGsubSubtable::reads_rule_set_digests)
+        else {
+            continue;
+        };
+        let mcx = &mcx.with_rule_set_digests(digests);
         let applied = match sub {
             ParsedGsubSubtable::Single(single) => {
                 single.apply(id).map(|out| buf.replace_glyph(out))

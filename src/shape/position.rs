@@ -280,39 +280,24 @@ pub(super) fn subtract_vertical_origins(advances: &FontAdvances<'_, '_>, glyphs:
 /// `script_priority` lists feature `tag`, with or without lookups (see
 /// [`crate::ot::layout_select::lists_feature`]).
 fn lists_feature(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> bool {
-    crate::ot::layout_select::lists_feature(
-        gpos.script_list(),
-        &gpos.features(),
-        gpos.language_tags(),
-        tag,
-        script_priority,
-    )
+    gpos.layout_view().lists(tag, script_priority)
 }
 
 /// Lookup indices feature `tag` selects for one segment's script.
 fn lookups_for(gpos: &Gpos<'_>, tag: [u8; 4], script_priority: &[[u8; 4]]) -> Vec<u16> {
-    crate::ot::layout_select::feature_lookup_indices(
-        gpos.script_list(),
-        &gpos.features(),
-        gpos.language_tags(),
-        tag,
-        script_priority,
-    )
-    .unwrap_or_default()
+    gpos.layout_view()
+        .feature_lookups(tag, script_priority)
+        .unwrap_or_default()
 }
 
 /// Lookups of the required feature of the language system GPOS picks
 /// for one segment's script, which join the GPOS stage whatever their
 /// tag (HarfBuzz's `hb_ot_map_builder_t::compile`).
 fn required_lookups(gpos: &Gpos<'_>, script_priority: &[[u8; 4]]) -> Vec<u16> {
-    crate::ot::layout_select::required_feature(
-        gpos.script_list(),
-        &gpos.features(),
-        gpos.language_tags(),
-        script_priority,
-    )
-    .map(|(_, lookups)| lookups)
-    .unwrap_or_default()
+    gpos.layout_view()
+        .required(script_priority)
+        .map(|(_, lookups)| lookups)
+        .unwrap_or_default()
 }
 
 /// HarfBuzz's `zero_mark_widths_by_gdef`: every mark loses both

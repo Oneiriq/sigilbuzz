@@ -249,20 +249,31 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     let select = |variations| {
         crate::tables::layout::feature_variations::select(variations, coords, var_store)
     };
+    // What the font keeps between calls: the lookup accelerators, which
+    // let every pass below skip the lookups and subtables a glyph cannot
+    // start without parsing them, and the resolved language systems. A
+    // font's first call builds none of it: a font shaped once, which many callers build per run,
+    // would spend more building them than they save.
+    let warm = font.caches().note_use();
+    let face_cache = warm.then(|| font.caches().face());
     let gsub = face.gsub()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
+        let cache = face_cache.map(|c| c.gsub(g.lookup_list().len()));
         Some(
             g.with_language_tags(language_tags)
                 .with_cluster_level(level)
                 .with_unsafe_to_concat(concat)
-                .with_feature_variation(variation),
+                .with_feature_variation(variation)
+                .with_cache(cache),
         )
     });
     let gpos = face.gpos()?.and_then(|g| {
         let variation = select(g.feature_variations().ok()?);
+        let cache = face_cache.map(|c| c.gpos(g.lookup_list().len()));
         Some(
             g.with_language_tags(language_tags)
-                .with_feature_variation(variation),
+                .with_feature_variation(variation)
+                .with_cache(cache),
         )
     });
 
@@ -336,29 +347,14 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // leaves `mark` none changes nothing.
     let mark_enabled = !super::feature_disabled(features, *b"mark");
     let has_gpos_mark = |priority: &[[u8; 4]]| {
-        use crate::ot::layout_select::lists_feature;
         let mark = *b"mark";
         let in_gpos = || {
-            gpos.as_ref().is_some_and(|g| {
-                lists_feature(
-                    g.script_list(),
-                    &g.features(),
-                    g.language_tags(),
-                    mark,
-                    priority,
-                )
-            })
+            gpos.as_ref()
+                .is_some_and(|g| g.layout_view().lists(mark, priority))
         };
         let in_gsub = || {
-            gsub.as_ref().is_some_and(|g| {
-                lists_feature(
-                    g.script_list(),
-                    &g.features(),
-                    g.language_tags(),
-                    mark,
-                    priority,
-                )
-            })
+            gsub.as_ref()
+                .is_some_and(|g| g.layout_view().lists(mark, priority))
         };
         mark_enabled && (in_gpos() || in_gsub())
     };
