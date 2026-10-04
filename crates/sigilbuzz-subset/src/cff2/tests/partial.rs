@@ -692,14 +692,14 @@ fn chained_blends_fold_into_their_master_at_the_same_work_per_blend() {
     // everything the chain writes and changes length with each fold (1
     // byte for 0, 5 for 0.5; 1 and 2 bytes for 0 and 1, integers). The
     // fold rewrites it in place, so each pair of blends costs the same
-    // whatever the chain's length: its 8 tokens, and for each blend a
-    // delta folded and one written.
+    // whatever the chain's length: its 8 tokens, and for each blend the
+    // master it rewrites.
     let integers: (&[u8], &[u8]) = (&[140], &[138]);
     for (fold, minus_fold) in [(HALF, MINUS_HALF), integers] {
         let (short, _) = chain_work(&chained_blends(0, 1_000, fold, minus_fold));
         let (long, cs) = chain_work(&chained_blends(0, 50_000, fold, minus_fold));
-        assert_eq!(long - short, 49_000 * 12, "12 tokens a pair");
-        assert_eq!(short, 1_000 * 12 + 2, "and the master and hmoveto");
+        assert_eq!(long - short, 49_000 * 10, "10 tokens a pair");
+        assert_eq!(short, 1_000 * 10 + 2, "and the master and hmoveto");
         // The folds cancel: the master is back at 0, and each blend
         // keeps region 1's delta.
         let mut expected = alloc::vec![139u8];

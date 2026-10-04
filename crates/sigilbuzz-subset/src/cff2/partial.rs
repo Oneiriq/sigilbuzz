@@ -7,12 +7,12 @@ use alloc::vec::Vec;
 use sigilbuzz::tables::variation_store::ItemVariationStore;
 
 use super::{
-    bake_token_budget, biased_subr, charge_token, charge_tokens, charstring_number_bytes,
-    decode_operand_f32, parse_cff2, serialise_cff2_top_dict, MAX_BAKE_DEPTH, OP_BLEND,
-    OP_CALLGSUBR, OP_CALLSUBR, OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO,
-    OP_HMOVETO, OP_HSTEM, OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE,
-    OP_RLINETO, OP_RMOVETO, OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO,
-    OP_VSINDEX, OP_VSTEM, OP_VSTEMHM, OP_VVCURVETO,
+    bake_token_budget, biased_subr, charge_token, charstring_number_bytes, decode_operand_f32,
+    parse_cff2, serialise_cff2_top_dict, MAX_BAKE_DEPTH, OP_BLEND, OP_CALLGSUBR, OP_CALLSUBR,
+    OP_CNTRMASK, OP_ESCAPE, OP_HHCURVETO, OP_HINTMASK, OP_HLINETO, OP_HMOVETO, OP_HSTEM,
+    OP_HSTEMHM, OP_HVCURVETO, OP_RCURVELINE, OP_RETURN, OP_RLINECURVE, OP_RLINETO, OP_RMOVETO,
+    OP_RRCURVETO, OP_SHORTINT, OP_VHCURVETO, OP_VLINETO, OP_VMOVETO, OP_VSINDEX, OP_VSTEM,
+    OP_VSTEMHM, OP_VVCURVETO,
 };
 use crate::cff::{
     emit_fd_select_auto, encode_index_cff2, patch_dict_offset, serialise_font_dict,
@@ -371,8 +371,9 @@ impl Token {
 // Until an operator clears the operand stack, what the baker writes
 // stays in `tail` as tokens, so a blend can rewrite a master in place
 // without moving what follows it. Each step is constant work per token
-// it reads or writes, and the work a blend adds (one token per delta
-// it folds or writes) is charged to the budget.
+// it reads or writes. The budget is charged a token for each token the
+// bake reads (a blend reads deltas the stack can hold only once, each
+// charged when it was pushed) and for each master a blend rewrites.
 //
 // One baker serves a whole table: the region-count cache and the token
 // budget are shared across glyphs, and the per-glyph state is reset by
@@ -684,13 +685,6 @@ impl<'a> PartialBaker<'a> {
             // `n, 0, blend` (count consumed, masters intact).
             return Ok(());
         };
-        // One token per delta this blend folds or writes.
-        let work = n.saturating_mul(survivor.folded.len() + survivor.surviving.len());
-        charge_tokens(
-            &mut self.budget,
-            work,
-            "CFF2 partial bake: charstring work budget exceeded",
-        )?;
         let delta = |i: usize, slot: u16| {
             i.checked_mul(old_k)
                 .and_then(|row| row.checked_add(usize::from(slot)))
@@ -738,9 +732,11 @@ impl<'a> PartialBaker<'a> {
 
         // Emit the new deltas in source-slot order, each scaled by the
         // pin_scalar.
-        for i in 0..n {
-            for &(slot, scalar) in &survivor.surviving {
-                self.tail.push(Token::number(delta(i, slot)? * scalar));
+        if !survivor.surviving.is_empty() {
+            for i in 0..n {
+                for &(slot, scalar) in &survivor.surviving {
+                    self.tail.push(Token::number(delta(i, slot)? * scalar));
+                }
             }
         }
         // Emit the count operand and blend op.
@@ -761,9 +757,13 @@ impl<'a> PartialBaker<'a> {
     /// own, or the master push of the blend that left it), and a blend
     /// is linear in its master, so rewriting that push moves the entry
     /// by `amount`. The push is a token of its own, so nothing after it
-    /// moves.
+    /// moves. The rewrite costs a token of the budget.
     fn add_to_operand(&mut self, index: usize, amount: f32) -> Result<(), SubsetError> {
         const BAD: &str = "CFF2 partial bake: blend master decode failed";
+        charge_token(
+            &mut self.budget,
+            "CFF2 partial bake: charstring work budget exceeded",
+        )?;
         let value = self.operand_value(index, BAD)?;
         let token = self
             .stack

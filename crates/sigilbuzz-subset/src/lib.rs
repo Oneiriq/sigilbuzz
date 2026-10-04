@@ -61,8 +61,8 @@
 //! - each variation store's rows: 8 units per byte of the store, plus
 //!   2^20;
 //! - CFF2 charstrings: 64 tokens per byte of `CFF2`, plus 2^22 (a
-//!   partial instance also charges a token for each blend delta it
-//!   moves into a default or writes);
+//!   partial instance also charges a token for each blend default it
+//!   moves);
 //! - layout walks (GPOS, GDEF carets, `BASE`, FeatureVariations): 2^24.
 //!
 //! Past a budget the instance degrades and warns rather than failing

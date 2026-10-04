@@ -350,14 +350,7 @@ fn bake_token_budget(table_len: usize) -> usize {
 
 /// Charges one token against `budget`, failing once it is spent.
 fn charge_token(budget: &mut usize, err: &'static str) -> Result<(), SubsetError> {
-    charge_tokens(budget, 1, err)
-}
-
-/// Charges `count` tokens against `budget`, failing once it is spent.
-fn charge_tokens(budget: &mut usize, count: usize, err: &'static str) -> Result<(), SubsetError> {
-    *budget = budget
-        .checked_sub(count)
-        .ok_or(SubsetError::Unsupported(err))?;
+    *budget = budget.checked_sub(1).ok_or(SubsetError::Unsupported(err))?;
     Ok(())
 }
 
