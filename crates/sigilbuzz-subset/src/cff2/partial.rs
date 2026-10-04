@@ -549,7 +549,7 @@ impl<'a> PartialBaker<'a> {
                         "CFF2 partial bake: callsubr without operand",
                         "CFF2 partial bake: callsubr operand decode failed",
                     )?;
-                    let body = biased_subr(self.local_subrs, raw).ok_or(
+                    let body = biased_subr(self.local_subrs, f64::from(raw)).ok_or(
                         SubsetError::Unsupported("CFF2 partial bake: callsubr index out of range"),
                     )?;
                     self.run(body, depth + 1)?;
@@ -560,7 +560,7 @@ impl<'a> PartialBaker<'a> {
                         "CFF2 partial bake: callgsubr without operand",
                         "CFF2 partial bake: callgsubr operand decode failed",
                     )?;
-                    let body = biased_subr(self.global_subrs, raw).ok_or(
+                    let body = biased_subr(self.global_subrs, f64::from(raw)).ok_or(
                         SubsetError::Unsupported("CFF2 partial bake: callgsubr index out of range"),
                     )?;
                     self.run(body, depth + 1)?;

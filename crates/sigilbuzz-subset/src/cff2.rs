@@ -386,7 +386,7 @@ fn charge_token(budget: &mut usize, err: &'static str) -> Result<(), SubsetError
 
 /// Resolves the absolute subroutine index a `callsubr` / `callgsubr`
 /// operand selects, or `None` when it falls outside `subrs`.
-fn biased_subr<'s>(subrs: &[&'s [u8]], operand: f32) -> Option<&'s [u8]> {
+fn biased_subr<'s>(subrs: &[&'s [u8]], operand: f64) -> Option<&'s [u8]> {
     // Float-to-int casts saturate, and NaN maps to 0.
     let raw = operand as i32;
     let abs = i64::from(raw) + i64::from(subr_bias(subrs.len()));
@@ -536,6 +536,30 @@ fn decode_operand_f32(data: &[u8], pos: usize) -> Option<(f32, usize)> {
         Some((raw as f32 / 65536.0, 5))
     } else {
         None
+    }
+}
+
+/// Decodes a single push operand at `data[pos..]` into an f64 plus
+/// byte-length: [`decode_operand_f32`] without rounding a 16.16 value.
+fn decode_operand_f64(data: &[u8], pos: usize) -> Option<(f64, usize)> {
+    if data.get(pos) == Some(&255) {
+        let bytes = data.get(pos + 1..pos + 5)?;
+        let raw = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        return Some((f64::from(raw) / 65536.0, 5));
+    }
+    decode_operand_f32(data, pos).map(|(v, len)| (f64::from(v), len))
+}
+
+/// Encodes `v` as a Type 2 push: a whole number in `i16` range in the
+/// shortest integer form, anything else in the 16.16 fixed form.
+fn encode_charstring_number_f64(v: f64, out: &mut Vec<u8>) {
+    if v == v.round() && (-32768.0..=32767.0).contains(&v) {
+        // A whole number in range: the integer forms are exact.
+        encode_charstring_number(v as f32, out);
+    } else {
+        // Float-to-int casts saturate, and NaN maps to 0.
+        let [a, b, c, d] = ((v * 65536.0).round() as i32).to_be_bytes();
+        out.extend_from_slice(&[255, a, b, c, d]);
     }
 }
 

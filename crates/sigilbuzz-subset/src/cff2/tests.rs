@@ -390,3 +390,65 @@ fn cff2_subset_sizes_a_mask_in_a_subroutine_by_blended_stems() {
     assert_eq!(locals[0], renumbered.as_slice());
     assert_eq!(locals[1], local_2);
 }
+
+#[test]
+fn bake_rounds_blends_halves_away_from_zero() {
+    // At 0.5 the one region scales its deltas by a half: `0 21 1 blend`
+    // is 10.5 and `0 -21 1 blend` -10.5, which round to 11 and -11, as
+    // HarfBuzz's instancer writes them. A 16.16 source operand keeps
+    // its fraction.
+    let ivs = store_with_region_counts(&[1]);
+    let mut cs1 = pushes(&[0, 21, 1]);
+    cs1.push(16); // blend
+    cs1.extend_from_slice(&pushes(&[0, -21, 1]));
+    cs1.extend_from_slice(&[16, 21]); // blend rmoveto
+    let fixed: [u8; 5] = [255, 0, 1, 0x80, 0]; // 1.5
+    cs1.extend_from_slice(&fixed);
+    cs1.extend_from_slice(&pushes(&[0]));
+    cs1.push(5); // rlineto
+    let cs0: &[u8] = &[];
+    let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], Some(&ivs));
+    let baked = bake_at_coords(&cff, &[0.5]).unwrap();
+    let parsed = parse_cff2(&baked).unwrap();
+    let mut want = pushes(&[11, -11]);
+    want.push(21);
+    want.extend_from_slice(&fixed);
+    want.extend_from_slice(&pushes(&[0]));
+    want.push(5);
+    assert_eq!(parsed.char_strings[1], want.as_slice());
+}
+
+#[test]
+fn bake_rounds_a_blend_without_regions() {
+    // A blend over a subtable with no regions keeps its defaults, whole.
+    let ivs = store_with_region_counts(&[0]);
+    let mut cs1 = pushes(&[3, 4, 2]);
+    cs1.extend_from_slice(&[16, 21]); // blend rmoveto
+    let cs0: &[u8] = &[];
+    let cff = build_synthetic_cff2(&[cs0, &cs1], &[0, 0], Some(&ivs));
+    let baked = bake_at_coords(&cff, &[0.5]).unwrap();
+    let parsed = parse_cff2(&baked).unwrap();
+    let mut want = pushes(&[3, 4]);
+    want.push(21);
+    assert_eq!(parsed.char_strings[1], want.as_slice());
+}
+
+#[test]
+fn bake_starts_at_the_private_dict_vsindex() {
+    // `1 vsindex` in the Private DICT picks the two-region subtable:
+    // `0 10 20 1 blend` is 0 + 5 + 10 at 0.5. Read with subtable 0's
+    // one region it would leave two operands.
+    let ivs = store_with_region_counts(&[1, 2]);
+    let mut cs1 = pushes(&[0, 10, 20, 1]);
+    cs1.push(16); // blend
+    cs1.extend_from_slice(&pushes(&[0]));
+    cs1.push(21); // rmoveto
+    let cs0: &[u8] = &[];
+    let with_vsindex: &[u8] = &[140, 22]; // 1 vsindex
+    let cff = build_synthetic_cff2_sharing(&[cs0, &cs1], &[0, 0], Some(&ivs), Some(with_vsindex));
+    let baked = bake_at_coords(&cff, &[0.5]).unwrap();
+    let parsed = parse_cff2(&baked).unwrap();
+    let mut want = pushes(&[15, 0]);
+    want.push(21);
+    assert_eq!(parsed.char_strings[1], want.as_slice());
+}

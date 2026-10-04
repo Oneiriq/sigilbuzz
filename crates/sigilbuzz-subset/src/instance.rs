@@ -42,8 +42,10 @@
 //!
 //! Every value rounds to the nearest unit, halves up, as HarfBuzz and
 //! fontTools round: outlines, metrics, `cvt `, `BASE`, `MVAR`, and the
-//! `GPOS` and `GDEF` deltas. (CFF2 charstrings and their store keep
-//! their own rounding.)
+//! `GPOS` and `GDEF` deltas. A full CFF2 instance rounds each blended
+//! charstring value to a whole unit, halves away from zero, as
+//! HarfBuzz's instancer does; a partial one keeps the fractions its
+//! store projection gives.
 //!
 //! # Coordinates
 //!
@@ -91,12 +93,11 @@
 //!
 //! For CFF2 sources the [`crate::cff2::bake_at_coords`] helper walks
 //! every charstring, inlines `callsubr` / `callgsubr`, resolves every
-//! `blend` to its scalar value at `coords`, strips `vsindex`, and
-//! emits a fresh CFF2 table without a VariationStore. Output is still
-//! CFF2-tagged (the SFNT directory entry remains `CFF2`) but no
-//! variable-font opcodes survive. Consumers that ignore CFF2's
-//! variable surface see the same outline as a consumer that honors
-//! it at the chosen instance.
+//! `blend` to its value at `coords` rounded to a whole unit, strips
+//! `vsindex`, and emits a fresh CFF2 table without a VariationStore.
+//! Output is still CFF2-tagged (the SFNT directory entry remains
+//! `CFF2`) but no variable-font opcodes survive; the charstrings are
+//! the ones HarfBuzz's instancer writes.
 //!
 //! # VVAR-aware vmtx and VORG
 //!
