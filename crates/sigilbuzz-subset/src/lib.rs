@@ -5,7 +5,8 @@
 //! in through composites and ligatures. Every table that survives is
 //! rewritten so glyph references point at the new, compacted glyph order.
 //! [`instance()`] bakes variable-font axis coordinates into a static font or
-//! pins some axes and keeps the rest.
+//! pins some axes and keeps the rest; [`instance_user`] takes the axis
+//! values in user units, as HarfBuzz's instancer does.
 //!
 //! # Pipeline
 //!
@@ -241,7 +242,10 @@ pub use cff2::subset_non_identity as subset_cff2_non_identity;
 pub use classdef::emit_classdef;
 pub use closure::compute_closure;
 pub use coverage::{emit_coverage_from_glyphs, emit_coverage_from_pairs};
-pub use instance::{instance, AxisPin, F2Dot14, InstanceInput, InstancedOutput};
+pub use instance::{
+    instance, instance_user, AxisLimit, AxisPin, F2Dot14, InstanceInput, InstancedOutput,
+    UserInstanceInput,
+};
 pub use warnings::SubsetWarning;
 
 use warnings::Warnings;

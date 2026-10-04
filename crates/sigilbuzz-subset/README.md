@@ -52,6 +52,10 @@ outlines, as HarfBuzz does. `OS/2` gets the new `usWeightClass`, `usWidthClass` 
 `xAvgCharWidth`, and `post` the new `italicAngle`. Glyph instructions stay, as they do in
 HarfBuzz unless it is asked to drop hinting.
 
+`instance` takes normalized coordinates. `instance_user` takes axis values in the units
+`fvar` gives (`wght` 700, say), pins or keeps each axis by tag, and normalizes them the
+way HarfBuzz does.
+
 A malformed piece of a layout table (a GDEF list, a GSUB or GPOS lookup or subtable,
 a Device table, an anchor), or a malformed vertical metrics table (`vhea`, `vmtx`,
 `VORG`, `VVAR`), `BASE` or `STAT`, is left out of a subset instead of failing the whole
