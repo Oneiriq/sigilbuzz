@@ -39,11 +39,23 @@ fn axis_support_scalar_linear_ramp_below_peak() {
 
 #[test]
 fn axis_support_scalar_linear_ramp_above_peak() {
-    // start=-1, peak=0.5, end=1: coord=0.75 ramps down from 1 at
+    // start=0, peak=0.5, end=1: coord=0.75 ramps down from 1 at
     // peak to 0 at end. Halfway -> 0.5.
     // (peak == 0 would short-circuit to 1.0 per the spec's
     // "axis ignored" convention; we use a non-zero peak here.)
-    assert!((axis_support_scalar(-1.0, 0.5, 1.0, 0.75) - 0.5).abs() < 1e-6);
+    assert!((axis_support_scalar(0.0, 0.5, 1.0, 0.75) - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn axis_support_scalar_ignores_invalid_regions() {
+    // A region whose start passes its peak, whose peak passes its end,
+    // or that crosses zero is invalid; the spec and HarfBuzz ignore the
+    // axis, so it scales by 1 wherever the coordinate is.
+    for (start, peak, end) in [(0.8, 0.5, 1.0), (0.0, 1.0, 0.5), (-1.0, 0.5, 1.0)] {
+        for coord in [-1.0, 0.0, 0.3, 0.75, 1.0] {
+            assert_eq!(axis_support_scalar(start, peak, end, coord), 1.0);
+        }
+    }
 }
 
 #[test]

@@ -88,7 +88,7 @@ struct Kept {
     /// region needs them.
     region: Vec<f32>,
     intermediate: bool,
-    /// The scaled deltas, summed, by `cvt ` index.
+    /// The scaled nonzero deltas, summed, by `cvt ` index.
     deltas: BTreeMap<usize, f32>,
 }
 
@@ -122,7 +122,18 @@ fn rebuild(
     let mut kept: Vec<Kept> = Vec::new();
     let mut kept_at: BTreeMap<Vec<i16>, usize> = BTreeMap::new();
     for _ in 0..count_word & TUPLE_COUNT_MASK {
-        let (tuple, used) = parse_tuple_header(headers, axis_count).map_err(|_| MALFORMED)?;
+        // A header that cannot be read, or whose data size runs past the
+        // table from where the header starts, ends the tuples, as
+        // HarfBuzz's tuple iterator stops at it; the ones before it
+        // still apply.
+        let at = cvar.len() - headers.len();
+        let Ok((tuple, used)) = parse_tuple_header(headers, axis_count) else {
+            break;
+        };
+        let reach = usize::from(tuple.variation_data_size).max(used);
+        if at.saturating_add(reach) > cvar.len() {
+            break;
+        }
         headers = headers.get(used..).unwrap_or_default();
         let end = cursor
             .checked_add(usize::from(tuple.variation_data_size))
@@ -178,7 +189,10 @@ fn rebuild(
             } else {
                 usize::from(*listed.get(k)?)
             };
-            (index < num_cvt).then_some((index, d as f32 * scale))
+            // A zero moves nothing, so it is not kept: what the rebuilt
+            // tuples hold stays in proportion to the deltas the table
+            // packs, not to the cvt it covers.
+            (index < num_cvt && d != 0).then_some((index, d as f32 * scale))
         });
 
         // A tuple left with no kept-axis peak applies at every kept

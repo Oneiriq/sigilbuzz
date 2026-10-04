@@ -206,3 +206,55 @@ fn bake_cvt_reports_a_cvar_it_cannot_read_and_keeps_the_cvt() {
         Some(CvtBake::default())
     );
 }
+
+#[test]
+fn an_invalid_intermediate_region_ignores_its_axis() {
+    // One tuple on one axis whose intermediate region starts past its
+    // peak (0.8, 0.5, 1.0): the spec and HarfBuzz ignore the axis, so
+    // all 5 units apply wherever the coordinate is.
+    let cvt = cvt_of(&[100]);
+    let mut cvar = vec![0, 1, 0, 0, 0, 1, 0, 18];
+    let payload = deltas(&[5]);
+    cvar.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    cvar.extend_from_slice(&0xC000u16.to_be_bytes()); // embedded peak, intermediate
+    for v in [0.5f32, 0.8, 1.0] {
+        cvar.extend_from_slice(&((v * 16384.0) as i16).to_be_bytes());
+    }
+    cvar.extend(payload);
+    for coord in [0.25, 1.0, -1.0] {
+        let bake = rebuild(&cvt, &cvar, &[coord], &[AxisPin::Pin]).unwrap();
+        assert_eq!(values_of(&bake.cvt.unwrap()), [105], "at {coord}");
+    }
+}
+
+#[test]
+fn tuples_before_an_unreadable_header_still_apply() {
+    // The count says 4,095 tuples but only one header is there:
+    // HarfBuzz applies the one it reads.
+    let cvt = cvt_of(&[100, 200]);
+    let mut cvar = cvar_of(&[T(&[1.0], None, &[3, 4])], None);
+    cvar[4..6].copy_from_slice(&0x0FFFu16.to_be_bytes());
+    let bake = rebuild(&cvt, &cvar, &[1.0], &[AxisPin::Pin]).unwrap();
+    assert_eq!(values_of(&bake.cvt.unwrap()), [103, 204]);
+}
+
+#[test]
+fn zero_deltas_are_not_kept() {
+    // Two kept tuples over 32,767 values, all but one delta zero: the
+    // rebuilt cvar names that one value only.
+    let cvt = cvt_of(&vec![0; 32_767]);
+    let mut values = vec![0i16; 32_767];
+    values[1000] = 8;
+    let tuples = [
+        T(&[0.0, 1.0], None, &values),
+        T(&[0.0, -1.0], None, &vec![0; 32_767]),
+    ];
+    let cvar = cvar_of(&tuples, None);
+    let pins = [AxisPin::Pin, AxisPin::Keep];
+    let bake = rebuild(&cvt, &cvar, &[0.5, 0.0], &pins).unwrap();
+    let new_cvar = bake.cvar.unwrap();
+    // One tuple: its header, then one point (count 1, a word run of
+    // one, the index 1000) and one delta.
+    assert_eq!(&new_cvar[4..6], &[0, 1]);
+    assert_eq!(new_cvar.len(), 8 + 6 + 4 + 2);
+}
