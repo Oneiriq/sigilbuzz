@@ -51,6 +51,12 @@
 //! The crate compiles with `--no-default-features` on stable Rust. The
 //! default `std` feature adds filesystem helpers such as `Blob::from_path`.
 //! Everything on the shaping path works without it.
+//!
+//! The target needs pointer-width atomics with compare-and-swap
+//! (`cfg(target_has_atomic = "ptr")`): a [`Font`] builds its shaping
+//! caches through them without a lock, and [`OwnedFace`] shares its bytes
+//! through `alloc::sync::Arc`, which needs them too. Targets without
+//! them, such as `thumbv6m-none-eabi`, do not build.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
