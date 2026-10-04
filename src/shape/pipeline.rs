@@ -251,8 +251,9 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     };
     // What the font keeps between calls: the lookup accelerators, which
     // let every pass below skip the lookups and subtables a glyph cannot
-    // start without parsing them, and the resolved language systems. A
-    // font's first call builds none of it: a font shaped once, which many callers build per run,
+    // start without parsing them, the resolved language systems, and the
+    // per-glyph metrics that walk outlines. A font's first call builds
+    // none of it: a font shaped once, which many callers build per run,
     // would spend more building them than they save.
     let warm = font.caches().note_use();
     let face_cache = warm.then(|| font.caches().face());
@@ -769,7 +770,8 @@ pub fn shape(font: &Font<'_>, buffer: &Buffer, features: &[Feature]) -> Result<S
     // One `FontAdvances` serves the whole call: the origins, the
     // fallback spaces, and the `stch` stretch below ask it too, and it
     // keeps each glyph's phantom-point advance once computed.
-    let advances = position::FontAdvances::new(face, coords, is_vertical)?;
+    let instance_cache = warm.then(|| font.caches().instance());
+    let advances = position::FontAdvances::new(face, coords, is_vertical, instance_cache)?;
     if is_vertical {
         // VVAR carries per-glyph vertical-advance deltas; applies
         // only when the font is variable and the user requested

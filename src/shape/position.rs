@@ -39,6 +39,7 @@ use super::{kern, Feature, LookupBudget, ProcessedSegment, VarCtx};
 use crate::buffer::{Direction, Glyph};
 use crate::error::Result;
 use crate::face::Face;
+use crate::font::{GlyphValue, InstanceCache, Known};
 use crate::tables::gdef::Gdef;
 use crate::tables::glyf::PhantomMetrics;
 use crate::tables::layout::{GlyphClasses, MatchGlyph};
@@ -356,7 +357,10 @@ fn zero_mark_widths(glyphs: &mut [Glyph], gdef: Option<&Gdef<'_>>, adjust_offset
 /// `vmtx` cannot fail it.
 ///
 /// The pipeline builds one per shaping call and hands it to the
-/// vertical origins, the fallback spaces, and the `stch` stretch.
+/// vertical origins, the fallback spaces, and the `stch` stretch. The
+/// values that walk an outline (vertical origins, and advances from
+/// phantom points) are also kept in the font's [`InstanceCache`] for
+/// later calls, as HarfBuzz keeps them for a font.
 pub(super) struct FontAdvances<'a, 'c> {
     face: &'c Face<'a>,
     coords: &'c [f32],
@@ -391,6 +395,13 @@ pub(super) struct FontAdvances<'a, 'c> {
     v_origins: RefCell<BTreeMap<u16, i32>>,
     /// The tables glyph extents come from, read when first needed.
     extents: ExtentsTables<'a>,
+    /// The font's cache of per-glyph values at these coords, if any.
+    cache: Option<&'c InstanceCache>,
+    /// The font's glyph count, which sizes `cache`; read when first
+    /// needed.
+    num_glyphs: OnceCell<u16>,
+    /// The run is vertical.
+    vertical: bool,
 }
 
 /// A glyph's four phantom points: left and right in x, top and bottom
@@ -410,7 +421,15 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
     /// Reads the metrics tables the advances of `face` at `coords` come
     /// from. A `vertical` run also reads `vmtx`, `VORG` and `VVAR`; a
     /// horizontal one never does.
-    pub(super) fn new(face: &'c Face<'a>, coords: &'c [f32], vertical: bool) -> Result<Self> {
+    ///
+    /// `cache` is the font's cache for these coords: values found there
+    /// are not computed again, and values computed are added to it.
+    pub(super) fn new(
+        face: &'c Face<'a>,
+        coords: &'c [f32],
+        vertical: bool,
+        cache: Option<&'c InstanceCache>,
+    ) -> Result<Self> {
         let varied = coords.iter().any(|&c| c != 0.0);
         let (vmtx, vorg) = if vertical {
             (face.vmtx()?, face.vorg()?)
@@ -450,7 +469,35 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
             v_phantom: RefCell::default(),
             v_origins: RefCell::default(),
             extents: ExtentsTables::default(),
+            cache,
+            num_glyphs: OnceCell::new(),
+            vertical,
         })
+    }
+
+    /// `which` of glyph `id` from the font's cache, else computed with
+    /// `compute` and added to the cache.
+    fn cached(
+        &self,
+        which: GlyphValue,
+        id: u16,
+        compute: impl FnOnce() -> Option<i32>,
+    ) -> Option<i32> {
+        // The vertical values come from `vmtx`, `VORG` and `VVAR`, which
+        // only a vertical run reads, so only a vertical run shares them.
+        let vertical_value = matches!(which, GlyphValue::VOrigin | GlyphValue::VPhantomAdvance);
+        let Some(cache) = self.cache.filter(|_| self.vertical || !vertical_value) else {
+            return compute();
+        };
+        if let Some(Known(value)) = cache.get(which, id) {
+            return value;
+        }
+        let value = compute();
+        let num_glyphs = *self
+            .num_glyphs
+            .get_or_init(|| self.face.maxp().map_or(u16::MAX, |maxp| maxp.num_glyphs));
+        cache.set(which, id, num_glyphs, value);
+        value
     }
 
     /// The ink extents of glyph `id` at the call's coords, as HarfBuzz's
@@ -498,10 +545,11 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         if !self.outlines().is_some_and(|t| t.gvar.is_some()) {
             return base;
         }
-        match self.v_phantoms(id) {
-            Some(pp) => hb_round(pp[2].1 - pp[3].1).max(0),
-            None => base,
-        }
+        self.cached(GlyphValue::VPhantomAdvance, id, || {
+            self.v_phantoms(id)
+                .map(|pp| hb_round(pp[2].1 - pp[3].1).max(0))
+        })
+        .unwrap_or(base)
     }
 
     /// The y of glyph `id`'s vertical origin, in font units, as
@@ -541,7 +589,9 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         {
             return origin;
         }
-        let origin = self.compute_v_origin(id);
+        let origin = self
+            .cached(GlyphValue::VOrigin, id, || Some(self.compute_v_origin(id)))
+            .unwrap_or_else(|| self.compute_v_origin(id));
         if let Ok(mut cache) = self.v_origins.try_borrow_mut() {
             cache.insert(id, origin);
         }
@@ -607,17 +657,19 @@ impl<'a, 'c> FontAdvances<'a, 'c> {
         if let Some(&advance) = self.h_phantom.try_borrow().ok()?.get(&id) {
             return advance;
         }
-        let advance = self.outlines().and_then(|t| {
-            let gvar = t.gvar.as_ref()?;
-            let metrics = PhantomMetrics {
-                hmtx: &self.hmtx,
-                vmtx: None,
-            };
-            let pp = t
-                .glyf
-                .phantom_points_at_coords(&t.loca, id, Some(gvar), self.coords, &metrics)
-                .ok()?;
-            Some(hb_round(pp[1].0 - pp[0].0).max(0))
+        let advance = self.cached(GlyphValue::HPhantomAdvance, id, || {
+            self.outlines().and_then(|t| {
+                let gvar = t.gvar.as_ref()?;
+                let metrics = PhantomMetrics {
+                    hmtx: &self.hmtx,
+                    vmtx: None,
+                };
+                let pp = t
+                    .glyf
+                    .phantom_points_at_coords(&t.loca, id, Some(gvar), self.coords, &metrics)
+                    .ok()?;
+                Some(hb_round(pp[1].0 - pp[0].0).max(0))
+            })
         });
         if let Ok(mut cache) = self.h_phantom.try_borrow_mut() {
             cache.insert(id, advance);

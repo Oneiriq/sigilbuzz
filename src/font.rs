@@ -38,7 +38,7 @@ mod cache;
 
 use alloc::vec::Vec;
 
-pub(crate) use cache::FontCaches;
+pub(crate) use cache::{FontCaches, GlyphValue, InstanceCache, Known};
 
 use crate::error::Result;
 use crate::face::Face;
