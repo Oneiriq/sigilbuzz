@@ -503,3 +503,101 @@ fn draws_are_charged_for_the_tuples_they_decode() {
     assert_eq!(spent, 4 * 240_503);
     assert_eq!(warnings.len(), 46, "{warnings:?}");
 }
+
+/// A one-axis (`wght`) font of `glyphs` simple glyphs after `.notdef`,
+/// each `points` points at the origin (the flags repeat, with no
+/// coordinate bytes), and `tuples` gvar tuples each listing the first
+/// and last point, which wght 900 moves 3 right each: the rest follow.
+fn many_points_font(glyphs: u16, points: u16, tuples: u16) -> Vec<u8> {
+    let mut body = Vec::new();
+    for v in [1u16, 0, 0, 0, 0, points - 1, 0] {
+        be16(&mut body, v);
+    }
+    let mut left = points;
+    while left > 0 {
+        let k = left.min(256);
+        if k == 1 {
+            body.push(0x31);
+        } else {
+            body.extend_from_slice(&[0x39, (k - 1) as u8]);
+        }
+        left -= k;
+    }
+    let mut tuple = vec![2, 0x81, 0, 0];
+    tuple.extend_from_slice(&(points - 1).to_be_bytes());
+    tuple.extend_from_slice(&[0x01, 3, 3, 0x81]);
+    let mut data = Vec::new();
+    be16(&mut data, tuples);
+    be16(&mut data, 4 + 6 * tuples);
+    for _ in 0..tuples {
+        be16(&mut data, tuple.len() as u16);
+        be16(&mut data, 0xA000); // embedded peak, private points
+        be16(&mut data, 0x4000);
+    }
+    for _ in 0..tuples {
+        data.extend_from_slice(&tuple);
+    }
+    let n = glyphs + 1;
+    let mut gvar = Vec::new();
+    for v in [1u16, 0, 1, 0] {
+        be16(&mut gvar, v);
+    }
+    let offsets_end = 20 + 4 * (u32::from(n) + 1);
+    gvar.extend_from_slice(&offsets_end.to_be_bytes());
+    be16(&mut gvar, n);
+    be16(&mut gvar, 1);
+    gvar.extend_from_slice(&offsets_end.to_be_bytes());
+    for gid in 0..=u32::from(n) {
+        let at = gid.saturating_sub(1) * data.len() as u32;
+        gvar.extend_from_slice(&at.to_be_bytes());
+    }
+    for _ in 0..glyphs {
+        gvar.extend_from_slice(&data);
+    }
+    let mut glyph_bodies = vec![Vec::new()];
+    glyph_bodies.extend((0..glyphs).map(|_| body.clone()));
+    let font = one_axis_font(&glyph_bodies);
+    // Swap in the gvar built here for the one the helper made.
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let tables: Vec<([u8; 4], Vec<u8>)> = face
+        .records()
+        .iter()
+        .map(|rec| {
+            let bytes = if rec.tag == tag::GVAR {
+                gvar.clone()
+            } else {
+                face.table_bytes(rec.tag).unwrap().to_vec()
+            };
+            (rec.tag, bytes)
+        })
+        .collect();
+    crate::sfnt::build(0x0001_0000, &tables)
+}
+
+#[test]
+fn the_glyph_bake_spends_a_budget_scaled_to_the_font() {
+    // 20 glyphs of 2,000 points and 10 two-point tuples: a few hundred
+    // bytes each that ask for 12 x 2,004 units of work. With no floor,
+    // the budget of 8 units per byte bakes the first few in full; the
+    // rest keep their source outlines, and the bake says so.
+    const GLYPHS: u16 = 20;
+    const POINTS: u16 = 2000;
+    const TUPLES: u16 = 10;
+    let font = many_points_font(GLYPHS, POINTS, TUPLES);
+    let face = Face::parse_bytes(&font, 0).unwrap();
+    let size =
+        face.table_bytes(tag::GLYF).unwrap().len() + face.table_bytes(tag::GVAR).unwrap().len();
+    let warnings = Warnings::default();
+    let bake = bake_glyf_loca_with(&face, &[1.0], GLYPHS + 1, &warnings, 0).unwrap();
+    let per_glyph = u64::from(TUPLES + 2) * u64::from(POINTS + 4);
+    let full = (size as u64 * BAKE_WORK_PER_BYTE / per_glyph) as u16;
+    assert!(full > 0 && full < GLYPHS, "{full}");
+    for gid in 1..=GLYPHS {
+        let glyph = SimpleGlyph::decode(bake.body(gid)).unwrap();
+        let moved = glyph.points()[1].0 == 3 * i32::from(TUPLES);
+        assert_eq!(moved, gid <= full, "glyph {gid}");
+    }
+    let warnings = warnings.into_sorted();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].context, BAKE_OVER_BUDGET);
+}

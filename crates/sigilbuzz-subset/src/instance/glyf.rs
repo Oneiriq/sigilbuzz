@@ -37,7 +37,7 @@ use sigilbuzz::tables::{tag, Glyf, Gvar, Hmtx, Loca, Reader, Vmtx};
 use sigilbuzz::Face;
 
 use crate::gvar_partial::GlyphPoints;
-use crate::util::round_half_up;
+use crate::util::{round_half_up, WorkBudget};
 use crate::warnings::Warnings;
 use crate::SubsetError;
 use extents::{Extents, NoExtent, TupleCounts};
@@ -75,6 +75,31 @@ pub(super) struct GlyfLocaBake {
     /// work.
     #[cfg(test)]
     pub(super) extent_work: (u64, u64, u64),
+    /// The points [`GlyfLocaBake::glyph_points`] may still decode.
+    points_left: WorkBudget,
+}
+
+/// Work units the glyph bake may spend per byte of the source `glyf`
+/// and `gvar`, on top of [`MIN_BAKE_WORK`]. A unit is one point decoded,
+/// or one point's delta from one `gvar` tuple. A few bytes of flags can
+/// repeat into thousands of points, and a few bytes of tuple can move
+/// all of them, so a small font could ask for billions of units. Real
+/// fonts spend under one unit per byte on each pass.
+const BAKE_WORK_PER_BYTE: u64 = 8;
+
+/// Work every glyph bake may spend, however small the font.
+const MIN_BAKE_WORK: u64 = 1 << 22;
+
+/// What the bake reports once it runs out of work.
+const BAKE_OVER_BUDGET: &str = "glyf bake work exceeds its budget";
+
+/// The point count of the simple glyph `body` (header included), read
+/// from its last `endPtsOfContours` entry; `None` when it is too short.
+fn simple_point_count(body: &[u8]) -> Option<usize> {
+    let nc = usize::try_from(i16::from_be_bytes(*body.first_chunk::<2>()?)).ok()?;
+    let last = 10 + 2 * nc.checked_sub(1)?;
+    let end = body.get(last..last + 2)?;
+    Some(usize::from(u16::from_be_bytes([end[0], end[1]])) + 1)
 }
 
 /// The tables one glyph bake reads.
@@ -89,6 +114,8 @@ struct BakeCtx<'a, 'f> {
     warnings: &'a Warnings,
     /// The extents of the glyphs composites draw, each worked out once.
     extents: Extents,
+    /// The work left for the whole bake (see `BAKE_WORK_PER_BYTE`).
+    work: WorkBudget,
     /// Each glyph's `gvar` tuple count, for what drawing it costs.
     tuples: TupleCounts<'f>,
 }
@@ -99,6 +126,18 @@ pub(super) fn bake_glyf_loca(
     coords: &[f32],
     num_glyphs: u16,
     warnings: &Warnings,
+) -> Result<GlyfLocaBake, SubsetError> {
+    bake_glyf_loca_with(face, coords, num_glyphs, warnings, MIN_BAKE_WORK)
+}
+
+/// [`bake_glyf_loca`] with `min_work` work units on top of the ones
+/// the font's size gives (see `BAKE_WORK_PER_BYTE`).
+fn bake_glyf_loca_with(
+    face: &Face<'_>,
+    coords: &[f32],
+    num_glyphs: u16,
+    warnings: &Warnings,
+    min_work: u64,
 ) -> Result<GlyfLocaBake, SubsetError> {
     let loca = face.loca().map_err(SubsetError::from)?;
     let glyf_bytes = face.table_bytes(tag::GLYF).map_err(SubsetError::from)?;
@@ -119,6 +158,11 @@ pub(super) fn bake_glyf_loca(
         warnings,
         extents: Extents::new(num_glyphs),
         tuples: TupleCounts::new(gvar.as_ref().and_then(|_| face.table_bytes(tag::GVAR).ok())),
+        work: bake_budget(
+            glyf_bytes.len(),
+            face.table_bytes(tag::GVAR).map_or(0, <[u8]>::len),
+            min_work,
+        ),
     };
 
     let mut new_bodies: Vec<Vec<u8>> = Vec::with_capacity(num_glyphs as usize);
@@ -141,7 +185,19 @@ pub(super) fn bake_glyf_loca(
             cx.extents.drawn.get(),
             cx.extents.spent(),
         ),
+        points_left: bake_budget(glyf_bytes.len(), 0, min_work),
     })
+}
+
+/// A work budget for a font whose `glyf` and `gvar` hold `glyf` and
+/// `gvar` bytes, `min_work` units at least.
+fn bake_budget(glyf: usize, gvar: usize, min_work: u64) -> WorkBudget {
+    WorkBudget::new(
+        (glyf as u64)
+            .saturating_add(gvar as u64)
+            .saturating_mul(BAKE_WORK_PER_BYTE)
+            .saturating_add(min_work),
+    )
 }
 
 impl GlyfLocaBake {
@@ -187,6 +243,12 @@ impl GlyfLocaBake {
                 before: components.iter().map(CompRecord::gvar_point).collect(),
                 after: None,
             });
+        }
+        // Both decodes are charged; past the budget the glyph's points
+        // are not known, and its tuples keep their points.
+        let count = simple_point_count(src_body)?;
+        if !self.points_left.spend(2 * (count + 4)) {
+            return None;
         }
         let before = SimpleGlyph::decode(src_body).ok()?;
         let after = SimpleGlyph::decode(self.body(gid)).ok()?;
@@ -272,6 +334,15 @@ fn bake_glyph(cx: &BakeCtx<'_, '_>, gid: u16) -> Result<(Vec<u8>, GlyphMetrics),
         return Ok((Vec::new(), metrics_from(&pp, None)));
     }
     if nc > 0 {
+        // Past the budget the glyph keeps its source outline and box,
+        // and its metrics their defaults.
+        if !cx.afford(simple_point_count(body).unwrap_or(0) + 4) {
+            let pp = cx.phantoms(gid, header_x_min, header_y_max, &[(0.0, 0.0); 4]);
+            let bounds = body
+                .get(2..10)
+                .map(|b| [0, 2, 4, 6].map(|i| i16::from_be_bytes([b[i], b[i + 1]])));
+            return Ok((body.to_vec(), metrics_from(&pp, bounds)));
+        }
         let glyph = SimpleGlyph::decode(body)?;
         let points = glyph.points();
         let deltas = cx.deltas(gid, &points, &glyph.end_pts);
@@ -311,6 +382,13 @@ impl BakeCtx<'_, '_> {
         if self.coords.iter().all(|&c| c == 0.0) {
             return zeros();
         }
+        // Each tuple can infer a delta for every point.
+        let cost = (self.tuples.of(gid) as usize)
+            .saturating_add(1)
+            .saturating_mul(points.len() + 4);
+        if !self.afford(cost) {
+            return zeros();
+        }
         match gvar.glyph_point_deltas(gid, self.coords, points, end_pts) {
             Ok(d) if d.len() == points.len() + 4 => d,
             Ok(_) => zeros(),
@@ -320,6 +398,21 @@ impl BakeCtx<'_, '_> {
                 zeros()
             }
         }
+    }
+
+    /// Spends `units` of the bake's work, or reports that the budget ran
+    /// out: the glyph keeps its source outline.
+    fn afford(&self, units: usize) -> bool {
+        let ok = self.work.spend(units);
+        if !ok {
+            self.warnings.push(
+                tag::GLYF,
+                0,
+                BAKE_OVER_BUDGET,
+                "the variations of the glyphs past it",
+            );
+        }
+        ok
     }
 
     /// The four phantom points of `gid` moved by `deltas` (at least

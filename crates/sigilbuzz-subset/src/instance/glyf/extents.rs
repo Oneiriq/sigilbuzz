@@ -235,6 +235,18 @@ impl Extents {
             return Start::Done;
         }
         if nc > 0 {
+            // Past the bake's budget the glyph has no extent, and the
+            // composites drawing it keep their source boxes.
+            let count = super::simple_point_count(body).unwrap_or(0);
+            if !cx.afford(count + 4) {
+                self.set(
+                    gid,
+                    Slot::Known(Err(NoExtent::Broken(Error::Unsupported {
+                        context: super::BAKE_OVER_BUDGET,
+                    }))),
+                );
+                return Start::Done;
+            }
             let found = match SimpleGlyph::decode(body) {
                 Ok(glyph) => {
                     let points = glyph.points();
@@ -423,7 +435,7 @@ impl<'f> TupleCounts<'f> {
 
     /// The tuple count of glyph `gid`; 0 when it has no variation data
     /// or the count cannot be read.
-    fn of(&self, gid: u16) -> u64 {
+    pub(super) fn of(&self, gid: u16) -> u64 {
         if gid >= self.glyph_count {
             return 0;
         }
