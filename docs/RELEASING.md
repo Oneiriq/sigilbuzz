@@ -87,7 +87,7 @@ Crates in the same group don't depend on each other and can go in any order.
 ## Path plus version dependencies
 
 Workspace crates depend on each other with both a path and a version, for example
-`sigilbuzz = { path = ".", version = "0.22.0" }`. Cargo uses the path when building
+`sigilbuzz = { path = ".", version = "0.24.0" }`. Cargo uses the path when building
 locally and the version when packaging for crates.io, so there is nothing to strip
 before publishing. When you bump a crate, update the version in every place that
 depends on it. The dry run fails if they disagree.

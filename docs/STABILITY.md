@@ -8,8 +8,8 @@ technical reasons, and the rules I follow when adding or changing public items.
 Every crate in the workspace is below 1.0, so a minor release may break the API. The
 crates are released together. Each release bumps the crates that changed, and one git
 tag covers the whole set. Companion crates keep their own version numbers, so pin
-versions that came out of the same release. For 0.23.1 that means `sigilbuzz = "0.23"`
-with, for example, `sigilbuzz-render = "0.10"` and `sigilbuzz-paint = "0.3"`.
+versions that came out of the same release. For 0.24.0 that means `sigilbuzz = "0.24"`
+with, for example, `sigilbuzz-render = "0.11"` and `sigilbuzz-paint = "0.4"`.
 [RELEASING.md](RELEASING.md) has the release checklist.
 
 The target is 1.0 in 2026, with a stable shaping API and a documented path for
@@ -149,6 +149,10 @@ signatures only change in a major version.
 
 - `subset`, `SubsetInput`, `SubsetOutput`
 - `instance`, `AxisPin`, `F2Dot14`, `InstanceInput`, `InstancedOutput`
+- Added in 0.14.0: `instance_user`, `UserInstanceInput` and `AxisLimit`, which instance
+  a font at axis values in user units, given by axis tag. Both types are
+  `#[non_exhaustive]`, so build the input with `UserInstanceInput::new()` and its
+  `with_` methods
 - `SubsetWarning`: a malformed piece of the source font that a subset or instance left
   out instead of failing, returned in `SubsetOutput::warnings` and
   `InstancedOutput::warnings`

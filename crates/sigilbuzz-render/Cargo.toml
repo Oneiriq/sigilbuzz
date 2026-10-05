@@ -1,6 +1,6 @@
 [package]
 name = "sigilbuzz-render"
-version = "0.10.1"
+version = "0.11.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -18,7 +18,7 @@ std = []
 
 [dependencies]
 sigilbuzz = { workspace = true }
-sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.3.0" }
+sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.4.0" }
 # `miniz_oxide` provides the zlib INFLATE primitive used by the
 # embedded PNG decoder for CBDT / sbix bitmap tables. Same dep
 # already pulled in by `sigilbuzz-woff` for WOFF1 zlib (see
