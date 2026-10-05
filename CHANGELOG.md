@@ -34,7 +34,7 @@ Changed:
   `buffer.set_cluster_level(ClusterLevel::MonotoneCharacters)`. The C API already
   defaulted to `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES` and is unchanged. On 554
   cases built from known consumers' fonts and strings, clusters under the defaults now
-  match HarfBuzz 14.5.0 in all 554 (481 before).
+  match HarfBuzz 14.5.0 in all 554.
 - `Font::coords` is now `pub fn coords(&self) -> &[f32]`: the slice borrows the font
   instead of living for `'a`, and the method is no longer a `const fn` (#289, #295). A
   font built with `Font::with_variations` owns its coords. Code that keeps the slice
@@ -302,7 +302,7 @@ Known limitations:
   savings; keep one `Font` per font, size and instance to get the rest.
 - `gvar` works out each tuple's scalar over every axis for each glyph, with no
   per-shared-tuple cache, so fonts with very many axes are slow. No real font comes
-  close, but a crafted 2,000-axis font takes 6.7 to 7.6 s to instance partially, against
+  close, but a crafted 2,000-axis font takes 4 to 7.6 s to instance partially, against
   3.7 s in HarfBuzz.
 - `sigilbuzz-subset`: a partial CFF2 instance keeps the fractional values its store
   projection gives, where HarfBuzz rounds each folded default and projected delta.
