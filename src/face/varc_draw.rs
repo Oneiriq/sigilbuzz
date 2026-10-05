@@ -311,8 +311,9 @@ const GLYPH_VISIT_WORK: usize = 64;
 /// again; the walk's own op cap bounds what it draws.
 const MAX_KEPT_LEAF_OPS: usize = 1 << 18;
 
-/// Leaf work per charstring operation a CFF or `CFF2` leaf runs.
-const CHARSTRING_OP_WORK: usize = 4;
+/// Leaf work per charstring operation a CFF or `CFF2` leaf runs: about
+/// what an operation costs next to one point of one `gvar` tuple.
+const CHARSTRING_OP_WORK: usize = 8;
 
 /// A leaf outline [`Leaves`] keeps: the coords it was drawn at, as `f32`
 /// bits, and the outline, `None` when it drew nothing.
