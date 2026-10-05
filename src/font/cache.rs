@@ -13,9 +13,10 @@
 //!   [`Font::with_coords`](super::Font::with_coords) and
 //!   [`Font::with_size`](super::Font::with_size) keep it.
 //! - [`InstanceCache`], which depends on the variation coordinates too:
-//!   the vertical origins and the advances that come from phantom
-//!   points, which cost an outline walk per glyph. `with_size` keeps it
-//!   and `with_coords` starts a new one.
+//!   the vertical origins and the varied advances, which cost an outline
+//!   walk (phantom points) or a walk of a variation store's regions
+//!   (`HVAR`, `VVAR`) per glyph. `with_size` keeps it and `with_coords`
+//!   starts a new one.
 //!
 //! A font's first shaping call builds none of this: a font shaped once,
 //! which many callers build per run, would spend more building it than
@@ -31,11 +32,13 @@
 //! output does not depend on what is cached.
 //!
 //! Memory is bounded per font. For each of GSUB and GPOS: one pointer
-//! per lookup, 24 bytes per subtable of each lookup a run reached, at
-//! most 16 resolved language systems of at most 1024 features and 16384
-//! lookup indices each, and at most 64 stage plans of at most 4096
-//! lookups each. For the glyph caches: at most [`GLYPH_CACHE_MAX`]
-//! four-byte entries for each of the three, whatever the glyph count.
+//! per lookup; 24 bytes per subtable of each lookup a run reached, for
+//! at most twice as many subtables as the table has bytes plus 64 Ki
+//! (lookup indices that name one lookup share its digests); at most 16
+//! resolved language systems of at most 1024 features and 16384 lookup
+//! indices each; and at most 64 stage plans of at most 4096 lookups
+//! each. For the glyph caches: at most [`GLYPH_CACHE_MAX`] four-byte
+//! entries for each of the three, whatever the glyph count.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -44,7 +47,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::sync::OnceBox;
 use crate::tables::layout::accel::LayoutCache;
-use crate::tables::layout::LayoutTable;
+use crate::tables::layout::{LayoutTable, LookupList};
 
 /// The caches of one [`Font`](super::Font).
 pub(crate) struct FontCaches {
@@ -148,18 +151,18 @@ impl FaceCache {
         }
     }
 
-    /// What the font keeps for its GSUB, which has `lookup_count`
-    /// lookups in `table_len` bytes.
-    pub(crate) fn gsub(&self, lookup_count: u16, table_len: usize) -> &LayoutCache {
+    /// What the font keeps for its GSUB, whose LookupList is `lookups`,
+    /// in `table_len` bytes.
+    pub(crate) fn gsub(&self, lookups: &LookupList<'_>, table_len: usize) -> &LayoutCache {
         self.gsub
-            .get_or_init(|| LayoutCache::new(LayoutTable::Gsub, lookup_count, table_len))
+            .get_or_init(|| LayoutCache::new(LayoutTable::Gsub, lookups, table_len))
     }
 
-    /// What the font keeps for its GPOS, which has `lookup_count`
-    /// lookups in `table_len` bytes.
-    pub(crate) fn gpos(&self, lookup_count: u16, table_len: usize) -> &LayoutCache {
+    /// What the font keeps for its GPOS, whose LookupList is `lookups`,
+    /// in `table_len` bytes.
+    pub(crate) fn gpos(&self, lookups: &LookupList<'_>, table_len: usize) -> &LayoutCache {
         self.gpos
-            .get_or_init(|| LayoutCache::new(LayoutTable::Gpos, lookup_count, table_len))
+            .get_or_init(|| LayoutCache::new(LayoutTable::Gpos, lookups, table_len))
     }
 
     fn heap_bytes(&self) -> usize {
@@ -173,7 +176,7 @@ impl FaceCache {
 }
 
 /// What a font keeps that depends on its coordinates too: per-glyph
-/// values whose computation walks an outline.
+/// values whose computation walks an outline or a variation store.
 pub(crate) struct InstanceCache {
     v_origins: OnceBox<GlyphCache>,
     v_advances: OnceBox<GlyphCache>,
@@ -185,12 +188,13 @@ pub(crate) struct InstanceCache {
 pub(crate) enum GlyphValue {
     /// The y of the vertical origin.
     VOrigin,
-    /// The vertical advance from varied phantom points, if they could
-    /// be computed.
-    VPhantomAdvance,
-    /// The horizontal advance from varied phantom points, if they
-    /// could be computed.
-    HPhantomAdvance,
+    /// The varied vertical advance: from `VVAR`, or from varied phantom
+    /// points, if they could be computed. A font has `VVAR` or not, so
+    /// one instance only ever stores one kind.
+    VAdvance,
+    /// The varied horizontal advance: from `HVAR`, or from varied
+    /// phantom points, if they could be computed.
+    HAdvance,
 }
 
 impl InstanceCache {
@@ -205,8 +209,8 @@ impl InstanceCache {
     fn cache(&self, which: GlyphValue) -> &OnceBox<GlyphCache> {
         match which {
             GlyphValue::VOrigin => &self.v_origins,
-            GlyphValue::VPhantomAdvance => &self.v_advances,
-            GlyphValue::HPhantomAdvance => &self.h_advances,
+            GlyphValue::VAdvance => &self.v_advances,
+            GlyphValue::HAdvance => &self.h_advances,
         }
     }
 

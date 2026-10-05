@@ -15,6 +15,16 @@ with, for example, `sigilbuzz-render = "0.10"` and `sigilbuzz-paint = "0.3"`.
 The target is 1.0 in 2026, with a stable shaping API and a documented path for
 renderers built on top of it.
 
+## Supported targets
+
+The core crate builds on stable Rust 1.81 or later, with or without `std`, on any
+target that has pointer-width atomics with compare-and-swap
+(`cfg(target_has_atomic = "ptr")`). A `Font` builds its shaping caches through atomic
+compare-and-swap, and `OwnedFace` shares its bytes through `alloc::sync::Arc`, which
+needs the same. Targets without them, such as `thumbv6m-none-eabi` (Cortex-M0 and
+M0+), do not build; this was already true before 0.24.0, through `alloc::sync`.
+`wasm32-unknown-unknown` and the usual desktop and mobile targets have them.
+
 ## Three tiers
 
 ### Tier 1: stable public API
@@ -92,7 +102,8 @@ signatures only change in a major version.
 - Added in 0.24.0:
   - `Font::with_variations`: bind a variable instance from user-space axis values, as
     HarfBuzz's `hb_font_set_variations` does. `Font::coords` now returns a slice that
-    borrows the font, since such a font owns its coords.
+    borrows the font, since such a font owns its coords, and is no longer a `const fn`,
+    so it cannot be called in a const context. `Font::new` is still `const`.
   - `Face::glyph_outlines` and `GlyphOutlines::{outline, draw}`: draw many glyphs at
     one instance with the outline tables read once.
 

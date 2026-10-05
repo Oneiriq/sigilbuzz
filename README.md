@@ -115,7 +115,8 @@ A few things you will likely need next:
   writing our own made no sense (Brotli for WOFF2, zlib for WOFF1 and PNG, clap for the
   CLI). [docs/deps.md](docs/deps.md) explains each one.
 - `no_std` support. The default build uses `std`, but the shaping path runs under
-  `no_std` with `alloc`.
+  `no_std` with `alloc`. The target needs pointer-width atomics with compare-and-swap,
+  which every target with `alloc::sync::Arc` has (`thumbv6m-none-eabi` does not).
 - Deterministic output. The same font, text, features, and direction produce the same
   glyphs, byte for byte. That matters for replays, lockstep networking, and golden-file
   tests.

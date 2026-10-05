@@ -5,7 +5,7 @@
 
 use super::gsub::{apply_gsub_chain_context_at, apply_gsub_context_at, GsubCx};
 use super::gsub_buffer::GsubBuffer;
-use super::lazy::LazySubtables;
+use super::lazy::{LazySubtables, Subtable};
 use super::{lig, resolve_extension, LookupBudget};
 use crate::tables::gdef::Gdef;
 use crate::tables::gsub::{
@@ -33,9 +33,11 @@ pub(super) enum ParsedGsubSubtable<'a> {
     ReverseChained(ReverseChain<'a>),
 }
 
-impl ParsedGsubSubtable<'_> {
-    /// True for a class-based context subtable, the one kind whose
-    /// matching reads [`MatchContext::rule_set_digests`].
+impl<'a> Subtable<'a> for ParsedGsubSubtable<'a> {
+    fn parse(lookup: &Lookup<'a>, index: u16) -> Option<Self> {
+        parse_subtable(lookup, index)
+    }
+
     fn reads_rule_set_digests(&self) -> bool {
         matches!(
             self,
@@ -50,7 +52,7 @@ pub(super) type GsubSubtables<'a> = LazySubtables<'a, ParsedGsubSubtable<'a>>;
 
 /// The subtables of `lookup`, none parsed yet.
 pub(super) fn lazy_subtables(lookup: Lookup<'_>) -> GsubSubtables<'_> {
-    LazySubtables::new(lookup, parse_subtable)
+    LazySubtables::new(lookup)
 }
 
 /// Parses subtable `sub_idx` of `lookup`, looking through an Extension
@@ -122,13 +124,12 @@ pub(super) fn apply_parsed_lookup_at(
     };
     let id = cur.glyph_id as u16;
     let at = buf.cursor();
+    // The walk only stops at glyphs the lookup's digest admits, so a
+    // lookup without digests of its own subtables admits all of them.
+    let every = accel.subtables_rule_out_nothing_more();
     for index in 0..subtables.len() {
-        if !accel.subtable_may_start(subtables.is_parsed(index), usize::from(index), id) {
-            continue;
-        }
-        let Some((sub, digests)) =
-            subtables.get_with_digests(index, ParsedGsubSubtable::reads_rule_set_digests)
-        else {
+        let admits = |parsed| every || accel.subtable_may_start(parsed, usize::from(index), id);
+        let Some((sub, digests)) = subtables.get_admitted(index, admits) else {
             continue;
         };
         let mcx = &mcx.with_rule_set_digests(digests);

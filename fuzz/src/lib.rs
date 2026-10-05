@@ -1,7 +1,8 @@
 //! Shared helpers for the sigilbuzz fuzz targets.
 //!
 //! The helpers never panic on their own, so any crash a target reports comes
-//! from sigilbuzz itself.
+//! from sigilbuzz itself. The one assertion, in [`shape_samples`], checks
+//! sigilbuzz's own promise that a `Font`'s caches never change its output.
 
 use sigilbuzz::{
     shape, BidiParagraph, Buffer, BufferFlags, ClusterLevel, Direction, Face, Feature, Font,
@@ -101,25 +102,43 @@ pub fn axis_coords(face: &Face<'_>, knobs: &mut Knobs<'_>) -> Vec<f32> {
     (0..axes.min(16) + extra).map(|_| knobs.coord()).collect()
 }
 
+/// A font of `face` at `size`, at `variations` (user-space values) when
+/// given, else at the normalized `coords`.
+fn bind<'a>(
+    face: Face<'a>,
+    size: f32,
+    coords: &'a [f32],
+    variations: Option<&[([u8; 4], f32)]>,
+) -> Font<'a> {
+    let font = Font::new(face, size);
+    match variations {
+        Some(variations) => font.with_variations(variations),
+        None => font.with_coords(coords),
+    }
+}
+
 /// Shapes every sample text (plus `extra`) against `face` with the given
 /// knobs choosing direction, features, size, and coordinates.
+///
+/// One font shapes every text, so from its second call on it shapes with
+/// the caches it keeps. Each text is shaped with a fresh font too, which
+/// builds none, and the two must agree glyph for glyph.
 pub fn shape_samples(face: Face<'_>, knobs: &mut Knobs<'_>, extra: Option<&str>) {
     let coords = axis_coords(&face, knobs);
     let size = f32::from(knobs.byte()) + 1.0;
     // Half the time the instance comes from user-space values.
-    let font = if knobs.byte() & 1 == 1 {
-        let variations: Vec<([u8; 4], f32)> = match face.fvar() {
+    let variations: Option<Vec<([u8; 4], f32)>> =
+        (knobs.byte() & 1 == 1).then(|| match face.fvar() {
             Ok(Some(fvar)) => fvar
                 .axes()
                 .iter()
                 .map(|a| (a.tag, a.default_value + knobs.coord() * 500.0))
                 .collect(),
             _ => Vec::new(),
-        };
-        Font::new(face, size).with_variations(&variations)
-    } else {
-        Font::new(face, size).with_coords(&coords)
-    };
+        });
+    let variations = variations.as_deref();
+    let font = bind(face.clone(), size, &coords, variations);
+    let fresh = || bind(face.clone(), size, &coords, variations);
     let mut features = Vec::new();
     for _ in 0..(knobs.byte() % 6) {
         let i = usize::from(knobs.byte()) % FEATURE_TAGS.len();
@@ -147,7 +166,13 @@ pub fn shape_samples(face: Face<'_>, knobs: &mut Knobs<'_>, extra: Option<&str>)
                 // Bidi text shapes run by run, each run in its own
                 // direction, with `buffer` as the settings template.
                 let paragraph = BidiParagraph::new(text, None);
-                let _ = paragraph.shape(&font, &buffer, &features);
+                let warm = paragraph
+                    .shape(&font, &buffer, &features)
+                    .map(|run| run.glyphs);
+                let cold = paragraph
+                    .shape(&fresh(), &buffer, &features)
+                    .map(|run| run.glyphs);
+                assert_eq!(warm, cold, "a used Font shaped {text:?} unlike a fresh one");
                 buffer.set_text(text);
             }
         }
@@ -158,6 +183,8 @@ pub fn shape_samples(face: Face<'_>, knobs: &mut Knobs<'_>, extra: Option<&str>)
             _ => Direction::Btt,
         });
         let _ = buffer.script_runs();
-        let _ = shape(&font, &buffer, &features);
+        let warm = shape(&font, &buffer, &features).map(|run| run.glyphs);
+        let cold = shape(&fresh(), &buffer, &features).map(|run| run.glyphs);
+        assert_eq!(warm, cold, "a used Font shaped {text:?} unlike a fresh one");
     }
 }

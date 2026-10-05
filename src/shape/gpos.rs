@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 
 use super::attach::{self, Attach, AttachSubtable, LookupCx};
 use super::glyph_flags::FlagCx;
-use super::lazy::LazySubtables;
+use super::lazy::{LazySubtables, Subtable};
 use super::{
     feature_disabled, filter_for_lookup, resolve_extension, Feature, LookupBudget, VarCtx,
     MAX_NESTED_DEPTH,
@@ -203,9 +203,11 @@ enum PosSubtable<'a> {
     Chain(ChainContextPos<'a>),
 }
 
-impl PosSubtable<'_> {
-    /// True for a class-based context subtable, the one kind whose
-    /// matching reads [`MatchContext::rule_set_digests`].
+impl<'a> Subtable<'a> for PosSubtable<'a> {
+    fn parse(lookup: &Lookup<'a>, index: u16) -> Option<Self> {
+        parse_subtable(lookup, index)
+    }
+
     fn reads_rule_set_digests(&self) -> bool {
         matches!(
             self,
@@ -274,7 +276,7 @@ fn apply_lookup(
     if !accel.may_apply(run.iter().map(|g| g.id)) {
         return;
     }
-    let mut subtables = LazySubtables::new(lookup, parse_subtable);
+    let mut subtables = LazySubtables::new(lookup);
     let state = LookupState::new(&lookup, cx.gdef, stage.joiners, stage.index);
     // Each lookup starts with no remembered mark base, as in HarfBuzz.
     att.reset_base_cache();
@@ -338,7 +340,7 @@ fn apply_lookup_at(
     if !accel.may_have_cheaply(glyphs[at].glyph_id as u16) {
         return;
     }
-    let mut subtables = LazySubtables::new(lookup, parse_subtable);
+    let mut subtables = LazySubtables::new(lookup);
     let state = LookupState::new(&lookup, cx.gdef, joiners, lookup_index);
     let (state, accel) = (&state, &accel);
     apply_subtables_at(
@@ -375,13 +377,12 @@ fn apply_subtables_at(
 ) -> Option<usize> {
     let horizontal = att.direction.is_horizontal();
     let id = glyphs.get(at)?.glyph_id as u16;
+    // The walk only stops at glyphs the lookup's digest admits, so a
+    // lookup without digests of its own subtables admits all of them.
+    let every = accel.subtables_rule_out_nothing_more();
     for index in 0..subtables.len() {
-        if !accel.subtable_may_start(subtables.is_parsed(index), usize::from(index), id) {
-            continue;
-        }
-        let Some((sub, digests)) =
-            subtables.get_with_digests(index, PosSubtable::reads_rule_set_digests)
-        else {
+        let admits = |parsed| every || accel.subtable_may_start(parsed, usize::from(index), id);
+        let Some((sub, digests)) = subtables.get_admitted(index, admits) else {
             continue;
         };
         let mcx = &state.mcx.with_rule_set_digests(digests);
