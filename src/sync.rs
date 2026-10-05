@@ -5,9 +5,13 @@
 //! reach. [`OnceBox`] is the lock-free alternative: the first thread to
 //! need the value builds it and publishes it with one compare-and-swap.
 //! Threads that race it may build the value too, and drop theirs when
-//! they lose; every cache built here is a pure function of the font, so
-//! whichever copy wins holds the same data and shaping stays
-//! deterministic.
+//! they lose. Shaping output never depends on which copy wins: every
+//! cache built here reads the same font. Most hold the same data
+//! whichever thread builds them. The lookup accelerators are the
+//! exception: what they keep depends on the font's shared work budget
+//! when they are built, so racing threads can keep different digests
+//! (and memory and speed can follow call order), but a lookup without a
+//! digest admits every glyph, so the glyphs it applies to are the same.
 
 use alloc::boxed::Box;
 use core::fmt;

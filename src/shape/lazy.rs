@@ -16,6 +16,13 @@ use crate::tables::layout::Lookup;
 /// small lookup is applied without allocating them.
 const INLINE_SLOTS: usize = 8;
 
+/// Most room [`LazySubtables`] reserves at once for parsed subtables,
+/// once [`INLINE_SLOTS`] of them have parsed. Past it `parsed` grows by
+/// doubling. Nested lookup applications each hold their own list (up
+/// to the nesting limit at once), so room for every subtable of a huge
+/// lookup at each level held tens of MB for a walk that parsed ten.
+const MAX_RESERVED: usize = 56;
+
 /// The slot of a subtable not parsed yet.
 const UNPARSED: u32 = 0;
 /// The slot of a subtable that does not parse (the shaper drops those).
@@ -141,11 +148,11 @@ impl<'a, T: Subtable<'a>> LazySubtables<'a, T> {
         };
         if self.parsed.len() == INLINE_SLOTS {
             // A walk that has parsed this many subtables tends to parse
-            // most of them: room for all of them at once, as parsing
-            // every subtable up front took, costs less than copying the
-            // parsed ones at each doubling.
-            self.parsed
-                .reserve_exact(usize::from(self.len()) - INLINE_SLOTS);
+            // more of them: room for several more at once costs less
+            // than copying the parsed ones at each early doubling. The
+            // room is capped (see `MAX_RESERVED`).
+            let room = usize::from(self.len()) - INLINE_SLOTS;
+            self.parsed.reserve_exact(room.min(MAX_RESERVED));
         }
         self.parsed.push(parsed);
         // At most one entry per subtable, and there are at most
@@ -249,6 +256,20 @@ mod tests {
         }
     }
 
+    /// `Byte` with a size, as a parsed subtable has: a vector of a
+    /// zero-sized type reports unbounded capacity.
+    struct Wide([u8; 32]);
+
+    impl<'a> Subtable<'a> for Wide {
+        fn parse(lookup: &Lookup<'a>, index: u16) -> Option<Self> {
+            Byte::parse(lookup, index).map(|_| Wide([0; 32]))
+        }
+
+        fn reads_rule_set_digests(&self) -> bool {
+            self.0[0] == 0
+        }
+    }
+
     #[test]
     fn the_cache_rank_counts_the_subtables_that_parse_in_any_order() {
         let count = 40;
@@ -297,6 +318,39 @@ mod tests {
             subtables.reads <= bound,
             "{} subtable reads for {visits} visits, at most {bound}",
             subtables.reads
+        );
+    }
+
+    #[test]
+    fn a_walk_that_parses_a_few_subtables_holds_room_for_a_few() {
+        // A walk that parses ten subtables of a huge lookup and then
+        // stops (as each level of a lookup that applies itself again
+        // does) held room for all of them, at every nesting level. (The
+        // fixture's 16-bit offsets fit 20,000 one-byte subtables.)
+        let count = 20_000;
+        let data = lookup_list(count);
+        let list = LookupList::parse(&data).unwrap();
+        let mut subtables = LazySubtables::<Wide>::new(list.get(0).unwrap());
+        let mut parsed = 0;
+        let mut i = 0;
+        while parsed < 10 {
+            if subtables.get(i).is_some() {
+                parsed += 1;
+            }
+            i += 1;
+        }
+        let room = subtables.parsed.capacity();
+        assert!(
+            room <= INLINE_SLOTS + MAX_RESERVED,
+            "room for {room} parsed subtables after parsing {parsed}"
+        );
+        // Parsing every subtable still works past the reserved room.
+        for i in 0..count {
+            let _ = subtables.get(i);
+        }
+        assert_eq!(
+            subtables.parsed.len(),
+            (0..count).filter(|i| i % 3 != 0).count()
         );
     }
 }
