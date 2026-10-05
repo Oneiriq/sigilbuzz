@@ -270,17 +270,88 @@ fn rotation_rotates_unit_vector() {
 }
 
 #[test]
-fn sincos_pi_huge_angle_terminates() {
-    // Reduction used to subtract 2 until the angle fell below 1,
-    // which never ends for infinity or for values where x - 2 == x.
-    let (c, s) = sincos_pi(1.0e30);
-    assert_eq!((c, s), (1.0, 0.0));
-    assert!(sincos_pi(f32::INFINITY).0.is_nan());
-    assert!(sincos_pi(f32::NEG_INFINITY).1.is_nan());
-    // The remainder path agrees with the loop path, sign of zero
-    // included.
-    assert_eq!(sincos_pi(21.25), sincos_pi(1.25));
-    assert_eq!(sincos_pi(-18.0).1.to_bits(), sincos_pi(0.0).1.to_bits());
+fn sincos_holds_over_every_quadrant() {
+    // Angles in every quadrant, negative, and many turns out, against
+    // their exact sines and cosines.
+    use core::f64::consts::PI;
+    let (half, root3) = (0.5, 0.866_025_403_784_438_6);
+    let root2 = core::f64::consts::FRAC_1_SQRT_2;
+    let cases = [
+        (PI / 6.0, half, root3),
+        (PI / 4.0, root2, root2),
+        (PI / 2.0, 1.0, 0.0),
+        (2.0 * PI / 3.0, root3, -half),
+        (3.0 * PI / 4.0, root2, -root2),
+        (PI, 0.0, -1.0),
+        (7.0 * PI / 6.0, -half, -root3),
+        (3.0 * PI / 2.0, -1.0, 0.0),
+        (-3.0 * PI / 4.0, -root2, -root2),
+        (-PI / 3.0, -root3, half),
+        (100.0 * PI + PI / 3.0, root3, half),
+        (-1000.0 * PI - PI / 6.0, -half, root3),
+    ];
+    for (x, sin, cos) in cases {
+        let (s, c) = sincos_f64(x);
+        assert!(
+            (s - sin).abs() < 1e-12 && (c - cos).abs() < 1e-12,
+            "{x}: {s} {c}"
+        );
+    }
+}
+
+#[test]
+fn sincos_rounds_like_libm() {
+    // HarfBuzz takes 180 degrees as f32 π radians, a little past π, and
+    // libm's sinf of it is -8.742278e-8, which the f64 work rounds to.
+    let (s, c) = sincos(core::f32::consts::PI);
+    assert_eq!((s, c), (-8.742_278e-8, -1.0));
+    assert_eq!(sincos(0.0), (0.0, 1.0));
+    assert_eq!(tan(core::f32::consts::FRAC_PI_4), 1.0);
+}
+
+#[test]
+fn sincos_of_any_angle_terminates() {
+    // Deltas can push an angle anywhere: far out it is taken modulo 2π,
+    // and a value that is not finite gives NaN, with no loop to spin.
+    for x in [1.0e30, -3.0e38, 1.0e10, f32::MAX] {
+        let (s, c) = sincos(x);
+        assert!(
+            (-1.0..=1.0).contains(&s) && (-1.0..=1.0).contains(&c),
+            "{x}"
+        );
+    }
+    for x in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+        let (s, c) = sincos(x);
+        assert!(s.is_nan() && c.is_nan(), "{x}");
+    }
+}
+
+#[test]
+fn half_and_whole_turns_compose_as_harfbuzz_does() {
+    // 180 degrees about a center far from the origin. HarfBuzz rotates
+    // by f32 π, whose sine is -8.742278e-8, not 0, so the image of the
+    // center's opposite point is off by about 1e-4 there; the old
+    // Taylor series left sine 0.075 off at this angle.
+    let flags = VC_HAVE_ROTATION | VC_HAVE_TCENTER_X | VC_HAVE_TCENTER_Y;
+    let mut record = vec![0x80 | (flags >> 8) as u8, flags as u8, 0x00, 0x05];
+    record.extend_from_slice(&4096i16.to_be_bytes()); // rotation: one half-turn
+    record.extend_from_slice(&(-400i16).to_be_bytes());
+    record.extend_from_slice(&(-300i16).to_be_bytes());
+    let c = first(&record, None, None, &[]);
+    let t = c.components[0].transform;
+    let (s, k) = sincos(core::f32::consts::PI);
+    // translate(tcx, tcy), rotate, translate(-tcx, -tcy), in HarfBuzz's
+    // operations.
+    let mut want = Affine::IDENTITY;
+    want.translate(-400.0, -300.0);
+    want.rotate(core::f32::consts::PI);
+    want.translate(400.0, 300.0);
+    assert_eq!(t, [want.xx, want.xy, want.yx, want.yy, want.x0, want.y0]);
+    assert_eq!((t[0], t[2]), (k, s));
+    assert!(
+        (t[4] - -800.0).abs() < 1e-3 && (t[5] - -600.0).abs() < 1e-3,
+        "{t:?}"
+    );
 }
 
 /// A MultiItemVariationStore with one axis-free region (scalar 1
@@ -916,18 +987,20 @@ fn a_memo_keeps_composites_and_scalars_by_coords() {
     let table = build_varc(&[1], &[&record], Some(&mention_store(1000)), None);
     let varc = Varc::parse(&table).unwrap();
     let mut memo = VarcMemo::new();
-    let first = varc.resolve(1, &[1.0], &[], &mut memo).unwrap();
+    let first = varc.resolve(1, &[1.0], &[], &mut memo, usize::MAX).unwrap();
     // Keeping [1.0] (2), the record (1), its coords (1), the scalars
     // (1000 and one axis) and the walk (1000).
     assert_eq!(memo.work_done(), 2005);
-    let again = varc.resolve(1, &[1.0], &[], &mut memo).unwrap();
+    let again = varc.resolve(1, &[1.0], &[], &mut memo, usize::MAX).unwrap();
     assert!(Rc::ptr_eq(&first, &again));
     assert_eq!(memo.work_done(), 2005);
-    let half = varc.resolve(1, &[0.5], &[], &mut memo).unwrap();
+    let half = varc.resolve(1, &[0.5], &[], &mut memo, usize::MAX).unwrap();
     assert_eq!(half.components[0].transform[4], 500.0);
     assert_eq!(memo.work_done(), 2 * 2005);
     // A glyph VARC has no record for costs nothing.
-    assert!(varc.resolve(5, &[0.25], &[], &mut memo).is_none());
+    assert!(varc
+        .resolve(5, &[0.25], &[], &mut memo, usize::MAX)
+        .is_none());
     assert_eq!(memo.work_done(), 2 * 2005);
 }
 
@@ -974,4 +1047,21 @@ fn coords_past_harfbuzz_limit_start_from_the_font_coords() {
         .composite_with_font_coords(1, &wide[..4096], &[0.25])
         .unwrap();
     assert_eq!(c.components[0].coords.len(), 4096);
+}
+
+#[test]
+fn a_walk_reads_no_more_components_than_it_can_draw() {
+    // 100,000 three-byte components of glyph 5. A walk that can draw
+    // two more components asks for three, the third failing it, so the
+    // other 99,997 records are never read or kept.
+    let record = [0x00, 0x00, 0x05].repeat(100_000);
+    let table = build_varc(&[1], &[&record], None, None);
+    let varc = Varc::parse(&table).unwrap();
+    let mut memo = VarcMemo::new();
+    let c = varc.resolve(1, &[], &[], &mut memo, 3).unwrap();
+    assert_eq!(c.components.len(), 3);
+    // Keeping the empty coords (1) and three records (3).
+    assert_eq!(memo.work_done(), 4);
+    // Without a cap, the list holds every record.
+    assert_eq!(varc.composite(1, &[]).unwrap().components.len(), 100_000);
 }

@@ -706,16 +706,22 @@ fn push_layout_and_variation_tables(
     // are rewritten to point at the new gid namespace; the
     // MultiVarStore is pruned to the entries the kept records use. The
     // core parse only validates the table: `subset_varc` walks the raw
-    // bytes itself.
-    if face.varc()?.is_some() {
-        let varc_bytes = face.table_bytes(tag::VARC).map_err(SubsetError::from)?;
-        let lookup = |old: GlyphId| -> Option<GlyphId> {
-            let i = gid_map.binary_search_by_key(&old, |(o, _)| *o).ok()?;
-            gid_map.get(i).map(|&(_, new)| new)
-        };
-        if let Some(b) = varc::subset_varc(varc_bytes, kept, &lookup)? {
-            tables.push((tag::VARC, b));
+    // bytes itself. A VARC that does not parse counts as absent, as the
+    // face's outlines read it and as HarfBuzz drops it: it is left out
+    // with a warning, and its glyphs keep their glyf or CFF outlines.
+    match face.varc() {
+        Ok(Some(_)) => {
+            let varc_bytes = face.table_bytes(tag::VARC).map_err(SubsetError::from)?;
+            let lookup = |old: GlyphId| -> Option<GlyphId> {
+                let i = gid_map.binary_search_by_key(&old, |(o, _)| *o).ok()?;
+                gid_map.get(i).map(|&(_, new)| new)
+            };
+            if let Some(b) = varc::subset_varc(varc_bytes, kept, &lookup)? {
+                tables.push((tag::VARC, b));
+            }
         }
+        Ok(None) => {}
+        Err(_) => warnings.push(tag::VARC, 0, "VARC that does not parse", "the whole table"),
     }
     Ok(())
 }

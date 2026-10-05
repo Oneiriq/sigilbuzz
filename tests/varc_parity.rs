@@ -9,14 +9,15 @@
 //! RESET_UNSPECIFIED_AXES at the top and one level down, and an axis
 //! index past HarfBuzz's 4096-axis limit.
 //!
-//! `tests/fixtures/varc_face.ttf` has the same axes and 41 glyphs the
+//! `tests/fixtures/varc_face.ttf` has the same axes and 48 glyphs the
 //! VARC coverage names, for what the face's walk over nested composites
 //! does: reset components two and three composites down and in the
 //! middle of a chain, components that name their own glyph, cycles of
 //! two and three glyphs, a covered glyph without a record, delta sets
 //! that end early or cut a run short, conditions inside nested
-//! composites, one glyph reached many times at the same coords, and a
-//! region without axes, which applies at the default instance too.
+//! composites, one glyph reached many times at the same coords, a region
+//! without axes, which applies at the default instance too, and
+//! rotations past a quarter turn about a far center.
 //!
 //! Each `.expected` file holds HarfBuzz 14.5.0's outline of each glyph
 //! at eight locations, which every glyph must match through
@@ -249,10 +250,10 @@ fn varc_outlines_match_harfbuzz() {
 fn varc_walks_through_nested_composites_match_harfbuzz() {
     // Nested resets, self-references, cycles, a missing record, short
     // delta sets, conditions inside nested composites, regions without
-    // axes. `flatten` recurses on a glyph that names itself, so only
-    // the face's walk draws this font.
+    // axes, large rotations. `flatten` recurses on a glyph that names
+    // itself, so only the face's walk draws this font.
     assert_eq!(
         check_against_harfbuzz(FACE_FONT, FACE_EXPECTED, false),
-        41 * 8
+        48 * 8
     );
 }

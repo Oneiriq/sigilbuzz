@@ -513,6 +513,42 @@ impl<'a> Glyf<'a> {
         self.outline_with(&cx, glyph_id, None, sink)
     }
 
+    /// [`Glyf::outline_at_coords`] for a caller that draws many glyphs
+    /// for one result and bounds them together: the walk takes its
+    /// `gvar` tuple work from `work` (see [`MAX_TUPLE_WORK`]) and leaves
+    /// the rest there, and returns, with whether it drew, the glyph
+    /// records it visited and the points it laid down, which its own
+    /// caps bound. Draws into `sink` only once the whole glyph is
+    /// flattened, so a glyph that fails sends no ops.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn outline_at_coords_with_work<S: OutlineSink>(
+        &self,
+        loca: &Loca<'_>,
+        glyph_id: u16,
+        gvar: Option<&Gvar<'_>>,
+        coords: &[f32],
+        metrics: Option<&PhantomMetrics<'_>>,
+        sink: &mut S,
+        work: &mut usize,
+    ) -> Result<(bool, usize, usize)> {
+        let cx = FlattenCtx {
+            loca,
+            metrics,
+            var: Variation::new(gvar, coords),
+        };
+        let mut budget = FlattenBudget::new();
+        budget.work = (*work).min(MAX_TUPLE_WORK);
+        let flat = self.flatten_root(&cx, glyph_id, None, &mut budget);
+        *work = budget.work;
+        let visits = (MAX_FLATTEN_GLYPHS - budget.glyphs) as usize;
+        let points = MAX_FLATTEN_POINTS - budget.points;
+        let Some(flat) = flat? else {
+            return Ok((false, visits, points));
+        };
+        flat.emit(sink);
+        Ok((true, visits, points))
+    }
+
     /// The points [`Glyf::outline_at_coords`] draws `glyph_id` from,
     /// contour points on and off the curve, handed to `visit` without
     /// drawing the outline: what a box of the outline needs, since the

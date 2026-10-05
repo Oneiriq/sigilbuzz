@@ -25,7 +25,11 @@ const CFF2_STACK_LIMIT: usize = 513;
 /// the work: a subroutine that calls the next one many times, ten
 /// levels deep, runs for an exponential number of steps. Real glyphs
 /// stay far below this limit.
-const MAX_CHARSTRING_OPS: u32 = 100_000;
+pub(crate) const MAX_CHARSTRING_OPS: u32 = 100_000;
+
+/// The `context` of the error a charstring fails with past its
+/// operation limit.
+pub(crate) const OUT_OF_CHARSTRING_OPS: &str = "CFF charstring exceeds operation limit";
 
 // ----------------------------------------------------------------------------
 // Type 2 charstring interpreter.
@@ -89,8 +93,11 @@ pub(crate) struct Interp<'a, 'b, S: CharstringSink> {
     /// next move operator, endchar, or [`Self::finish`] closes it.
     in_contour: bool,
     /// Operands and operators executed so far, checked against
-    /// [`MAX_CHARSTRING_OPS`].
+    /// `ops_limit`.
     ops: u32,
+    /// [`MAX_CHARSTRING_OPS`], or less for a caller that bounds many
+    /// charstrings together (see [`Self::limit_ops`]).
+    ops_limit: u32,
     /// CFF2 blend support.
     pub(crate) blend: Option<BlendContext<'b>>,
     /// Region count and scalars for the blend context's current
@@ -170,6 +177,7 @@ impl<'a, 'b, S: CharstringSink> Interp<'a, 'b, S> {
             done: false,
             in_contour: false,
             ops: 0,
+            ops_limit: MAX_CHARSTRING_OPS,
             blend: None,
             blend_regions: None,
             seac: None,
@@ -191,6 +199,19 @@ impl<'a, 'b, S: CharstringSink> Interp<'a, 'b, S> {
         self.seac.take()
     }
 
+    /// Lowers the operation limit to `limit`, if that is below
+    /// [`MAX_CHARSTRING_OPS`]; past it the charstring fails with
+    /// [`OUT_OF_CHARSTRING_OPS`].
+    pub(crate) fn limit_ops(&mut self, limit: u32) {
+        self.ops_limit = limit.min(MAX_CHARSTRING_OPS);
+    }
+
+    /// Operands and operators executed so far, the one that crossed the
+    /// limit included.
+    pub(crate) fn ops(&self) -> u32 {
+        self.ops
+    }
+
     pub(crate) fn run(&mut self, code: &'a [u8], depth: u8) -> Result<()> {
         if depth > MAX_SUBR_DEPTH {
             return Err(Error::Malformed {
@@ -204,10 +225,10 @@ impl<'a, 'b, S: CharstringSink> Interp<'a, 'b, S> {
                 return Ok(());
             }
             self.ops += 1;
-            if self.ops > MAX_CHARSTRING_OPS {
+            if self.ops > self.ops_limit {
                 return Err(Error::Malformed {
                     offset: r.position(),
-                    context: "CFF charstring exceeds operation limit",
+                    context: OUT_OF_CHARSTRING_OPS,
                 });
             }
             let b0 = r.read_u8()?;
@@ -867,6 +888,16 @@ impl<'a, 'b, S: CharstringSink> Interp2<'a, 'b, S> {
 
     pub(crate) fn run(&mut self, code: &'a [u8], depth: u8) -> Result<()> {
         self.inner.run(code, depth)
+    }
+
+    /// See [`Interp::limit_ops`].
+    pub(crate) fn limit_ops(&mut self, limit: u32) {
+        self.inner.limit_ops(limit);
+    }
+
+    /// See [`Interp::ops`].
+    pub(crate) fn ops(&self) -> u32 {
+        self.inner.ops()
     }
 
     /// Closes the final contour. See [`Interp::finish`].

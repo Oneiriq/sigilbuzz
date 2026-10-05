@@ -175,16 +175,24 @@ impl<'a> Face<'a> {
     /// given.
     ///
     /// A glyph the font's `VARC` table covers is drawn from its
-    /// components, as HarfBuzz draws it:
+    /// components, as HarfBuzz draws it (a `VARC` table that does not
+    /// parse counts as absent, as HarfBuzz drops it):
     ///
     /// - Each component is drawn at its own coords, which start from
     ///   the coords of the glyph it belongs to, or from the font's
     ///   (`coords`) when it sets `RESET_UNSPECIFIED_AXES`, however deep
     ///   it sits.
     /// - A component that names the glyph it belongs to draws that
-    ///   glyph's `glyf` or CFF outline instead of recursing. A longer
-    ///   cycle is cut where HarfBuzz's decycler cuts it, and a covered
+    ///   glyph's `glyf` or CFF outline instead of recursing. A covered
     ///   glyph past the end of the glyph records draws nothing.
+    /// - A cycle of `n` glyphs is cut where HarfBuzz's decycler cuts it,
+    ///   `2n - 1` levels down. A cycle of more than 32 glyphs reaches
+    ///   the 64-level cap first and fails the glyph, where HarfBuzz stops
+    ///   expanding at that depth and draws the rest.
+    /// - Leaves (glyphs drawn from `glyf` or CFF) share HarfBuzz's 2^24
+    ///   glyph budget for their `gvar` and charstring work, and draw
+    ///   nothing once it runs out, as HarfBuzz's do; a leaf reached again
+    ///   at the same coords is drawn once.
     /// - At the default instance of a font with `fvar` (`coords` empty or
     ///   all zero), VARC reads one zero coord per axis, as HarfBuzz's
     ///   font holds them, so deltas from a region that constrains no
@@ -201,7 +209,7 @@ impl<'a> Face<'a> {
         coords: &[f32],
     ) -> Result<Option<Outline>> {
         let coords = f2dot14_coords(coords);
-        if let Some(varc) = self.varc()? {
+        if let Some(varc) = self.drawable_varc() {
             let mut out = Outline::new();
             if VarcDraw::new(self, &varc, &coords).draw(glyph_id, &mut out)? {
                 return Ok(Some(out));

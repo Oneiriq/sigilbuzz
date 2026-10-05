@@ -4,14 +4,21 @@
 
 use core::cell::OnceCell;
 
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use super::Face;
 use crate::error::{Error, Result};
+use crate::tables::cff::{MAX_CHARSTRING_OPS, OUT_OF_CHARSTRING_OPS};
+use crate::tables::cff2::Cff2Shared;
 use crate::tables::glyf::PhantomMetrics;
+use crate::tables::gvar::OUT_OF_TUPLE_WORK;
 use crate::tables::varc::{VarcComposite, VarcMemo};
-use crate::tables::{tag, Cff, Cff2, Glyf, Gvar, Hmtx, Loca, OutlineSink, Varc, Vmtx};
+use crate::tables::{
+    tag, Cff, Cff2, Glyf, Gvar, Hmtx, Loca, Outline, OutlineSink, PathOp, Varc, Vmtx,
+};
 
 /// Deepest a component may sit below the glyph drawn, as the `glyf`
 /// composite walk caps its depth.
@@ -43,7 +50,9 @@ const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// glyphs whose composites are being drawn, from the glyph drawn down,
 /// and a glyph that `VARC` covers is not drawn at position `k` of the
 /// path when it is the glyph at position `k / 2`, where HarfBuzz's
-/// tortoise sits.
+/// tortoise sits. That cuts a cycle of `n` glyphs `2n - 1` levels down,
+/// so one of more than 32 glyphs reaches [`MAX_VARC_DEPTH`] first, which
+/// fails the glyph where HarfBuzz stops expanding at that depth.
 pub(crate) struct VarcDraw<'w, 'a> {
     face: &'w Face<'a>,
     varc: &'w Varc<'a>,
@@ -95,7 +104,11 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
     /// cover the glyph, which is then drawn from `glyf` or CFF.
     pub(crate) fn draw<S: OutlineSink>(&mut self, glyph_id: u16, sink: &mut S) -> Result<bool> {
         let coords = &self.font_coords;
-        let Some(composite) = self.varc.resolve(glyph_id, coords, coords, &mut self.memo) else {
+        let max = self.components_left.saturating_add(1);
+        let Some(composite) = self
+            .varc
+            .resolve(glyph_id, coords, coords, &mut self.memo, max)
+        else {
             return Ok(false);
         };
         self.path.push(glyph_id);
@@ -163,20 +176,27 @@ impl<'w, 'a> VarcDraw<'w, 'a> {
                 return Ok(());
             }
             let font_coords = &self.font_coords;
-            if let Some(composite) = self.varc.resolve(gid, coords, font_coords, &mut self.memo) {
+            let max = self.components_left.saturating_add(1);
+            if let Some(composite) =
+                self.varc
+                    .resolve(gid, coords, font_coords, &mut self.memo, max)
+            {
                 self.path.push(gid);
                 let drawn = self.draw_composite(gid, &composite, transform, depth, sink);
                 self.path.pop();
                 return drawn;
             }
         }
+        let Some(leaf) = self.leaves.outline(self.face, gid, coords)? else {
+            return Ok(());
+        };
         let mut placed = Placed {
             sink,
             transform: (transform != IDENTITY).then_some(transform),
             left: self.ops_left,
             drawn: 0,
         };
-        self.leaves.draw(self.face, gid, coords, &mut placed)?;
+        replay(&leaf, &mut placed);
         self.ops_left = self
             .ops_left
             .checked_sub(placed.drawn)
@@ -272,15 +292,70 @@ impl<S: OutlineSink> OutlineSink for Placed<'_, S> {
     }
 }
 
-/// The tables the leaves of a walk are drawn from, read the first time
-/// a leaf needs them, in the order [`Face::glyph_outline_at_coords`]
-/// reads them for a glyph `VARC` does not draw, and kept for the walk.
-/// A table that fails to read fails every leaf that needs it.
-#[derive(Default)]
+/// Work the leaves of one glyph may do between them: HarfBuzz's
+/// `HB_BUDGET_GLYPH`, which its VARC walk shares with every leaf it
+/// draws. In units of: one per `gvar` tuple header and per point of
+/// each tuple decoded (as a `glyf` walk charges `gvar`), one per point a
+/// `glyf` leaf lays down and [`GLYPH_VISIT_WORK`] per glyph record it
+/// visits, [`CHARSTRING_OP_WORK`] per charstring operation, and the
+/// regions times axes of a `CFF2` variation store for each coord vector
+/// its leaves are drawn at. Past it, a leaf draws nothing, as
+/// HarfBuzz's leaves draw nothing once its budget runs out.
+const MAX_LEAF_WORK: usize = 1 << 24;
+
+/// Leaf work per glyph record a `glyf` leaf visits.
+const GLYPH_VISIT_WORK: usize = 64;
+
+/// Most ops the leaf outlines a walk keeps may hold between them. A
+/// leaf drawn past that is not kept, so drawing it again costs its work
+/// again; the walk's own op cap bounds what it draws.
+const MAX_KEPT_LEAF_OPS: usize = 1 << 18;
+
+/// Leaf work per charstring operation a CFF or `CFF2` leaf runs: about
+/// what an operation costs next to one point of one `gvar` tuple.
+const CHARSTRING_OP_WORK: usize = 8;
+
+/// A leaf outline [`Leaves`] keeps: the coords it was drawn at, as `f32`
+/// bits, and the outline, `None` when it drew nothing.
+type KeptLeaf = (Vec<u32>, Option<Rc<Outline>>);
+
+/// The leaves of a walk: the tables they are drawn from, read the first
+/// time a leaf needs them, in the order [`Face::glyph_outline_at_coords`]
+/// reads them for a glyph `VARC` does not draw, and kept for the walk
+/// (a table that fails to read fails every leaf that needs it); every
+/// leaf outline drawn so far (up to [`MAX_KEPT_LEAF_OPS`]), so a glyph
+/// reached again at the same coords is drawn once; and the work left
+/// for them.
 struct Leaves<'a> {
     tables: OnceCell<Result<LeafTables<'a>>>,
     /// Read for the first leaf away from the default instance.
     gvar: OnceCell<Result<Option<Gvar<'a>>>>,
+    /// Outlines by glyph and coords (as `f32` bits), bucketed by the
+    /// glyph and [`coords_hash`] so a lookup compares long coord
+    /// vectors once; `None` for a leaf that drew nothing. The coords
+    /// were charged to the walk's work when its components were built,
+    /// so the keys are bounded by it.
+    drawn: BTreeMap<(u16, u64), Vec<KeptLeaf>>,
+    /// What the `CFF2` leaves drawn at one coord vector share, bucketed
+    /// the same way.
+    cff2_shared: BTreeMap<u64, Vec<(Vec<u32>, Cff2Shared<'a>)>>,
+    /// See [`MAX_LEAF_WORK`].
+    work: usize,
+    /// See [`MAX_KEPT_LEAF_OPS`].
+    kept_ops_left: usize,
+}
+
+impl Default for Leaves<'_> {
+    fn default() -> Self {
+        Self {
+            tables: OnceCell::new(),
+            gvar: OnceCell::new(),
+            drawn: BTreeMap::new(),
+            cff2_shared: BTreeMap::new(),
+            work: MAX_LEAF_WORK,
+            kept_ops_left: MAX_KEPT_LEAF_OPS,
+        }
+    }
 }
 
 /// The table a face draws glyphs from without `VARC`.
@@ -297,23 +372,83 @@ enum LeafTables<'a> {
 }
 
 impl<'a> Leaves<'a> {
-    /// Draws glyph `gid` of `face` at `coords` from `glyf` or CFF, as
-    /// [`Face::glyph_outline_at_coords`] draws a glyph `VARC` does not.
-    fn draw<S: OutlineSink>(
-        &self,
+    /// The outline of glyph `gid` of `face` at `coords`, from `glyf` or
+    /// CFF as [`Face::glyph_outline_at_coords`] draws a glyph `VARC`
+    /// does not, or `None` when it has none or the leaves are out of
+    /// work. Drawn once per glyph and coords.
+    fn outline(
+        &mut self,
         face: &Face<'a>,
         gid: u16,
         coords: &[f32],
-        sink: &mut S,
-    ) -> Result<bool> {
+    ) -> Result<Option<Rc<Outline>>> {
+        let bits: Vec<u32> = coords.iter().map(|c| c.to_bits()).collect();
+        let hash = coords_hash(&bits);
+        let known = self
+            .drawn
+            .get(&(gid, hash))
+            .and_then(|bucket| bucket.iter().find(|(key, _)| *key == bits));
+        if let Some((_, outline)) = known {
+            return Ok(outline.clone());
+        }
+        let outline = self.draw(face, gid, coords, &bits, hash)?.map(Rc::new);
+        let ops = outline.as_ref().map_or(0, |o| o.len());
+        if ops <= self.kept_ops_left {
+            self.kept_ops_left -= ops;
+            let bucket = self.drawn.entry((gid, hash)).or_default();
+            bucket.push((bits, outline.clone()));
+        }
+        Ok(outline)
+    }
+
+    /// Draws a leaf [`Leaves::outline`] has not drawn yet, charging its
+    /// work. `bits` are the coords as `f32` bits, `hash` their
+    /// [`coords_hash`].
+    fn draw(
+        &mut self,
+        face: &Face<'a>,
+        gid: u16,
+        coords: &[f32],
+        bits: &[u32],
+        hash: u64,
+    ) -> Result<Option<Outline>> {
+        if self.work == 0 {
+            return Ok(None);
+        }
         let tables = self
             .tables
             .get_or_init(|| read_leaf_tables(face))
             .as_ref()
             .map_err(Clone::clone)?;
-        match tables {
-            LeafTables::Cff2(cff2) => cff2.outline(gid, coords, sink),
-            LeafTables::Cff(cff) => cff.outline(gid, sink),
+        let mut out = Outline::new();
+        let drew = match tables {
+            LeafTables::Cff2(cff2) => {
+                let bucket = self.cff2_shared.entry(hash).or_default();
+                let at = bucket.iter().position(|(key, _)| key == bits);
+                let fresh = at.is_none();
+                let at = at.unwrap_or_else(|| {
+                    bucket.push((bits.to_vec(), Cff2Shared::default()));
+                    bucket.len() - 1
+                });
+                let shared = &bucket[at].1;
+                let limit = charstring_limit(self.work);
+                let mut ops = limit;
+                let drew = cff2.outline_limited(gid, coords, shared, &mut out, &mut ops);
+                let mut cost = (limit - ops) as usize * CHARSTRING_OP_WORK;
+                if fresh {
+                    cost = cost.saturating_add(shared.scalar_work());
+                }
+                self.work = self.work.saturating_sub(cost);
+                charstring_drew(drew, limit, &mut self.work)?
+            }
+            LeafTables::Cff(cff) => {
+                let limit = charstring_limit(self.work);
+                let mut ops = limit;
+                let drew = cff.draw_limited(gid, &mut out, &mut ops);
+                let cost = (limit - ops) as usize * CHARSTRING_OP_WORK;
+                self.work = self.work.saturating_sub(cost);
+                charstring_drew(drew, limit, &mut self.work)?
+            }
             LeafTables::Glyf {
                 glyf,
                 loca,
@@ -333,8 +468,86 @@ impl<'a> Leaves<'a> {
                     hmtx,
                     vmtx: Some(vmtx),
                 };
-                glyf.outline_at_coords(loca, gid, gvar, coords, Some(&metrics), sink)
+                let mut tuple_work = self.work;
+                let drew = glyf.outline_at_coords_with_work(
+                    loca,
+                    gid,
+                    gvar,
+                    coords,
+                    Some(&metrics),
+                    &mut out,
+                    &mut tuple_work,
+                );
+                match drew {
+                    Ok((drew, visits, points)) => {
+                        let laid = visits
+                            .saturating_mul(GLYPH_VISIT_WORK)
+                            .saturating_add(points);
+                        self.work = tuple_work.saturating_sub(laid);
+                        drew
+                    }
+                    Err(Error::Malformed { context, .. }) if context == OUT_OF_TUPLE_WORK => {
+                        self.work = 0;
+                        false
+                    }
+                    Err(e) => return Err(e),
+                }
             }
+        };
+        Ok(drew.then_some(out))
+    }
+}
+
+/// Whether a CFF or `CFF2` leaf drew, from its result: a charstring
+/// stopped by the leaves' work (a `limit` below one glyph's own) draws
+/// nothing and ends the leaves' `work`; other errors fail the walk.
+fn charstring_drew(drew: Result<bool>, limit: u32, work: &mut usize) -> Result<bool> {
+    match drew {
+        Err(Error::Malformed { context, .. })
+            if context == OUT_OF_CHARSTRING_OPS && limit < MAX_CHARSTRING_OPS =>
+        {
+            *work = 0;
+            Ok(false)
+        }
+        drew => drew,
+    }
+}
+
+/// FNV-1a over the coords' `f32` bits and their count: a bucket key, so
+/// a map of long coord vectors compares them once per lookup.
+fn coords_hash(bits: &[u32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &b in bits {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash ^ bits.len() as u64
+}
+
+/// The charstring operations `work` leaf work pays for, at most one
+/// glyph's own limit.
+fn charstring_limit(work: usize) -> u32 {
+    u32::try_from(work / CHARSTRING_OP_WORK)
+        .unwrap_or(u32::MAX)
+        .min(MAX_CHARSTRING_OPS)
+}
+
+/// Sends the ops of `outline` to `sink`.
+fn replay<S: OutlineSink>(outline: &Outline, sink: &mut S) {
+    for op in outline.ops() {
+        match *op {
+            PathOp::MoveTo { x, y } => sink.move_to(x, y),
+            PathOp::LineTo { x, y } => sink.line_to(x, y),
+            PathOp::QuadTo { cx, cy, x, y } => sink.quad_to(cx, cy, x, y),
+            PathOp::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => sink.curve_to(c1x, c1y, c2x, c2y, x, y),
+            PathOp::Close => sink.close(),
         }
     }
 }
@@ -534,5 +747,62 @@ mod tests {
             |coords: &[f32]| move_xs(&face.glyph_outline_at_coords(3, coords).unwrap().unwrap());
         assert_eq!(at(&[0.0, 0.0, 0.0]), [100.0]);
         assert_eq!(at(&[0.5]), [100.0]);
+    }
+
+    /// `varc_parity.ttf` with glyph 3 made of one component per entry of
+    /// `axis0`, each naming the box (glyph 1, varied by `gvar`) with
+    /// axis 0 set to that F2DOT14 value.
+    fn boxes_at(axis0: &[i16]) -> Vec<u8> {
+        let mut record = Vec::new();
+        for &value in axis0 {
+            // HAVE_AXES, glyph 1, axis indices list 0, one i16 value.
+            record.extend_from_slice(&[0x02, 0x00, 0x01, 0x00, 0x40]);
+            record.extend_from_slice(&value.to_be_bytes());
+        }
+        let table = build_varc(&[3], &[&record], None, Some(&[&[0x00, 0x00]]));
+        with_varc(
+            include_bytes!("../../tests/fixtures/varc_parity.ttf"),
+            &table,
+        )
+    }
+
+    #[test]
+    fn a_leaf_reached_again_at_the_same_coords_is_drawn_once() {
+        // 500 boxes at one coords: the box is drawn, and its gvar work
+        // charged, once; every copy is placed from that outline.
+        let font = boxes_at(&[8192; 500]);
+        let blob = Blob::new(&font);
+        let face = Face::parse(&blob, 0).unwrap();
+        let varc = face.varc().unwrap().unwrap();
+        let mut draw = VarcDraw::new(&face, &varc, &[]);
+        let mut out = Outline::new();
+        assert!(draw.draw(3, &mut out).unwrap());
+        assert_eq!(move_xs(&out).len(), 500);
+        assert_eq!(draw.leaves.drawn.len(), 1);
+        let once = MAX_LEAF_WORK - draw.leaves.work;
+        // One box at axis 0 = 0.5 costs its 4 tuple headers, the 8
+        // points (4 and 4 phantoms) of the one tuple that holds there,
+        // one glyph visit and its 4 points.
+        assert_eq!(once, 4 + 8 + GLYPH_VISIT_WORK + 4);
+    }
+
+    #[test]
+    fn leaves_past_their_work_draw_nothing() {
+        // Three boxes at distinct coords with work for two of them: the
+        // third draws nothing and the glyph does not fail, as HarfBuzz's
+        // leaves stop once its budget runs out.
+        let font = boxes_at(&[8192, 8193, 8194]);
+        let blob = Blob::new(&font);
+        let face = Face::parse(&blob, 0).unwrap();
+        let varc = face.varc().unwrap().unwrap();
+        let mut draw = VarcDraw::new(&face, &varc, &[]);
+        draw.leaves.work = 2 * (4 + 8 + GLYPH_VISIT_WORK + 4);
+        let mut out = Outline::new();
+        assert!(draw.draw(3, &mut out).unwrap());
+        assert_eq!(move_xs(&out).len(), 2);
+        assert_eq!(draw.leaves.work, 0);
+        // With the whole budget, all three draw.
+        let all = face.glyph_outline(3).unwrap().unwrap();
+        assert_eq!(move_xs(&all).len(), 3);
     }
 }
