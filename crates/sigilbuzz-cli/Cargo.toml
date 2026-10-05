@@ -1,6 +1,6 @@
 [package]
 name = "sigilbuzz-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -18,12 +18,12 @@ path = "src/main.rs"
 
 [dependencies]
 sigilbuzz = { workspace = true }
-sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.13.0" }
-sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.3.0" }
-sigilbuzz-gpu = { path = "../sigilbuzz-gpu", version = "0.2.0" }
-sigilbuzz-svg = { path = "../sigilbuzz-svg", version = "0.3.0", features = ["color"] }
-sigilbuzz-pdf = { path = "../sigilbuzz-pdf", version = "0.3.0" }
-sigilbuzz-woff = { path = "../sigilbuzz-woff", version = "0.3.2" }
+sigilbuzz-subset = { path = "../sigilbuzz-subset", version = "0.14.0" }
+sigilbuzz-paint = { path = "../sigilbuzz-paint", version = "0.4.0" }
+sigilbuzz-gpu = { path = "../sigilbuzz-gpu", version = "0.3.0" }
+sigilbuzz-svg = { path = "../sigilbuzz-svg", version = "0.4.0", features = ["color"] }
+sigilbuzz-pdf = { path = "../sigilbuzz-pdf", version = "0.4.0" }
+sigilbuzz-woff = { path = "../sigilbuzz-woff", version = "0.3.3" }
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]

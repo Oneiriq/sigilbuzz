@@ -5,6 +5,310 @@ GitHub issues and pull requests. sigilbuzz is pre-1.0, so a minor release may ch
 the API. See [docs/STABILITY.md](docs/STABILITY.md) for what is covered by the
 stability commitment.
 
+## 0.24.0 (2026-10-05)
+
+The crates in this release: `sigilbuzz` 0.24.0, `sigilbuzz-capi` 0.5.0, `sigilbuzz-cli`
+0.3.0, `sigilbuzz-gpu` 0.3.0, `sigilbuzz-hyphen` 0.3.0, `sigilbuzz-paint` 0.4.0,
+`sigilbuzz-pdf` 0.4.0, `sigilbuzz-render` 0.11.0, `sigilbuzz-subset` 0.14.0,
+`sigilbuzz-svg` 0.4.0, `sigilbuzz-text-layout` 0.3.0, and `sigilbuzz-woff` 0.3.3.
+Companion crates that take `sigilbuzz` types in their API move with the core crate's
+minor version. `sigilbuzz-woff` exposes no `sigilbuzz` types and takes a patch release
+to require `sigilbuzz` 0.24.0. Only `sigilbuzz-paint`, `sigilbuzz-render` and
+`sigilbuzz-subset` change code of their own.
+
+Changes that can break a build, or change output with default settings, each have a
+bullet under Changed: the default cluster level, `Font::coords`,
+`MultiVarStore::resolve_deltas`, `GeneralCategoryClass`, the core crate's first `unsafe`
+code and its need for compare-and-swap atomics, VARC tables that do not parse, the JPEG
+decoder's limits, CFF2 instance output, and the work budgets that make some hostile
+fonts fail.
+
+Changed:
+
+- The default cluster level is now `MonotoneGraphemes`, HarfBuzz's default (#288, #292).
+  `ClusterLevel::default()`, and so every new `Buffer`, was `MonotoneCharacters`. Under
+  the defaults, a combining mark, a variation selector, the second regional indicator of
+  a flag, the rest of a ZWJ emoji sequence and the other characters a grapheme merges
+  now share the cluster of the character they continue, as in HarfBuzz. Glyphs and
+  positions do not change. Code that expects a cluster per character calls
+  `buffer.set_cluster_level(ClusterLevel::MonotoneCharacters)`. The C API already
+  defaulted to `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES` and is unchanged. On 554
+  cases built from known consumers' fonts and strings, clusters under the defaults now
+  match HarfBuzz 14.5.0 in all 554 (481 before).
+- `Font::coords` is now `pub fn coords(&self) -> &[f32]`: the slice borrows the font
+  instead of living for `'a`, and the method is no longer a `const fn` (#289, #295). A
+  font built with `Font::with_variations` owns its coords. Code that keeps the slice
+  after dropping the `Font` copies it first. `Font::new` is still `const`.
+- `MultiVarStore::resolve_deltas` keeps its signature but reads a delta set as one tuple
+  per region, region after region, as the spec, fontTools and HarfBuzz lay it out, and
+  ignores values past the last tuple (#291, #293). It read the values of each output in
+  turn, so a set varying two or more values over two or more regions resolved wrong. A
+  delta set that ends before it fills its tuples now adds the values it holds, as
+  HarfBuzz reads it, where it added nothing, and a run cut short ends its tuple after
+  its control byte (#296, #298). Semver tools cannot see this: a caller that encoded
+  delta sets value by value gets different numbers. VARC components of a crafted font
+  with short delta sets sat up to 100 units from HarfBuzz's.
+- `unicode::general_category::GeneralCategoryClass` has a `Symbol` class (Sc, Sk, Sm,
+  So) and is `#[non_exhaustive]`, so a `match` on it outside the crate needs a wildcard
+  arm (#288, #292). `general_category_class` returns `Some(Symbol)` for the symbols,
+  which were `None`. The table grows by 242 ranges.
+- The core crate has `unsafe` code for the first time: `OnceBox` in `src/sync.rs`, about
+  40 lines with `SAFETY` comments, modeled on `once_cell::race::OnceBox` (#289, #295).
+  It is an `AtomicPtr` set once by compare-and-swap, through which a `Font` builds its
+  caches without locks. The crate needs a target with pointer-width atomics and
+  compare-and-swap (`cfg(target_has_atomic = "ptr")`), which `alloc::sync::Arc` already
+  needed, so `thumbv6m-none-eabi` does not build, as in 0.23 (#297, #301). The crate
+  still has no dependencies and builds under `no_std`, and `Font`, `Face` and `Blob`
+  stay `Send + Sync`.
+- A `VARC` table that does not parse, such as one in the MultiItemVariationStore layout
+  HarfBuzz adopted after 14.5.0, counts as absent, as HarfBuzz 14.5.0's sanitizer drops
+  it (#296, #300). Outlines, `GlyphOutlines`, and the glyph extents shaping reads for
+  fallback mark positioning and vertical origins come from `glyf`, CFF or CFF2. Every
+  glyph of such a font used to fail to draw, shaping failed on fallback-positioned
+  marks, and vertical origins fell back to the ascender. `Face::varc` still reports the
+  error. Reading the new layout is #299.
+- `script_of` returns the bucket of a character's Unicode Script property for every
+  bucket (#288, #292). The older buckets, Latin through Modi, covered the Unicode blocks
+  of their scripts, so letters outside those blocks were `Other`: Latin Extended
+  Additional, Arabic Extended-A, -B and -C, the Arabic mathematical letters, the CJK
+  extensions past B and the compatibility ideographs, the Mongolian Supplement,
+  Devanagari Extended and others. They now take their script's bucket. The Common and
+  Inherited characters inside the blocks took the block's bucket and are now `Other`.
+  These include digits, punctuation, the space, the tatweel, the dandas and combining
+  marks, so `script_of('0')` was `Latin`. The Coptic letters of the Greek and Coptic
+  block are `Other`, not `Greek`.
+- Script runs (`Buffer::script_runs` and the segmentation of `shape`) and
+  `Buffer::guess_segment_properties` skip unassigned and private-use characters, as well
+  as Common and Inherited ones, as `hb_buffer_guess_segment_properties` does (#288,
+  #292). A private-use icon inside Latin text stays in the Latin run. The ordinal
+  indicators U+00AA and U+00BA count as Latin letters, so inside text of another script
+  they start a Latin run when the buffer has no script set.
+- The vertical default for Mongolian, used when no direction is set, applies to text
+  that starts with a Mongolian character of the Mongolian block (#288, #292). Text that
+  starts with a quotation mark, the Mongolian comma, or a letter of another script stays
+  horizontal, as HarfBuzz lays out all text with no direction. Set `Direction::Ttb` for
+  vertical Mongolian.
+- A `Font` keeps what HarfBuzz keeps per face and font, from its second shaping call on:
+  per-lookup glyph digests, so lookups and subtables that cannot apply are skipped
+  unparsed; the language system each script, language and FeatureVariations record
+  resolves to; the merged lookups of each shaping stage; and per-glyph vertical origins
+  and advances (#289, #295). One Noto Sans KR syllable shapes in about 4 us instead of
+  62, one Segoe UI character in 3 instead of 9, one Devanagari character in 13 instead
+  of 400. Clones made after a font's first call share the caches, which are thread-safe
+  without locks. A font's first call builds none of it, and subtables are parsed only
+  when a glyph reaches them there too. Output does not depend on the caches.
+- What a `Font` keeps is bounded (#295, #297, #301). For each of GSUB and GPOS: at most
+  twice the table's length plus 64 Ki subtable digests of 24 bytes, however many lookups
+  the table lists, with the lookup indices that name one lookup sharing its digests; a
+  lookup the budget cannot pay for keeps no digest and is only skipped less. The
+  language systems of at most 16 combinations of script, language and FeatureVariations
+  record per table; a run with another combination looks its features up in the font as
+  before. Three per-glyph caches of at most 4,096 four-byte entries each, whatever the
+  glyph count. A lookup of thousands of subtables costs about what it did in 0.23.1,
+  within about 10%.
+- A variable `Font` keeps each glyph's varied advance, from `HVAR`, `VVAR` or phantom
+  points, from its second call on, as HarfBuzz keeps an advance cache, so a run no
+  longer walks the variation store for every glyph of every call (#297, #301). 100
+  characters of Source Serif 4 VF at wght 700 shape left to right in 62 us instead of
+  119 us in 0.23.0, and Hahmlet at wght 700 in 22 us instead of 90 us.
+- Repeated top-to-bottom runs on one `Font` are faster than in 0.23.0: a CFF run about
+  as fast (Source Code Pro, 100 characters: 9.5 to 8.6 us), CFF2 and varied `glyf` runs
+  two to three times as fast (Source Serif 4 VF at wght 700: 77 to 24 us; Hahmlet at
+  wght 700: 67 to 20 us) (#289, #295, #297, #301). A font's first top-to-bottom call is
+  slower than in 0.23.0 for fonts without `VORG`, whose vertical origins come from glyph
+  extents since 0.23.1.
+- The Indic, Khmer, Myanmar and USE syllable grammars are compiled once per process
+  instead of once per call (#289, #295).
+- `Face::glyph_outline_at_coords` and `GlyphOutlines` draw a VARC glyph in one walk that
+  resolves each composite once per set of coords, composes transforms top down in
+  HarfBuzz's order, and draws each leaf glyph once (#291, #293, #296, #298, #300). The
+  walk shares one budget across every composite the glyph reaches: 2^20 units of work
+  for component records, axis values, condition offsets, coord vectors, region axes and
+  deltas, and 65,536 condition visits. Its leaves, the glyphs it draws from `glyf` or
+  CFF, share HarfBuzz's 2^24-unit glyph budget for their `gvar` tuple work, glyph
+  visits, points and charstring operations. Past a budget, the composite being read and
+  every later one ends and a leaf draws nothing, as in HarfBuzz, and the walk reads no
+  more component records than it can still draw. Every crafted glyph tested draws in
+  under 24 ms. The 2,048-component, 2^20-op and 64-level caps still fail the glyph with
+  `Malformed`.
+- `sigilbuzz-render` 0.11.0: `decode_jpeg` rejects a stream with a second frame (as
+  libjpeg does), a frame whose blocks outnumber eight per byte of entropy-coded scan
+  data (COM, APPn and other padding no longer count), and a frame past 2^22 pixels
+  (2048 x 2048), each as `RenderError::BadJpeg` (#291, #293). The scans of a stream may
+  visit at most 1024 coefficients per block of its frame, more than any valid script
+  needs. JPEG data in fonts is sbix glyph images, far below these limits.
+- `sigilbuzz-subset` 0.14.0: a full CFF2 instance rounds each blended value to a whole
+  unit, as HarfBuzz's flattener does, and starts each charstring at its Private DICT's
+  `vsindex` (#290, #294). Its charstrings equal HarfBuzz's, and Source Serif 4 VF at
+  wght 700 drops from 1.07 MB to 0.65 MB (its `CFF2` from 614 KB to 203 KB, HarfBuzz
+  203 KB).
+- `sigilbuzz-subset`: a CFF2 instance, full or partial, recomputes its left side
+  bearings, `head` box and `hhea` extremes from its outlines, as HarfBuzz does (#290,
+  #294). They kept the source's, so 1,375 of Source Serif 4 VF's 1,464 side bearings
+  were off at wght 700. Measuring takes time: an instance of Noto Sans KR VF (24,731
+  glyphs) takes 0.26 to 0.34 s instead of 0.16 to 0.25 s.
+- `sigilbuzz-subset`: the CFF and CFF2 subsetter runs each kept glyph through its
+  subroutine calls, as HarfBuzz's subsetter does, and fails a charstring whose
+  subroutines nest more than 10 deep or reach themselves, that stacks more than 513
+  operands, or that takes more than 64 tokens per byte of the table plus 2^22, a `blend`
+  charging a token per value it leaves (#290, #294). Its memory follows the subroutines
+  the kept glyphs reach, and the Font DICTs of a CID-keyed font that name one Private
+  DICT share one read of it. The public per-body helpers `scan_subr_calls`,
+  `compute_kept_subrs` and `renumber_charstring` are unchanged.
+- `sigilbuzz-subset`: a full CFF2 instance fails a charstring that stacks more than 513
+  operands, the CFF2 limit, and its bake charges a token per value each `blend` leaves
+  (#290, #294). Seven crafted fonts that 0.23.1 instanced now fail, four on the budget
+  and three past 513 operands; HarfBuzz's instancer drops the `CFF2` table of six of
+  them. Crafted fonts that repeat blends without regions fail the budget in under a
+  second, and real fonts spend under 2% of it.
+- `sigilbuzz-subset`: a renumbered subroutine call that does not fit its push is written
+  in its shortest form instead of failing the subset with "cannot pad operand to
+  original width", and a CFF2 subset no longer keeps every subroutine when that happens
+  (#290, #294). The Source Sans 3 VF fixture's "Hello" subset drops from 12,368 to 2,588
+  bytes.
+- `sigilbuzz-subset`: `subset` leaves out a `VARC` that does not parse, with a warning,
+  and the glyphs keep their `glyf` or CFF outlines, as the face reads them (#296, #300).
+  The whole subset failed before. The output equals the subset of the font without
+  `VARC`.
+- `sigilbuzz-cli` 0.3.0: `sigilbuzz shape` builds its buffer at the default cluster
+  level, so its `cluster=` values change as described above and now match `hb-shape`
+  (#288, #292).
+
+Added:
+
+- `Font::with_variations` binds a variable instance from user-space axis values, as
+  HarfBuzz's `hb_font_set_variations` does: each `(tag, value)` sets every axis with
+  that tag, a later pair wins, unknown tags are ignored, and the values are clamped and
+  go through `fvar` and `avar` with HarfBuzz's rounding (#289, #295). The font owns the
+  coords it computes. On 4,200 random settings over every variable font tested, the
+  coords equal HarfBuzz's.
+- `Face::glyph_outlines` returns a `GlyphOutlines` that draws many glyphs at one
+  instance with the outline tables read once, the `CFF2` table with its variation store,
+  Private DICTs and region scalars included (#289, #295). `outline` returns each glyph
+  as `Face::glyph_outline_at_coords` draws it, errors included, and `draw` streams into
+  any `OutlineSink`. Against `glyph_outline_at_coords`, a glyph of Source Serif 4 VF
+  takes about 3.7 us instead of 5.1, and one of Noto Sans KR VF 2.1 us instead of 3.0.
+- `Varc::composite_with_font_coords` resolves a VARC glyph reached through another
+  composite: its own coords and the font's are given separately, so
+  `RESET_UNSPECIFIED_AXES` components start from the font's coords (#291, #293). It
+  charges its work to the 2^20-unit budget, and it gives no components for a glyph the
+  coverage names past the end of the glyph records, which HarfBuzz draws as nothing
+  (#296, #298).
+- `sigilbuzz-subset`: `instance_user` instances a variable font at axis values in user
+  units, given by axis tag, as HarfBuzz's instancer takes them (#290, #294). `AxisLimit`
+  pins an axis at a value (clamped to its range) or at its default, keeps it, or takes a
+  HarfBuzz-style range; a range that would narrow an axis or move its default returns
+  `SubsetError::Unsupported`. Axes the input does not name are pinned at their defaults,
+  or kept with `keep_unnamed_axes`. Build the input with `UserInstanceInput::new()` and
+  its `with_` methods; both types are `#[non_exhaustive]`. Callers no longer normalize
+  each axis with `VariationAxis::normalize`, and the output equals `instance` at the
+  same normalized coordinates.
+
+Fixed:
+
+- Text whose first letter sits outside the blocks of the older script buckets shapes
+  with its script, as in HarfBuzz (#288, #292). It shaped as `Other` under `DFLT`.
+  Roboto "ỷ fi" lost the fi ligature ([1139, 4, 74, 77], where HarfBuzz gives
+  [1139, 4, 444]), the Windows 11 sans "Ựa" lost its kerning, Arabic Extended-A shaped
+  left to right with no joining in all 7 fonts tested (Tahoma U+08A0 U+0628 U+0644), and
+  a Mongolian Supplement birga lost the joining forms of the letters after it. Over
+  11,043 such texts in 30 fonts, mismatches against HarfBuzz 14.5.0 fall from 1,258 to 8
+  (Coptic, which has no bucket).
+- Text with no script-bearing character shapes left to right, as HarfBuzz's invalid
+  script does (#288, #292). Leading Arabic marks before a tatweel were reversed: Arial
+  U+064F U+064B U+0640 gave [757, 753, 752], where HarfBuzz gives [753, 757, 752].
+- The `stch` stretch (U+070F SYRIAC ABBREVIATION MARK) counts symbols (General_Category
+  Sc, Sk, Sm and So) into the word it fills, as HarfBuzz does (#288, #292). A symbol
+  ended the word, so the stretch came out short.
+- A feature list that names a tag more than once takes its last value, as HarfBuzz does:
+  `liga=0,liga=1` ligates and `kern=0,kern=1` kerns (#289, #295). Any zero entry used to
+  turn the feature off.
+- `Face::glyph_points`, which `kerx` anchors read, gives a font without `vmtx`
+  HarfBuzz's vertical phantom points, (0, yMax) and (0, yMax - unitsPerEm), as the
+  outline and bounds methods do; they were (0, 0) (#289, #295).
+- VARC records read as HarfBuzz reads them (#291, #293): ScaleY defaults to ScaleX, each
+  reserved flag bit skips one uint32var instead of ending the glyph, the axis-values
+  variation index is read without HAVE_AXES, an axis index past 4096 is ignored, an
+  out-of-range axis indices index names no axes, a 24-bit glyph id past 65535 draws
+  nothing, and the sparse region falloff follows HarfBuzz for zero peaks and invalid
+  triples.
+- VARC component axis values plus their deltas round to F2DOT14 (halves up) before they
+  become the child's coords, as in HarfBuzz (#291, #293).
+- VARC deltas apply at the default instance as HarfBuzz applies them: a variable font
+  holds a zero per axis there, so deltas from a region that constrains no axis apply,
+  and a font without `fvar` applies none (#291, #293, #296, #298).
+- VARC conditions gate components, with all five ConditionList formats and a 64-level
+  nesting limit, and a `RESET_UNSPECIFIED_AXES` component starts from the font's coords
+  at any depth, through `Face::glyph_outline_at_coords` and `GlyphOutlines` (#291, #293,
+  #296, #298). Conditions were read and ignored, and the reset was ignored.
+- A VARC component that names its own glyph draws that glyph's `glyf` or CFF outline, as
+  HarfBuzz does, instead of failing the glyph at the 64-level depth cap (#296, #298,
+  #300). Cycles of up to 32 glyphs stop where HarfBuzz's decycler stops them; a longer
+  cycle still fails at the 64-level cap. A glyph the coverage names past the glyph
+  records draws nothing, as in HarfBuzz.
+- VARC component rotations and skews are composed as HarfBuzz's `to_transform` composes
+  them, with `sinf`, `cosf` and `tanf` precision (#296, #300). A rotation past about 90
+  degrees was off: a box rotated 180 degrees about a center 500 units away landed
+  42 units from HarfBuzz's, and HarfBuzz's `varc-6868` test font drew 2 units off.
+- `morx` contextual subtables read their substitution table as the spec's unsized array
+  of offsets, so contextual substitutions apply; at the end of text they substitute only
+  after a mark was set, and then on the last glyph, and the mark starts on the first
+  glyph, as in HarfBuzz (#291, #293).
+- `morx` ligatures form as in HarfBuzz (#291, #293): a component set twice (DontAdvance)
+  counts once, so the ligature or a neighbour is no longer deleted; the ligature stays
+  on the component stack for cascading ligatures; Store or Last stores; and deleted
+  components stay in the run, in the deleted-glyph class, until every chain has run.
+- `morx` substitutions to glyph 1 apply; the lookup reader's out-of-bounds class read as
+  "no substitution" (#291, #293).
+- `sigilbuzz-render`: progressive JPEGs decode (#291, #293). The AC scans stored each
+  coefficient at its natural position and the IDCT stage mapped it through the zig-zag
+  table a second time, so any progressive sbix JPEG with AC energy decoded to the wrong
+  picture. One-component scans walked the MCU-padded block grid instead of the
+  component's own blocks (T.81 A.2.2), which misread frames that end partway through an
+  MCU, and a one-component baseline frame that declares 2x2 sampling now reads its
+  blocks the same way.
+- `sigilbuzz-render`: AC refinement scans (`Ah > 0`) decode, as T.81 G.1.2.3 and libjpeg
+  read them (#291, #293). libjpeg's default progression, which Pillow writes, uses them,
+  so no such file decoded; all 432 Pillow-written test files now decode to the same
+  pixels as their baseline twins. A DC refinement scan no longer needs a DC Huffman
+  table.
+- `sigilbuzz-paint` 0.4.0: `PaintVar*`, `VarColorStop` and clip box deltas resolve at
+  the coords rounded to F2DOT14, as HarfBuzz does and as shaping and outlines already
+  did, so varied paints no longer drift up to half a unit from HarfBuzz's and from the
+  outlines they fill (#291, #293).
+- `sigilbuzz-subset`: hinted CFF2 fonts subset (#290, #294). Blended stem hints were not
+  counted, so hint masks were misread: Source Serif 4 VF failed "Hello" and 553 of its
+  1,463 single-glyph subsets with "CFF unknown charstring operator". All of them now
+  subset and draw as the source in sigilbuzz, fontTools and HarfBuzz.
+- `sigilbuzz-subset`: a hint mask in a subroutine counts the stems its callers declared
+  (#290, #294). Hinted CFF1 fonts with masks in subroutines failed or kept the wrong
+  subroutines; across 779 CFF fonts, 2,965 of 21,650 test subsets that failed now
+  succeed, and 32 that succeeded with wrong outlines are now right.
+- `sigilbuzz-subset`: `instance` sets `OS/2.usWeightClass`, `usWidthClass` and
+  `xAvgCharWidth` and `post.italicAngle` from the pinned `wght`, `wdth` and `slnt` and
+  the instance's advances, as HarfBuzz's instancer does, rounding halves up (#290,
+  #294). They kept the source's values.
+
+Known limitations:
+
+- A `VARC` table in the MultiItemVariationStore layout HarfBuzz adopted after 14.5.0 is
+  not read; it counts as absent, as in HarfBuzz 14.5.0 (#299).
+- A fuzzed font whose GSUB grows a 30-character Devanagari text to 3,079 glyphs takes up
+  to 0.8 s to shape natively and about 24 s in a fuzz build (#302). It is not specific
+  to the new caches.
+- The caches cut the setup of each call, not the work per glyph: long runs still take 2
+  to 5 times as long per glyph as HarfBuzz (100-character runs: normalization, Hangul
+  composition, PairPos walks). A `Font` built for every run gets only the first-call
+  savings; keep one `Font` per font, size and instance to get the rest.
+- `gvar` works out each tuple's scalar over every axis for each glyph, with no
+  per-shared-tuple cache, so fonts with very many axes are slow. No real font comes
+  close, but a crafted 2,000-axis font takes 6.7 to 7.6 s to instance partially, against
+  3.7 s in HarfBuzz.
+- `sigilbuzz-subset`: a partial CFF2 instance keeps the fractional values its store
+  projection gives, where HarfBuzz rounds each folded default and projected delta.
+  Source Serif 4 VF at `wght=650,opsz=keep` comes out at 2.59 MB against HarfBuzz's
+  0.96 MB, and its default outlines differ from HarfBuzz's.
+
 ## 0.23.1 (2026-10-04)
 
 The crates in this release: `sigilbuzz` 0.23.1, `sigilbuzz-render` 0.10.1, and
